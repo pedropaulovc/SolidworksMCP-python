@@ -1,0 +1,64 @@
+name: pedro-ci
+
+# Fork-only supplementary CI. Runs on the `personal` branch and any
+# `pedro/**` topic branch. The upstream `ci.yml` workflow still runs
+# alongside this — pedro-ci is additive, not a replacement.
+#
+# Differences from upstream ci.yml:
+#   - Cross-platform matrix (Linux + Windows) — catches the Linux-CI
+#     regressions that Windows-only test runs miss (see memory:
+#     feedback_test_cross_platform).
+#   - pip-based install (faster than the upstream conda flow).
+#   - Skips the UI test tree to keep the loop tight.
+#   - Skips solidworks_only and smoke tests by default.
+
+on:
+  push:
+    branches:
+      - personal
+      - 'pedro/**'
+  pull_request:
+    branches:
+      - personal
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11']
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package (no UI extras)
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e ".[dev,test]"
+
+      - name: Lint
+        shell: bash
+        run: |
+          python -m ruff check src tests
+
+      - name: Tests (mock-only, skip UI and live SolidWorks)
+        shell: bash
+        run: |
+          python -m pytest tests/ \
+            -m "not solidworks_only and not smoke" \
+            --ignore=tests/solidworks_mcp/ui \
+            --ignore=tests/test_live_sw_regression.py \
+            -q

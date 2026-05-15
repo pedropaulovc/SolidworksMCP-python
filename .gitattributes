@@ -1,0 +1,17 @@
+# Fork divergence — paths matching these patterns always keep the local
+# (fork) version when merging upstream. See FORK.md for the full convention.
+#
+# Activation: this requires the `ours` merge driver to exist. It does not
+# ship with git; run once per clone:
+#
+#   git config --local merge.ours.driver true
+#
+# scripts/sync-upstream.ps1 sets this for you on first run.
+#
+# Without that config the patterns below behave as plain `merge` and will
+# produce conflicts normally — failure mode is safe, not silent breakage.
+
+.github/workflows/pedro-*.yml   merge=ours
+FORK.md                          merge=ours
+scripts/sync-upstream.*          merge=ours
+.claude/skills/personal/**       merge=ours
