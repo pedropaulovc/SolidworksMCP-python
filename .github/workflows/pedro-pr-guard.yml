@@ -38,6 +38,7 @@ jobs:
             ".github/workflows/pedro-*.yml"
             "scripts/sync-upstream.ps1"
             "scripts/sync-upstream.sh"
+            "scripts/provision-fork.sh"
             ".claude/skills/personal/"
           )
 

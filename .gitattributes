@@ -14,4 +14,5 @@
 .github/workflows/pedro-*.yml   merge=ours
 FORK.md                          merge=ours
 scripts/sync-upstream.*          merge=ours
+scripts/provision-fork.sh        merge=ours
 .claude/skills/personal/**       merge=ours
