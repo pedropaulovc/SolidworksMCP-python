@@ -172,8 +172,14 @@ def test_basic_entity_success_paths_register_entities() -> None:
 
 def test_spline_centerline_polygon_and_ellipse_paths() -> None:
     adapter = _FakeSketchAdapter()
+    spline_calls: list[tuple[list[float], bool]] = []
+
+    def _create_spline(points: list[float], is_closed: bool) -> object:
+        spline_calls.append((list(points), is_closed))
+        return object()
+
     adapter.currentSketchManager = SimpleNamespace(
-        CreateSpline2=lambda points, _closed, _opts: points,
+        CreateSpline2=_create_spline,
         CreateCenterLine=lambda *args: object(),
         CreatePolygon=lambda *args: object(),
         CreateEllipse=lambda *args: object(),
@@ -184,6 +190,12 @@ def test_spline_centerline_polygon_and_ellipse_paths() -> None:
     )
     assert spline_ok.is_success
     assert spline_ok.data.startswith("Spline_")
+    # CreateSpline2 must be called with the SW-spec 2-arg signature:
+    # (flattened XYZ doubles, simulateNaturalEnds=False).
+    assert len(spline_calls) == 1
+    flat_points, is_closed = spline_calls[0]
+    assert is_closed is False
+    assert flat_points == [0.0, 0.0, 0.0, 0.002, 0.001, 0.0]
 
     center_ok = sketch._add_centerline_impl(adapter, 0, 0, 10, 0)
     polygon_ok = sketch._add_polygon_impl(adapter, 0, 0, 10, 6)
@@ -201,6 +213,25 @@ def test_spline_error_when_create_returns_none() -> None:
     )
     assert result.status == AdapterResultStatus.ERROR
     assert "Failed to create spline" in (result.error or "")
+
+
+def test_spline_error_when_no_sketch_manager() -> None:
+    adapter = _FakeSketchAdapter()
+    result = sketch._add_spline_impl(
+        adapter, [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 1.0}]
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "No active sketch" in (result.error or "")
+
+
+def test_spline_error_when_too_few_points() -> None:
+    adapter = _FakeSketchAdapter()
+    adapter.currentSketchManager = SimpleNamespace(
+        CreateSpline2=lambda *args: object()
+    )
+    result = sketch._add_spline_impl(adapter, [{"x": 0.0, "y": 0.0}])
+    assert result.status == AdapterResultStatus.ERROR
+    assert "at least 2 points" in (result.error or "")
 
 
 def test_pattern_placeholders() -> None:

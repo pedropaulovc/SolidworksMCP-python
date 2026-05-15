@@ -299,6 +299,46 @@ class TestMockAdapterSuccessPaths:
         assert result.status == AdapterResultStatus.SUCCESS
         assert "Centerline" in result.data
 
+    @pytest.mark.asyncio
+    async def test_add_spline_success(self):
+        """Mock add_spline returns a Spline* id with an active sketch."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+
+        result = await adapter.add_spline(
+            [{"x": 0.0, "y": 0.0}, {"x": 5.0, "y": 2.5}, {"x": 10.0, "y": 0.0}]
+        )
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.startswith("Spline")
+        assert result.data in adapter._sketch_entity_ids
+
+    @pytest.mark.asyncio
+    async def test_add_spline_error_when_no_sketch(self):
+        """Mock add_spline returns ERROR when no sketch is open."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+
+        result = await adapter.add_spline(
+            [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 1.0}]
+        )
+        assert result.status == AdapterResultStatus.ERROR
+        assert "No active sketch" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_add_spline_error_when_too_few_points(self):
+        """Mock add_spline rejects single-point input."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+
+        result = await adapter.add_spline([{"x": 0.0, "y": 0.0}])
+        assert result.status == AdapterResultStatus.ERROR
+        assert "at least 2 points" in (result.error or "")
+
 
 # ---------------------------------------------------------------------------
 # CircuitBreakerAdapter — lines 119, 137, 165-173, 187, 197-198, 235, 367+

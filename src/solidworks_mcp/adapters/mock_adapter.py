@@ -99,9 +99,9 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         self._features: dict[str, SolidWorksFeature] = {}
         self._sketches: dict[str, str] = {}
         self._current_sketch: str | None = None
-        # Tracks IDs returned by add_line/add_circle/add_centerline/add_rectangle
-        # so add_sketch_constraint can validate entity1/entity2 the same way
-        # the real adapter validates against its sketch-entity registry.
+        # Tracks IDs returned by add_line/add_circle/add_centerline/add_rectangle/
+        # add_spline so add_sketch_constraint can validate entity1/entity2 the
+        # same way the real adapter validates against its sketch-entity registry.
         self._sketch_entity_ids: set[str] = set()
         self._dimensions: dict[str, float] = {}
         self._operation_count = 0
@@ -868,6 +868,38 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
             data=centerline_id,
+            execution_time=self._delays["sketch_operation"] / 2,
+        )
+
+    async def add_spline(self, points: list[dict[str, float]]) -> AdapterResult[str]:
+        """Mock adding a NURBS spline through the supplied points.
+
+        Args:
+            points (list[dict[str, float]]): Ordered control points with
+                ``"x"`` / ``"y"`` keys. Minimum 2 points.
+
+        Returns:
+            AdapterResult[str]: The result produced by the operation.
+        """
+        if not self._current_sketch:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active sketch"
+            )
+        if len(points) < 2:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="add_spline requires at least 2 points",
+            )
+
+        await asyncio.sleep(self._delays["sketch_operation"] / 2)
+        self._operation_count += 1
+
+        spline_id = f"Spline{random.randint(1000, 9999)}"
+        self._sketch_entity_ids.add(spline_id)
+
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=spline_id,
             execution_time=self._delays["sketch_operation"] / 2,
         )
 
