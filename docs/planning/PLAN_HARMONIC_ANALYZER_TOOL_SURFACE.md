@@ -155,8 +155,6 @@ to [#20][i20])**.
 
 ## Phase 0 — Wire existing stubs (closes upstream [#4][i4])
 
-Estimated effort: 1 day.
-
 This phase is identical in scope to upstream issue [#4][i4]
 (`feat(adapter): implement sweep and loft COM operations`). The
 adapter stubs at `pywin32_adapter.py` ~L1052 currently return
@@ -187,8 +185,6 @@ covers a single profile-pair loft (cone-gear-like tapered bevel) plus
 a circular profile swept along a helical path (spring-like).
 
 ## Phase 1 — Part-level feature primitives
-
-Estimated effort: 1-2 weeks.
 
 **Depends on upstream issue [#5][i5].** The sketch primitives the harmonic
 analyzer relies on (`add_arc`, `add_spline`, `sketch_circular_pattern`,
@@ -234,8 +230,6 @@ live-integration test in `tests/test_live_sw_regression.py` gated by
 
 ## Phase 2 — Reference geometry
 
-Estimated effort: 3-5 days.
-
 Required to lay out the 20-channel array (datum planes per channel,
 axes through gear shafts).
 
@@ -255,8 +249,6 @@ Verification: build a 20-axis fixture (planes offset 1" apart) in
 mock and live.
 
 ## Phase 3 — Parametric variant generation
-
-Estimated effort: 1 week.
 
 The 20 cone gears differ only in tooth count (6, 12, 18, … 120).
 Without this phase, the part must be regenerated 20 times. With it:
@@ -287,7 +279,7 @@ add 20 configurations programmatically; rebuild each and verify
 
 ## Phase 4 — Manufacturing prep
 
-Estimated effort: 3-5 days. Can be parallelized with Phase 3.
+Can be parallelized with Phase 3.
 
 Touches: new `tools/manufacturing.py`, adapters; register in
 `tools/__init__.py`.
@@ -306,8 +298,6 @@ mass matches manual calculation within 1%.
 
 ## Phase 5 — Measurement
 
-Estimated effort: 1-2 days.
-
 `check_interference` and `get_mass_properties` exist; dimensional
 measurement does not.
 
@@ -322,13 +312,12 @@ confirm tolerance < 1e-6 m.
 
 ## Phase 6 — Assembly surface
 
-Estimated effort: 2 weeks. Ships last, after every part type is
-modelable.
+Ships last, after every part type is modelable.
 
 Touches: new `tools/assembly.py`, adapters; register in
 `tools/__init__.py`.
 
-### 6A — Component management (3-5 days)
+### 6A — Component management
 
 - [ ] `insert_component` — `IAssemblyDoc.AddComponent5`. Inputs:
   component file path, optional config name, target position.
@@ -341,7 +330,7 @@ Touches: new `tools/assembly.py`, adapters; register in
   instancing for the 20-channel array, the cylinder-gear row, fastener
   rings.
 
-### 6B — Standard mates (1 week)
+### 6B — Standard mates
 
 - [ ] `add_mate` — single tool with `mate_type` enum: coincident,
   concentric, perpendicular, parallel, tangent, distance, angle, lock,
@@ -349,7 +338,7 @@ Touches: new `tools/assembly.py`, adapters; register in
   entity selections, mate type, optional value, optional alignment flag.
 - [ ] `delete_mate`, `list_mates`, `suppress_mate`.
 
-### 6C — Mechanical mates (3-5 days)
+### 6C — Mechanical mates
 
 - [ ] `add_gear_mate` — `IAssemblyDoc.AddMate3` with `swMateGEAR`.
   Required for the 4:1 crank reduction and every cone/cylinder gear
