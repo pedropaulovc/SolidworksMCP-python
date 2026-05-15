@@ -78,17 +78,8 @@ relationships are:
 
 **Direct overlap — this plan closes or extends these issues:**
 
-- **[#4][i4] — `feat(adapter): implement sweep and loft COM operations`.** This
-  is exactly Phase 0 of this plan. The maintainer specifies
-  `IFeatureManager::InsertProtrusionSweep2` and `InsertProtrusionBlend2`
-  with the parameter schemas `SweepParameters` / `LoftParameters`
-  already defined in `src/solidworks_mcp/adapters/base.py` L250-L284.
-  Phase 0 below has been updated to match. Note: this issue also implies
-  matching `@mcp.tool` registrations in `tools/modeling.py` that don't
-  exist today — the schema there (`CreateSweepInput`,`CreateLoftInput`)
-  is registered as a Pydantic model but never decorated as a tool.
 - **[#5][i5] — `feat(adapter): implement missing sketch primitive COM calls`.**
-  **Hard prerequisite for this entire plan.** Five sketch primitives
+  **Closed by Phase 0 of this plan.** Five sketch primitives
   (`add_arc`, `add_spline`, `add_centerline`, `add_polygon`,
   `add_ellipse`) and four sketch operations (`sketch_linear_pattern`,
   `sketch_circular_pattern`, `sketch_mirror`, `sketch_offset`) are
@@ -97,8 +88,18 @@ relationships are:
   harmonic-analyzer part except the simple bar uses at least one of
   these (eccentric cam needs `add_arc`, involute gear teeth need
   `add_spline` or the new `create_equation_driven_curve`, the
-  20-channel layout needs `sketch_circular_pattern`). **Issue [#5][i5] must
-  land before Phase 1 of this plan is usable end-to-end.**
+  20-channel layout needs `sketch_circular_pattern`). Folded into
+  this plan so the harmonic-analyzer build is self-contained and
+  doesn't block on a separate upstream issue.
+- **[#4][i4] — `feat(adapter): implement sweep and loft COM operations`.**
+  Closed by Phase 1 of this plan. The maintainer specifies
+  `IFeatureManager::InsertProtrusionSweep2` and `InsertProtrusionBlend2`
+  with the parameter schemas `SweepParameters` / `LoftParameters`
+  already defined in `src/solidworks_mcp/adapters/base.py` L250-L284.
+  Phase 1 below has been updated to match. Note: this issue also implies
+  matching `@mcp.tool` registrations in `tools/modeling.py` that don't
+  exist today — the schema there (`CreateSweepInput`,`CreateLoftInput`)
+  is registered as a Pydantic model but never decorated as a tool.
 - **[#6][i6] — `fix(service): replace mocked interference check`.** The
   service layer in `src/solidworks_mcp/ui/service.py` ~L1245
   special-cases `check_interference` and returns `"mocked"` even
@@ -106,7 +107,9 @@ relationships are:
   adapter. The end-to-end verification step in this plan
   ("`check_interference` reports zero between channels") depends on
   [#6][i6] landing first when driven through the UI checkpoint executor.
-  Direct MCP tool calls are unaffected.
+  Direct MCP tool calls are unaffected. The fix is a single special-case
+  removal; happy to include it as a one-line PR alongside Phase 0 if
+  preferred.
 
 **Strategic complementarity — these issues become more valuable as this plan ships:**
 
@@ -118,7 +121,7 @@ relationships are:
   becomes a strong demonstration artifact for SoC.
 - **[#8][i8] — `feat(agents): SQLite workflow database MVP`.** The session
   replay capability is exercised by the cone-gear-with-20-configurations
-  workflow (Phase 3 deliverable). Each configuration switch can be a
+  workflow (Phase 4 deliverable). Each configuration switch can be a
   logged operation.
 
 **Unaffected by this plan:**
@@ -127,9 +130,10 @@ relationships are:
   context) — orthogonal to the tool-surface gaps addressed here.
 
 This plan therefore augments the existing issue backlog rather than
-replacing it. The recommended landing order is: **[#5][i5] → [#4][i4] → Phase 0-6
-of this plan (some sub-phases of which directly close [#4][i4] and contribute
-to [#20][i20])**.
+replacing it. The recommended landing order is: **Phase 0 (closes [#5][i5])
+→ Phase 1 (closes [#4][i4]) → Phases 2-7 (build on those foundations and
+contribute to [#20][i20])**. No prerequisite work on the maintainer's side
+is required before Phase 0 can ship.
 
 ## Existing infrastructure to reuse
 
@@ -153,7 +157,63 @@ to [#20][i20])**.
   (`analysis.py:127,225,246`); `manage_design_table`
   (`automation.py:505`); `add_spline` (`sketching.py:803`).
 
-## Phase 0 — Wire existing stubs (closes upstream [#4][i4])
+## Phase 0 — Sketch primitives and operations (closes upstream [#5][i5])
+
+Foundation for every subsequent phase. Nine sketch methods are
+currently stubs returning `"not implemented"` or placeholder IDs;
+the harmonic analyzer can't be built without them, and every later
+phase that consumes sketches (Phase 1 sweep/loft profiles, Phase 2
+feature operations) can't be exercised on live SolidWorks until
+they land. Tool-layer `@mcp.tool` registrations for all nine
+already exist in `tools/sketching.py`; this phase is purely
+adapter and mock-adapter wiring.
+
+Touches: `adapters/pywin32_adapter.py`, `adapters/mock_adapter.py`,
+tests.
+
+Sketch primitives (5):
+
+- [ ] `add_arc` — `ISketchManager::CreateArc(centerX, centerY, 0,
+  startX, startY, 0, endX, endY, 0, dir)`. Required for eccentric
+  cam profiles.
+- [ ] `add_spline` — `ISketchManager::CreateSpline2(points_array,
+  False)` with flat `[x, y, z, ...]` coordinate array. Required
+  for involute gear teeth before `create_equation_driven_curve`
+  lands in Phase 4.
+- [ ] `add_centerline` — `ISketchManager::CreateCenterLine(x1, y1,
+  0, x2, y2, 0)`. Required for revolves and symmetric-constraint
+  anchors.
+- [ ] `add_polygon` — `ISketchManager::CreatePolygon(centerX,
+  centerY, 0, radius, sides, True)`. Required for bolt-hole rings
+  on the platen.
+- [ ] `add_ellipse` — `ISketchManager::CreateEllipse(centerX,
+  centerY, 0, majorAxis, 0, 0, 0, minorAxis, 0)`.
+
+Sketch operations (4):
+
+- [ ] `sketch_linear_pattern` —
+  `ISketchManager::CreateLinearSketchStepAndRepeat(...)`.
+- [ ] `sketch_circular_pattern` —
+  `ISketchManager::CreateCircularSketchStepAndRepeat(...)`. Required
+  for the 20-channel layout.
+- [ ] `sketch_mirror` — `ISketchManager::SketchMirror(...)`.
+- [ ] `sketch_offset` — `ISketchManager::SketchOffset2(distance,
+  reverse, True, True, False, 0)`.
+
+Reference implementation pattern: existing `add_line` at
+`pywin32_adapter.py` ~L1680. Each method guards `currentSketchManager`
+and returns a descriptive `ERROR` when no active sketch exists.
+
+Verification (matches issue [#5][i5] acceptance criteria):
+no-sketch-manager guard returns `ERROR`; mock adapter returns
+non-error stub strings for all nine; unit tests cover both
+branches for each method; `dev-test` passes on Linux CI; one live
+regression test per method on Windows.
+
+Out of scope (per [#5][i5]): `add_sketch_constraint`,
+`add_sketch_dimension`, 3D sketch variants.
+
+## Phase 1 — Wire existing stubs (closes upstream [#4][i4])
 
 This phase is identical in scope to upstream issue [#4][i4]
 (`feat(adapter): implement sweep and loft COM operations`). The
@@ -184,13 +244,7 @@ returns descriptive error; mock-adapter returns success; live test
 covers a single profile-pair loft (cone-gear-like tapered bevel) plus
 a circular profile swept along a helical path (spring-like).
 
-## Phase 1 — Part-level feature primitives
-
-**Depends on upstream issue [#5][i5].** The sketch primitives the harmonic
-analyzer relies on (`add_arc`, `add_spline`, `sketch_circular_pattern`,
-etc.) are tool-layer registered but adapter-layer unimplemented. None
-of the features in this phase are useful for the consumer project
-until [#5][i5] has landed.
+## Phase 2 — Part-level feature primitives
 
 Needed before any harmonic-analyzer part beyond simple bars and discs
 can be modeled.
@@ -228,7 +282,7 @@ Verification: for each tool, a mock-adapter unit test plus one
 live-integration test in `tests/test_live_sw_regression.py` gated by
 `SOLIDWORKS_MCP_RUN_REAL_INTEGRATION=1`.
 
-## Phase 2 — Reference geometry
+## Phase 3 — Reference geometry
 
 Required to lay out the 20-channel array (datum planes per channel,
 axes through gear shafts).
@@ -248,7 +302,7 @@ the file grows large), adapters.
 Verification: build a 20-axis fixture (planes offset 1" apart) in
 mock and live.
 
-## Phase 3 — Parametric variant generation
+## Phase 4 — Parametric variant generation
 
 The 20 cone gears differ only in tooth count (6, 12, 18, … 120).
 Without this phase, the part must be regenerated 20 times. With it:
@@ -277,9 +331,9 @@ Verification: model one cone-gear part with a `ToothCount` global;
 add 20 configurations programmatically; rebuild each and verify
 `get_mass_properties` returns 20 monotonically increasing volumes.
 
-## Phase 4 — Manufacturing prep
+## Phase 5 — Manufacturing prep
 
-Can be parallelized with Phase 3.
+Can be parallelized with Phase 4.
 
 Touches: new `tools/manufacturing.py`, adapters; register in
 `tools/__init__.py`.
@@ -296,7 +350,7 @@ Touches: new `tools/manufacturing.py`, adapters; register in
 Verification: assign a known material to a sample part; mass-property
 mass matches manual calculation within 1%.
 
-## Phase 5 — Measurement
+## Phase 6 — Measurement
 
 `check_interference` and `get_mass_properties` exist; dimensional
 measurement does not.
@@ -310,14 +364,14 @@ Touches: `tools/analysis.py`, adapters.
 Verification: live test — extrude a known block, measure each edge,
 confirm tolerance < 1e-6 m.
 
-## Phase 6 — Assembly surface
+## Phase 7 — Assembly surface
 
 Ships last, after every part type is modelable.
 
 Touches: new `tools/assembly.py`, adapters; register in
 `tools/__init__.py`.
 
-### 6A — Component management
+### 7A — Component management
 
 - [ ] `insert_component` — `IAssemblyDoc.AddComponent5`. Inputs:
   component file path, optional config name, target position.
@@ -330,7 +384,7 @@ Touches: new `tools/assembly.py`, adapters; register in
   instancing for the 20-channel array, the cylinder-gear row, fastener
   rings.
 
-### 6B — Standard mates
+### 7B — Standard mates
 
 - [ ] `add_mate` — single tool with `mate_type` enum: coincident,
   concentric, perpendicular, parallel, tangent, distance, angle, lock,
@@ -338,7 +392,7 @@ Touches: new `tools/assembly.py`, adapters; register in
   entity selections, mate type, optional value, optional alignment flag.
 - [ ] `delete_mate`, `list_mates`, `suppress_mate`.
 
-### 6C — Mechanical mates
+### 7C — Mechanical mates
 
 - [ ] `add_gear_mate` — `IAssemblyDoc.AddMate3` with `swMateGEAR`.
   Required for the 4:1 crank reduction and every cone/cylinder gear
@@ -356,10 +410,10 @@ gears via `pattern_components_circular`.
 
 ## Critical files modified
 
-- `src/solidworks_mcp/tools/modeling.py` — Phases 0, 1, 2, 3 additions.
-- `src/solidworks_mcp/tools/analysis.py` — Phase 5 (`measure`).
-- `src/solidworks_mcp/tools/manufacturing.py` — Phase 4 (new file).
-- `src/solidworks_mcp/tools/assembly.py` — Phase 6 (new file).
+- `src/solidworks_mcp/tools/modeling.py` — Phases 1, 2, 3, 4 additions.
+- `src/solidworks_mcp/tools/analysis.py` — Phase 6 (`measure`).
+- `src/solidworks_mcp/tools/manufacturing.py` — Phase 5 (new file).
+- `src/solidworks_mcp/tools/assembly.py` — Phase 7 (new file).
 - `src/solidworks_mcp/tools/__init__.py` — register new tool modules
   (currently lines 9-48).
 - `src/solidworks_mcp/adapters/pywin32_adapter.py` — adapter methods
@@ -383,16 +437,16 @@ unaffected.
    `tests/test_live_sw_regression.py`.
 3. Drive a complete harmonic-analyzer build from MCP tool calls only
    (no manual SolidWorks work, no C# Interop):
-   - **After Phase 1+2:** every distinct part type (amplitude bar,
+   - **After Phase 2+3:** every distinct part type (amplitude bar,
      eccentric cam, summing lever, rocker-arm support, harmonic base,
      spur gear) modeled via MCP only.
-   - **After Phase 3:** one cone-gear part with a `ToothCount` global
+   - **After Phase 4:** one cone-gear part with a `ToothCount` global
      and 20 configurations; `get_mass_properties` returns 20 distinct
      monotonically increasing masses.
-   - **After Phase 4:** materials applied, BOM CSV exported.
-   - **After Phase 5:** measurement-based verification gate in the
+   - **After Phase 5:** materials applied, BOM CSV exported.
+   - **After Phase 6:** measurement-based verification gate in the
      agent loop catches dimensional drift before machining.
-   - **After Phase 6:** assembly file with crank, cone-gear set,
+   - **After Phase 7:** assembly file with crank, cone-gear set,
      cylinder-gear set, and one full channel (cam → rocker arm →
      amplitude bar → summing lever); the gear mate visibly transmits
      motion when the crank is rotated; `check_interference` reports
@@ -400,27 +454,27 @@ unaffected.
 
 ## Open questions for upstream
 
-1. **Sequencing relative to existing issues.** Issue [#5][i5] is a hard
-   prerequisite for the consumer project. Should Phase 0 of this plan
-   wait on [#5][i5], ship in parallel, or land first as an independent
-   contribution? Proposing parallel: Phase 0 (sweep/loft, closes [#4][i4])
-   is independent of [#5][i5] and unblocks separate workflows.
-2. **File organization.** Should reference geometry live in
+1. **File organization.** Should reference geometry live in
    `modeling.py` or a new `reference_geometry.py`? Same question for
-   parametrics (Phase 3) — in `modeling.py` or a new `parametrics.py`?
+   parametrics (Phase 4) — in `modeling.py` or a new `parametrics.py`?
    Either works; the project's preference governs.
-3. **Hole wizard standard coverage.** `HoleWizard5` supports many
+2. **Hole wizard standard coverage.** `HoleWizard5` supports many
    standards (ANSI, ISO, JIS, BSI, etc.). For initial scope, propose
    ANSI inch + ISO metric only; expand on request.
-4. **Mock-adapter fidelity for mates.** The mock currently returns
+3. **Mock-adapter fidelity for mates.** The mock currently returns
    canned responses. For assembly mates, should the mock track
    inserted components and applied mates in an in-memory model to
    enable richer test assertions, or stay stateless? Stateless is
    simpler; stateful enables more realistic agent-loop tests.
-5. **Versioning.** These additions roughly double the tool count
-   (~22 tools across 6 phases). Worth a minor-version bump on first
-   phase merge, or wait until Phase 6 lands? Suggest minor bump per
+4. **Versioning.** These additions roughly triple the tool count
+   (~31 tools across 8 phases). Worth a minor-version bump on first
+   phase merge, or wait until Phase 7 lands? Suggest minor bump per
    phase for visibility.
+5. **Bundling [#6][i6] with Phase 0.** Closing [#6][i6] (mocked
+   interference check) is a small service-layer fix that would
+   remove the only remaining upstream dependency from the
+   end-to-end verification path. Happy to bundle it into the
+   Phase 0 PR if preferred, or ship as a standalone follow-up.
 6. **SoC integration ([#20][i20]).** Should each new tool include a
    companion "render to clean Python" snippet for the SoC exporter
    in the same PR, or defer SoC integration to a follow-up sweep
