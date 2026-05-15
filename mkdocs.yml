@@ -81,6 +81,7 @@ nav:
       - UI Refactor Assessment: planning/REFACTOR_UI_ASSESSMENT.md
       - Runtime Operations and Observability Plan: planning/PLAN_RUNTIME_OPERATIONS_AND_OBSERVABILITY.md
       - Tree Read Tools Plan: planning/PLAN_TREE_READ_TOOLS.md
+      - Harmonic Analyzer Tool Surface Plan: planning/PLAN_HARMONIC_ANALYZER_TOOL_SURFACE.md
       - Architecture Analysis (Snapshot): planning/ARCHITECTURE_ANALYSIS.md
       - Architecture Alignment Report (Snapshot): planning/ARCHITECTURE_ALIGNMENT_REPORT.md
       - Documentation Assessment (2026-05-11): planning/DOCUMENTATION_ASSESSMENT_2026-05-11.md
