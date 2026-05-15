@@ -1,10 +1,10 @@
 # Sync upstream into the fork: fast-forward `main`, then merge into
 # `personal`. See FORK.md for the branch model.
 #
-# Remote naming note: in this clone `origin` points at the upstream
-# maintainer's repo and `fork` points at the personal fork. That is the
-# inverse of the usual convention; the variables below isolate the
-# difference so the script is portable.
+# Remote convention (standard):
+#   origin   = your fork (push target)
+#   upstream = the parent repo (read-only)
+# Adjust the variables below if your remotes use different names.
 #
 # Usage:
 #   .\scripts\sync-upstream.ps1
@@ -13,8 +13,8 @@
 
 $ErrorActionPreference = "Stop"
 
-$UpstreamRemote = "origin"
-$ForkRemote = "fork"
+$UpstreamRemote = "upstream"
+$ForkRemote = "origin"
 $MainBranch = "main"
 $PersonalBranch = "personal"
 

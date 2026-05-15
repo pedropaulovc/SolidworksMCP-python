@@ -27,15 +27,25 @@ Rule of thumb:
 
 ## Remote naming
 
-This clone uses an inverted convention versus the usual fork setup:
+Standard fork convention:
 
 ```
-origin = https://github.com/andrewbartels1/SolidworksMCP-python.git  (upstream)
-fork   = https://github.com/pedropaulovc/SolidworksMCP-python.git    (this fork)
+origin   = https://github.com/pedropaulovc/SolidworksMCP-python.git    (this fork)
+upstream = https://github.com/andrewbartels1/SolidworksMCP-python.git  (parent repo)
 ```
 
-The sync script isolates these names in variables so it stays portable if
-you ever rename them.
+`origin` is your push target. `upstream` is read-only — you fetch from
+it via the sync script. If you previously had `origin` pointing at the
+parent repo (a non-standard convention), run:
+
+```powershell
+git remote rename origin upstream
+git remote rename fork origin
+```
+
+The sync script isolates the remote names in variables, so if you
+deliberately use a different convention you only need to edit the top
+of `scripts/sync-upstream.*`.
 
 ## What lives on `personal` (and is not meant to go upstream)
 
@@ -65,7 +75,7 @@ git checkout main
 .\scripts\sync-upstream.ps1                    # bring main up to date
 git checkout -b feat/your-thing                # off main, not personal
 # ...edit, commit...
-git push fork feat/your-thing
+git push origin feat/your-thing
 gh pr create --repo andrewbartels1/SolidworksMCP-python `
     --base main --head pedropaulovc:feat/your-thing
 ```
@@ -82,9 +92,9 @@ leak into the PR.
 
 The script:
 
-1. Fetches upstream.
-2. Fast-forwards `main` to `origin/main` and pushes to `fork/main`.
-3. Merges `main` into `personal` and pushes to `fork/personal`.
+1. Fetches `upstream`.
+2. Fast-forwards `main` to `upstream/main` and pushes to `origin/main`.
+3. Merges `main` into `personal` and pushes to `origin/personal`.
 4. Returns you to your starting branch.
 
 It refuses to run if the working tree is dirty.
@@ -95,8 +105,6 @@ It refuses to run if the working tree is dirty.
 git clone https://github.com/pedropaulovc/SolidworksMCP-python.git
 cd SolidworksMCP-python
 git remote add upstream https://github.com/andrewbartels1/SolidworksMCP-python.git
-# If your `origin` already points at the upstream maintainer's repo, that's
-# fine — adjust the variables at the top of scripts/sync-upstream.* to match.
 git fetch --all
 git config --local merge.ours.driver true   # activates .gitattributes merge=ours
 git checkout personal
