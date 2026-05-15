@@ -1,0 +1,72 @@
+name: pedro-pr-guard
+
+# Guard: fail CI if a branch intended for an upstream PR carries fork-only
+# files. Catches the "I branched off `personal` instead of `main`" mistake
+# before the diff leaks private skills, sync scripts, or pedro-* CI into
+# an upstream-bound PR.
+#
+# Trigger: any push that's NOT to `main`, `personal`, or `pedro/**`.
+# By convention every other branch (`feat/...`, `fix/...`, `docs/...`)
+# is upstream-bound, so it must not touch fork-only paths.
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - personal
+      - 'pedro/**'
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for fork-only paths in branch diff vs main
+        run: |
+          set -euo pipefail
+
+          # Paths that must never appear in an upstream-bound branch.
+          PRIVATE_GLOBS=(
+            "FORK.md"
+            ".gitattributes"
+            ".github/workflows/pedro-*.yml"
+            "scripts/sync-upstream.ps1"
+            "scripts/sync-upstream.sh"
+            ".claude/skills/personal/"
+          )
+
+          # Diff against origin/main rather than upstream/main: the fork's
+          # main is the user's contract with upstream. The pedro-sync-upstream
+          # workflow keeps the two in sync.
+          BASE="origin/main"
+          git fetch --no-tags origin main:refs/remotes/origin/main
+
+          FAIL=0
+          for glob in "${PRIVATE_GLOBS[@]}"; do
+            hits=$(git diff --name-only "$BASE"...HEAD -- "$glob" || true)
+            if [[ -n "$hits" ]]; then
+              echo "::error::Branch touches fork-only path '$glob':"
+              echo "$hits" | sed 's/^/    /'
+              FAIL=1
+            fi
+          done
+
+          if [[ $FAIL -eq 1 ]]; then
+            cat <<'EOF'
+          ::error::
+          ::error::This branch contains fork-only content (FORK.md, pedro-*.yml, etc.).
+          ::error::If you intended to send this upstream, you probably branched off `personal`
+          ::error::instead of `main`. See FORK.md "How to send a PR upstream".
+          ::error::To suppress this check, rename the branch to start with `pedro/`.
+          ::error::
+          EOF
+            exit 1
+          fi
+
+          echo "OK — no fork-only paths in branch diff."

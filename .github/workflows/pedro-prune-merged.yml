@@ -1,0 +1,108 @@
+name: pedro-prune-merged
+
+# Weekly cleanup: delete branches whose tip is reachable from upstream/main.
+# Protected branches (main, personal, pedro/**, docs/**) are never touched.
+# Branches with an open PR are skipped.
+#
+# Dry-run by default on the scheduled run — set the manual-trigger input to
+# `delete` if you want a one-off real run.
+
+on:
+  schedule:
+    - cron: '23 10 * * 1'   # Monday 10:23 UTC
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dry-run or delete'
+        required: true
+        default: 'dry-run'
+        type: choice
+        options: [dry-run, delete]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: pedro-prune-merged
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    env:
+      # Scheduled runs always dry-run. Manual runs honor the input.
+      MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'dry-run' }}
+    steps:
+      - name: Checkout (no working tree needed)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "pedro-sync-bot"
+          git config user.email "pedro-sync-bot@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/andrewbartels1/SolidworksMCP-python.git
+          git fetch upstream main
+          git fetch origin
+
+      - name: Identify and delete merged branches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          PROTECT_RE='^(main|personal|pedro/|docs/)'
+          UPSTREAM=$(git rev-parse upstream/main)
+
+          # Branches with open PRs (any base) should not be deleted.
+          mapfile -t OPEN_PR_HEADS < <(gh pr list --state open --json headRefName --jq '.[].headRefName')
+
+          is_open_pr() {
+            local b=$1
+            for h in "${OPEN_PR_HEADS[@]:-}"; do
+              [[ "$b" == "$h" ]] && return 0
+            done
+            return 1
+          }
+
+          DELETED=0
+          KEPT=0
+
+          # Iterate origin branches except HEAD and the protected set.
+          for ref in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin/); do
+            branch=${ref#origin/}
+            [[ "$branch" == "HEAD" ]] && continue
+            if [[ "$branch" =~ $PROTECT_RE ]]; then
+              echo "protected: $branch"
+              KEPT=$((KEPT+1))
+              continue
+            fi
+            if is_open_pr "$branch"; then
+              echo "has-open-pr: $branch"
+              KEPT=$((KEPT+1))
+              continue
+            fi
+
+            tip=$(git rev-parse "origin/$branch")
+            if git merge-base --is-ancestor "$tip" "$UPSTREAM"; then
+              if [[ "$MODE" == "delete" ]]; then
+                echo "deleting: $branch ($tip)"
+                git push origin --delete "$branch"
+              else
+                echo "dry-run delete: $branch ($tip)"
+              fi
+              DELETED=$((DELETED+1))
+            else
+              echo "unmerged: $branch ($tip)"
+              KEPT=$((KEPT+1))
+            fi
+          done
+
+          echo
+          echo "Summary: mode=$MODE  candidates=$DELETED  kept=$KEPT"
