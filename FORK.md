@@ -49,6 +49,10 @@ of `scripts/sync-upstream.*`.
 
 ## What lives on `personal` (and is not meant to go upstream)
 
+- `scripts/provision-fork.sh` — idempotent provisioner for repo
+  settings + branch/tag rulesets (modeled on
+  `pedropaulovc/typescript-project/scripts/provision-repo.sh`). Run
+  once after fork creation, re-run any time the policy needs updating.
 - `.github/workflows/pedro-*.yml` — fork-only automation, namespaced so
   it never collides with upstream additions:
     - `pedro-ci.yml` — cross-platform mock-only tests on `personal` and
