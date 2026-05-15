@@ -1,0 +1,57 @@
+name: pedro-sync-upstream
+
+# Daily auto-sync from upstream into this fork.
+#
+#   1. Fast-forward `main` to `upstream/main` and push.
+#   2. Merge `main` into `personal` and push.
+#
+# Idempotent. Fails loudly if either step would lose data:
+#   - main fast-forward fails  -> main has diverged from upstream; manual fix needed
+#   - personal merge conflicts -> resolve locally, then push
+#
+# Equivalent to running scripts/sync-upstream.ps1 locally.
+
+on:
+  schedule:
+    - cron: '17 9 * * *'   # 09:17 UTC daily — off-peak, avoids the top-of-hour stampede
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pedro-sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main with full history
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "pedro-sync-bot"
+          git config user.email "pedro-sync-bot@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/andrewbartels1/SolidworksMCP-python.git
+          git fetch upstream main
+
+      - name: Fast-forward main to upstream/main
+        run: |
+          git merge --ff-only upstream/main
+          git push origin main
+
+      - name: Merge main into personal
+        run: |
+          git fetch origin personal
+          git checkout personal
+          git merge --no-edit main
+          git push origin personal

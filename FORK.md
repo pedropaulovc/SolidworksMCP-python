@@ -49,10 +49,20 @@ of `scripts/sync-upstream.*`.
 
 ## What lives on `personal` (and is not meant to go upstream)
 
-- `.github/workflows/pedro-*.yml` — supplementary CI tailored to this
-  fork's needs (cross-platform mock-only tests, lint, skip UI tests).
-  Files matching `pedro-*` are namespaced so they never collide with
-  upstream additions.
+- `.github/workflows/pedro-*.yml` — fork-only automation, namespaced so
+  it never collides with upstream additions:
+    - `pedro-ci.yml` — cross-platform mock-only tests on `personal` and
+      `pedro/**`.
+    - `pedro-sync-upstream.yml` — daily auto-sync of `upstream/main`
+      into `origin/main` and `origin/personal`. Equivalent to running
+      `scripts/sync-upstream.ps1` locally.
+    - `pedro-prune-merged.yml` — weekly dry-run that lists branches
+      whose tip is reachable from `upstream/main` and has no open PR;
+      manual trigger with `mode=delete` to actually delete.
+    - `pedro-pr-guard.yml` — runs on push to any non-personal branch;
+      fails if the diff vs `main` touches fork-only paths. Catches
+      "I branched off `personal` instead of `main`" before it ships
+      private content to an upstream PR.
 - `.claude/skills/personal/` — private Claude skills specific to this
   project. Skills that aren't project-specific should live at
   `~/.claude/skills/` instead, outside this repo entirely.
