@@ -1155,6 +1155,78 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             execution_time=self._delays["sketch_operation"] / 2,
         )
 
+    async def sketch_circular_pattern(
+        self,
+        entities: list[str],
+        center_x: float,
+        center_y: float,
+        angle: float,
+        count: int,
+    ) -> AdapterResult[str]:
+        """Mock creating a circular sketch pattern.
+
+        Args:
+            entities (list[str]): Seed entity IDs.
+            center_x (float): Pattern centre X in millimetres.
+            center_y (float): Pattern centre Y in millimetres.
+            angle (float): Total swept angle in degrees.
+            count (int): Total number of instances (including the seed).
+
+        Returns:
+            AdapterResult[str]: The result produced by the operation.
+        """
+        if not self._current_sketch:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active sketch"
+            )
+        if not entities:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="sketch_circular_pattern requires at least one entity",
+            )
+        if count < 2:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="sketch_circular_pattern requires count >= 2",
+            )
+        if angle <= 0:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="sketch_circular_pattern requires angle > 0",
+            )
+        # Mirror the real adapter — CreateCircularSketchStepAndRepeat
+        # cannot honour a non-origin pattern centre without selecting a
+        # separate sketch point as the rotation axis.
+        if center_x != 0.0 or center_y != 0.0:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=(
+                    "circular pattern center must be (0, 0) — non-origin "
+                    "centers not yet supported by SW API"
+                ),
+            )
+        for ent in entities:
+            if ent not in self._sketch_entity_ids:
+                return AdapterResult(
+                    status=AdapterResultStatus.ERROR,
+                    error=(
+                        f"Unknown sketch entity '{ent}'. Use IDs returned by "
+                        "add_line/add_arc/add_circle/add_spline/add_centerline."
+                    ),
+                )
+
+        await asyncio.sleep(self._delays["sketch_operation"] / 2)
+        self._operation_count += 1
+
+        pattern_id = (
+            f"CircularPattern_{count}x{angle}deg_{random.randint(1000, 9999)}"
+        )
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=pattern_id,
+            execution_time=self._delays["sketch_operation"] / 2,
+        )
+
     async def add_sketch_constraint(
         self,
         entity1: str,
