@@ -171,33 +171,31 @@ async def build_demo_part(out_dir: Path) -> dict[str, str]:
         _check("exit_sketch (decorative)", await adapter.exit_sketch())
 
         # ------------------------------------------------------------------
-        # Persist + screenshot
+        # Persist + screenshot — both promised by the script docstring and
+        # the PR test plan, so a failure here is a real demo failure, not
+        # a warning.  ``_check`` raises which propagates back to ``main()``
+        # and returns a non-zero exit code.
         # ------------------------------------------------------------------
         part_path = (out_dir / "phase0_demo.SLDPRT").resolve()
-        save = await adapter.save_file(str(part_path))
-        if save.is_error:
-            print(f"  WARN save_file: {save.error}")
-        else:
-            print(f"  OK  save_file -> {part_path}")
+        _check(f"save_file -> {part_path}", await adapter.save_file(str(part_path)))
 
         img_path = (out_dir / "phase0_demo.png").resolve()
-        img = await adapter.export_image(
-            {
-                "file_path": str(img_path),
-                "format_type": "png",
-                "width": 1600,
-                "height": 1000,
-                "view_orientation": "isometric",
-            }
+        _check(
+            f"export_image -> {img_path}",
+            await adapter.export_image(
+                {
+                    "file_path": str(img_path),
+                    "format_type": "png",
+                    "width": 1600,
+                    "height": 1000,
+                    "view_orientation": "isometric",
+                }
+            ),
         )
-        if img.is_error:
-            print(f"  ERR export_image: {img.error}")
-        else:
-            print(f"  OK  export_image -> {img_path}")
 
         return {
             "part": str(part_path),
-            "screenshot": str(img_path) if img.is_success else "",
+            "screenshot": str(img_path),
         }
     finally:
         try:
