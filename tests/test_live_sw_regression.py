@@ -501,3 +501,50 @@ async def test_add_arc_no_active_sketch_returns_error(connected_adapter) -> None
         assert "No active sketch" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- add_polygon live regression ----
+
+
+async def test_add_polygon_creates_real_polygon(connected_adapter) -> None:
+    """End-to-end check that add_polygon creates a real polygon in SW.
+
+    Regression: ``ISketchManager::CreatePolygon`` requires eight arguments
+    ``(XC, YC, Zc, Xp, Yp, Zp, Sides, Inscribed)``. The May-10 mixin refactor
+    only forwarded six, so every call raised ``"Parameter not optional."``
+    at the COM boundary. This test locks in the full eight-arg shape plus
+    the mm-to-m unit conversion.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        polygon = await adapter.add_polygon(
+            center_x=0.0, center_y=0.0, radius=15.0, sides=6
+        )
+        assert polygon.is_success, f"add_polygon failed: {polygon.error}"
+        assert polygon.data.startswith("Polygon_6sided_"), (
+            f"unexpected polygon id: {polygon.data!r}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_polygon_no_active_sketch_returns_error(connected_adapter) -> None:
+    """Calling add_polygon without an open sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.add_polygon(0.0, 0.0, 15.0, 6)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
