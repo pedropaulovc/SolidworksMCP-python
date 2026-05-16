@@ -764,8 +764,11 @@ def _add_polygon_impl(
         sides: Number of polygon sides.  SolidWorks accepts 3–40.
 
     Returns:
-        AdapterResult[str]: On success, ``data`` is a descriptive timestamped
-        ID (e.g. ``"Polygon_6sided_1234"``).  On failure, ``status`` is
+        AdapterResult[str]: On success, ``data`` is the registered entity ID
+        (e.g. ``"Polygon_3"``).  The ID is stored in
+        ``adapter._sketch_entities`` so it can be passed back to
+        ``sketch_linear_pattern`` / ``sketch_circular_pattern`` /
+        ``sketch_mirror`` / ``sketch_offset``.  On failure, ``status`` is
         ``ERROR``.
 
     Raises:
@@ -777,7 +780,7 @@ def _add_polygon_impl(
         result = pywin32_sketch_ops.add_polygon(
             adapter, center_x=0, center_y=0, radius=15.0, sides=6
         )
-        print(result.data)  # "Polygon_6sided_4321"
+        print(result.data)  # "Polygon_3"
     """
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
@@ -786,7 +789,7 @@ def _add_polygon_impl(
         """Inner COM closure that calls CreatePolygon.
 
         Returns:
-            str: Descriptive timestamped ID for the polygon.
+            str: Registered entity ID for the polygon (e.g. ``"Polygon_3"``).
 
         Raises:
             Exception: If ``CreatePolygon`` returns ``None``.
@@ -803,7 +806,11 @@ def _add_polygon_impl(
         )
         if not polygon:
             raise Exception("Failed to create polygon")
-        return f"Polygon_{sides}sided_{int(time.time() * 1000) % 10000}"
+        # Register so the returned ID is usable by sketch_linear_pattern,
+        # sketch_circular_pattern, sketch_mirror, and sketch_offset — without
+        # this the polygon string is opaque and every downstream op fails
+        # with "Unknown sketch entity 'Polygon_*'".
+        return cast(str, adapter._register_sketch_entity("Polygon", polygon))
 
     return cast(
         AdapterResult[str],
@@ -1376,9 +1383,26 @@ def _select_sketch_entities(adapter: Any, entity_ids: list[str], mark: int) -> N
                 f"Unknown sketch entity '{ent_id}'. Use IDs returned by "
                 "add_line/add_arc/add_circle/add_spline/add_centerline."
             )
-        ok = entity.Select4(True, select_data)
-        if not ok:
-            raise Exception(f"Failed to select sketch entity '{ent_id}'")
+        # ``ISketchManager::CreatePolygon`` returns the polygon's edges as
+        # a SAFEARRAY, which pywin32 unmarshals to a tuple of
+        # ``ISketchSegment`` handles — there is no single COM object to
+        # ``Select4`` on.  Treat any iterable (tuple/list) as a group of
+        # segments and select each, so a polygon ID can flow into
+        # sketch_linear_pattern / sketch_circular_pattern / sketch_mirror /
+        # sketch_offset the same as any other entity.  Single-segment
+        # entities (lines, arcs, splines, ellipses, centerlines) keep the
+        # original Select4 path.
+        if isinstance(entity, (list, tuple)):
+            for segment in entity:
+                ok = segment.Select4(True, select_data)
+                if not ok:
+                    raise Exception(
+                        f"Failed to select segment of sketch entity '{ent_id}'"
+                    )
+        else:
+            ok = entity.Select4(True, select_data)
+            if not ok:
+                raise Exception(f"Failed to select sketch entity '{ent_id}'")
 
 
 def _sketch_linear_pattern_impl(
@@ -1619,10 +1643,39 @@ def _sketch_circular_pattern_impl(
                 _sw_type_info = None  # type: ignore[assignment]
 
             first_entity = adapter._sketch_entities.get(entities[0])
+
+            # ``CreatePolygon`` registers a SAFEARRAY of segment handles as a
+            # tuple (the same group-entity quirk the selector handles); the
+            # seed-center lookup below assumes a single dispatch with
+            # ``GetCenterPoint`` and would silently fall back to the 1 mm
+            # placeholder radius for a polygon seed, producing a bogus
+            # pattern at the wrong radius.  Reject with a clear message
+            # rather than build a broken pattern — supporting polygon seeds
+            # requires either a per-entity center cache at register time or
+            # a centroid walk over the polygon's segments, neither of which
+            # is in scope for issue #1.
+            if isinstance(first_entity, (list, tuple)):
+                raise Exception(
+                    "sketch_circular_pattern does not yet support polygon "
+                    "seeds — the radius cannot be derived from the segment "
+                    "tuple. Use a circle, arc, or ellipse seed for now."
+                )
+
             seed_xy: tuple[float, float] | None = None
             if first_entity is not None and _sw_type_info is not None:
+                # GetCenterPoint lives on multiple sketch-entity interfaces
+                # (ISketchArc for arcs/circles, ISketchEllipse for ellipses),
+                # all with the same zero-arg signature. Flag every interface
+                # we might encounter so the lookup works regardless of seed
+                # type — without this, an ellipse seed silently resolves
+                # GetCenterPoint as a property and the pattern is laid out
+                # at a bogus 1 mm radius.
                 adapter._attempt(
-                    lambda: _sw_type_info.flag_methods(first_entity, "ISketchArc"),
+                    lambda: _sw_type_info.flag_methods(
+                        first_entity,
+                        "ISketchArc",
+                        "ISketchEllipse",
+                    ),
                     default=0,
                 )
                 point = adapter._attempt(lambda: first_entity.GetCenterPoint())
@@ -1644,6 +1697,15 @@ def _sketch_circular_pattern_impl(
             else:
                 arc_radius_mm = 0.0
                 arc_angle_rad = math.pi
+
+            # ``CreateCircularSketchStepAndRepeat`` silently returns False on
+            # negative ``ArcAngle`` values — the bundled VBA/C# examples all
+            # pass positive radians (e.g. ``4.732863934409`` ≈ 271°).  Python's
+            # ``atan2`` produces ``-π`` for a seed on the +X axis (because
+            # ``-seed_xy[1]`` is ``-0.0``), which is geometrically equivalent
+            # to ``+π`` but fails the COM call.  Normalise to ``[0, 2π)``.
+            if arc_angle_rad < 0:
+                arc_angle_rad += 2.0 * math.pi
 
             # 1 mm minimum keeps SW from silently rejecting the call when
             # the seed sits right on the pattern centre.
@@ -1883,53 +1945,120 @@ def _sketch_offset_impl(
 
 
 def _exit_sketch_impl(adapter: Any) -> AdapterResult[None]:
-    """Exit the current sketch editing mode and return to the part/assembly context.
+    """Exit any sketch-edit mode the active model is in and reset adapter state.
 
-    Calls ``SketchManager.InsertSketch(True)`` which toggles the sketch editor
-    off.  After the call succeeds, ``adapter.currentSketch``,
-    ``adapter.currentSketchManager``, and the sketch entity registry are all
-    cleared.
+    The previous implementation trusted ``adapter.currentSketchManager`` —
+    a Python-side handle populated only by ``create_sketch`` on **this**
+    adapter instance.  A fresh adapter pointing at a SolidWorks process
+    that already has a sketch open (from a crashed prior run, an
+    aborted automation, or a manual user edit) would report
+    ``WARNING: "No active sketch to exit"`` while SW was still sitting
+    in sketch-edit mode — and every subsequent ``create_sketch`` then
+    failed with ``Failed to select plane: Front Plane`` because SW
+    can't open a new sketch while one is already active.
+
+    Now queries ``IModelDoc2.GetActiveSketch2`` to find out what SW
+    actually has open, and toggles ``SketchManager.InsertSketch(True)``
+    when either SW or the adapter thinks a sketch is in edit mode.
+    Adapter-side state is always cleared on success.
 
     Args:
-        adapter: A ``PyWin32Adapter`` that is currently in sketch-edit mode
-            (``currentSketchManager`` must be non-``None``).
+        adapter: A ``PyWin32Adapter`` with a non-``None`` ``currentModel``.
 
     Returns:
-        AdapterResult[None]: On success, ``status`` is ``SUCCESS`` and
-        ``data`` is ``None``.  When no sketch is active, ``status`` is
-        ``WARNING`` (not an error, already exited).
+        AdapterResult[None]: On success, ``status`` is ``SUCCESS``.
+        When neither SW nor the adapter has an active sketch,
+        ``status`` is ``WARNING`` (already-exited is not a failure).
+        When ``currentModel`` is ``None``, returns ``ERROR``.
 
     Raises:
-        Exception: Propagated through ``_handle_com_operation`` when the COM
-            call raises unexpectedly.
+        Exception: Propagated through ``_handle_com_operation`` when the
+            ``InsertSketch`` call itself raises.
 
     Example::
 
         pywin32_sketch_ops.add_line(adapter, 0, 0, 50, 0)
         pywin32_sketch_ops.exit_sketch(adapter)
-        # adapter.currentSketch is now None
+        # adapter.currentSketch is now None and SW is out of sketch-edit mode
     """
-    if not adapter.currentSketchManager:
+    if adapter.currentModel is None:
+        # No document means nothing can be in sketch-edit mode either.
+        # Match the legacy "already exited" semantics so cleanup callers
+        # that fire exit_sketch defensively don't see spurious errors.
         return AdapterResult(
-            status=AdapterResultStatus.WARNING, error="No active sketch to exit"
+            status=AdapterResultStatus.WARNING,
+            error="No active sketch to exit",
         )
 
-    def _exit_operation() -> None:
-        """Inner COM closure that toggles the sketch editor off and clears state.
+    def _exit_operation() -> str:
+        try:
+            from .. import sw_type_info as _sw_type_info
+        except ImportError:
+            _sw_type_info = None  # type: ignore[assignment]
 
-        Returns:
-            None: Always returns ``None`` on success.
-        """
-        adapter.currentSketchManager.InsertSketch(True)
+        # ``GetActiveSketch2`` is a real zero-arg method on IModelDoc2.
+        # Without flagging, pywin32 late binding resolves it as a property
+        # and SW returns ``Member not found`` — the same root cause as
+        # the cross-thread bugs in runbook #5.
+        if _sw_type_info is not None:
+            adapter._attempt(
+                lambda: _sw_type_info.flag_methods(
+                    adapter.currentModel, "IModelDoc2"
+                ),
+                default=0,
+            )
+
+        sw_active = adapter._attempt(
+            lambda: adapter.currentModel.GetActiveSketch2()
+        )
+        adapter_active = adapter.currentSketchManager
+
+        # Already out of sketch-edit mode — clean up adapter state so a
+        # future create_sketch starts from a known-good baseline, then
+        # warn.  Using ``data`` to signal "no_op" lets callers tell the
+        # difference between "I exited a sketch" and "nothing was open".
+        if sw_active is None and adapter_active is None:
+            return "no_active_sketch"
+
+        # Prefer the adapter's SketchManager handle when available (it was
+        # captured at create_sketch time on the executor thread, so it's
+        # apartment-safe); fall back to a fresh ``currentModel.SketchManager``
+        # for the SW-only state case.
+        sketch_manager = adapter_active or adapter.currentModel.SketchManager
+        if _sw_type_info is not None:
+            adapter._attempt(
+                lambda: _sw_type_info.flag_methods(
+                    sketch_manager, "ISketchManager"
+                ),
+                default=0,
+            )
+        sketch_manager.InsertSketch(True)
         adapter.currentSketch = None
         adapter.currentSketchManager = None
         adapter._reset_sketch_entity_registry()
-        return None
+        return "exited"
 
-    return cast(
+    result = cast(
         AdapterResult[str],
         adapter._handle_com_operation("exit_sketch", _exit_operation),
     )
+    # Translate "no sketch was open" into a WARNING so callers that branch
+    # on ``is_error`` still treat already-exited as benign.  ``data`` is
+    # the operation tag; ``error`` carries the human message.
+    if result.is_success and result.data == "no_active_sketch":
+        return cast(
+            AdapterResult[None],
+            AdapterResult(
+                status=AdapterResultStatus.WARNING,
+                error="No active sketch to exit",
+            ),
+        )
+    if result.is_success:
+        return cast(
+            AdapterResult[None],
+            AdapterResult(status=AdapterResultStatus.SUCCESS, data=None),
+        )
+    return cast(AdapterResult[None], result)
 
 
 def _check_sketch_fully_defined_impl(
