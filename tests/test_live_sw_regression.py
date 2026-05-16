@@ -1164,6 +1164,138 @@ async def test_sketch_mirror_rejects_unknown_mirror_line(
         await adapter.close_model(save=False)
 
 
+# ---- sketch_offset live regression ----
+
+
+async def test_sketch_offset_creates_real_offset(connected_adapter) -> None:
+    """End-to-end geometric check that sketch_offset creates a parallel
+    copy of a line at the requested distance, and that
+    ``reverse_direction`` flips the offset side.
+
+    Empirically (probed against SW 2026) the conventions for a
+    horizontal line are:
+
+    * ``reverse_direction=False`` ("outward") → copy sits at ``y - offset``
+    * ``reverse_direction=True``  ("inward")  → copy sits at ``y + offset``
+
+    The earlier ``is_success``-only assertion would have let a
+    regression that produced no copy, a copy on the wrong side, or a
+    copy at the wrong distance pass silently. This test reads all
+    sketch lines back and asserts each expected (source, offset) pair
+    is present.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        # Outward offset of a horizontal line at y=0.
+        src1_y, off1, reverse1 = 0.0, 5.0, False
+        l1 = await adapter.add_line(0.0, src1_y, 50.0, src1_y)
+        assert l1.is_success
+        outward = await adapter.sketch_offset([l1.data], off1, reverse1)
+        assert outward.is_success, f"sketch_offset outward failed: {outward.error}"
+        assert outward.data.startswith("Offset_5.0_outward_"), (
+            f"unexpected outward offset id: {outward.data!r}"
+        )
+
+        # Inward offset of a separate horizontal line at y=20.
+        src2_y, off2, reverse2 = 20.0, 3.0, True
+        l2 = await adapter.add_line(0.0, src2_y, 50.0, src2_y)
+        assert l2.is_success
+        inward = await adapter.sketch_offset([l2.data], off2, reverse2)
+        assert inward.is_success, f"sketch_offset inward failed: {inward.error}"
+        assert inward.data.startswith("Offset_3.0_inward_"), (
+            f"unexpected inward offset id: {inward.data!r}"
+        )
+
+        from solidworks_mcp.adapters import sw_type_info
+
+        active_sketch = adapter.currentModel.GetActiveSketch2()
+        sw_type_info.flag_methods(active_sketch, "ISketch")
+        segments = active_sketch.GetSketchSegments()
+
+        # 2 sources + 2 offsets = 4 line segments, no construction.
+        assert len(segments) == 4, (
+            f"expected 4 segments (2 sources + 2 offsets), got {len(segments)}"
+        )
+
+        observed_ys: set[float] = set()
+        for seg in segments:
+            for iface in ("ISketchSegment", "ISketchLine"):
+                sw_type_info.flag_methods(seg, iface)
+            assert seg.GetType() == 0, (
+                f"unexpected segment type {seg.GetType()} (offset should "
+                "produce a line copy of a line)"
+            )
+            assert seg.ConstructionGeometry is False, (
+                "sketch_offset must not convert segments to construction "
+                "geometry by default"
+            )
+            sp = seg.GetStartPoint2()
+            ep = seg.GetEndPoint2()
+            ys = {round(sp.Y * 1000.0, 3), round(ep.Y * 1000.0, 3)}
+            assert len(ys) == 1, f"non-horizontal line at {sp.Y}/{ep.Y}"
+            observed_ys.add(next(iter(ys)))
+
+        expected_ys = {
+            src1_y,
+            src1_y - off1 if not reverse1 else src1_y + off1,
+            src2_y,
+            src2_y - off2 if not reverse2 else src2_y + off2,
+        }
+        assert observed_ys == expected_ys, (
+            f"observed line y-values {sorted(observed_ys)} != "
+            f"expected {sorted(expected_ys)}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_offset_no_active_sketch_returns_error(
+    connected_adapter,
+) -> None:
+    """Calling sketch_offset without a sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.sketch_offset(["Line_1"], 5.0, False)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_offset_rejects_non_positive_distance(
+    connected_adapter,
+) -> None:
+    """A non-positive distance must produce a clear error without touching
+    SW selection state."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+        l1 = await adapter.add_line(0.0, 0.0, 50.0, 0.0)
+        assert l1.is_success
+
+        bad = await adapter.sketch_offset([l1.data], 0.0, False)
+        assert bad.is_error
+        assert "offset_distance > 0" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
 # ---- add_centerline live regression ----
 
 

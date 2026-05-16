@@ -648,6 +648,68 @@ class TestMockAdapterSuccessPaths:
         assert result.status == AdapterResultStatus.ERROR
         assert "Unknown mirror_line entity" in (result.error or "")
 
+    @pytest.mark.asyncio
+    async def test_sketch_offset_outward_success(self):
+        """Mock sketch_offset returns Offset_*_outward_* with reverse=False."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        line = await adapter.add_line(0.0, 0.0, 50.0, 0.0)
+
+        result = await adapter.sketch_offset([line.data], 5.0, False)
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.startswith("Offset_5.0_outward_")
+
+    @pytest.mark.asyncio
+    async def test_sketch_offset_inward_success(self):
+        """Mock sketch_offset returns Offset_*_inward_* with reverse=True."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        line = await adapter.add_line(0.0, 20.0, 50.0, 20.0)
+
+        result = await adapter.sketch_offset([line.data], 3.0, True)
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.startswith("Offset_3.0_inward_")
+
+    @pytest.mark.asyncio
+    async def test_sketch_offset_error_when_no_sketch(self):
+        """Mock sketch_offset returns ERROR when no sketch is open."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+
+        result = await adapter.sketch_offset(["Line1"], 5.0, False)
+        assert result.status == AdapterResultStatus.ERROR
+        assert "No active sketch" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_sketch_offset_input_validation(self):
+        """Empty entities / non-positive distance / unknown entity each error."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        line = await adapter.add_line(0.0, 0.0, 50.0, 0.0)
+
+        result = await adapter.sketch_offset([], 5.0, False)
+        assert result.status == AdapterResultStatus.ERROR
+        assert "at least one entity" in (result.error or "")
+
+        result = await adapter.sketch_offset([line.data], 0.0, False)
+        assert result.status == AdapterResultStatus.ERROR
+        assert "offset_distance > 0" in (result.error or "")
+
+        result = await adapter.sketch_offset([line.data], -1.0, False)
+        assert result.status == AdapterResultStatus.ERROR
+        assert "offset_distance > 0" in (result.error or "")
+
+        result = await adapter.sketch_offset(["Bogus_42"], 5.0, False)
+        assert result.status == AdapterResultStatus.ERROR
+        assert "Unknown sketch entity" in (result.error or "")
+
 
 # ---------------------------------------------------------------------------
 # Real (PyWin32) circular pattern impl — fake SketchManager unit tests
