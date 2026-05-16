@@ -1019,6 +1019,151 @@ async def test_sketch_circular_pattern_rejects_unknown_entity(
         await adapter.close_model(save=False)
 
 
+# ---- sketch_mirror live regression ----
+
+
+async def test_sketch_mirror_reflects_lines_about_centerline(
+    connected_adapter,
+) -> None:
+    """End-to-end geometric check that sketch_mirror produces a real
+    reflection about a registered centreline.
+
+    Regressions guarded against:
+
+    1. ``IModelDoc2::SketchMirror`` is invoked with no arguments and
+       returns void — it consumes the active selection.  Sketch
+       segments must be selected under mark **1** and the centerline
+       under mark **2** or SW silently no-ops.
+    2. The shared ``_select_sketch_entities`` helper handles per-mark
+       selection through ``ISelectionMgr.CreateSelectData`` (which
+       requires ``sw_type_info`` flagging — see the linear-pattern
+       test for that regression).
+
+    The check below asserts the **actual mirrored geometry**, not just
+    the return code. With a vertical centerline at x=0 and N source
+    lines at positive X, we expect to find each line plus its
+    x-negated twin in the active sketch.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        # Vertical centreline at x=0, lines to the right of it.
+        sources = [
+            (5.0, 0.0, 25.0, 0.0),
+            (5.0, 10.0, 25.0, 10.0),
+        ]
+        cl = await adapter.add_centerline(0.0, -30.0, 0.0, 30.0)
+        lines = []
+        for x1, y1, x2, y2 in sources:
+            r = await adapter.add_line(x1, y1, x2, y2)
+            assert r.is_success, f"add_line failed: {r.error}"
+            lines.append(r)
+        assert cl.is_success, f"add_centerline failed: {cl.error}"
+
+        mirror = await adapter.sketch_mirror([ln.data for ln in lines], cl.data)
+        assert mirror.is_success, f"sketch_mirror failed: {mirror.error}"
+        assert mirror.data.startswith(f"Mirror_{cl.data}_"), (
+            f"unexpected mirror id: {mirror.data!r}"
+        )
+
+        from solidworks_mcp.adapters import sw_type_info
+
+        active_sketch = adapter.currentModel.GetActiveSketch2()
+        sw_type_info.flag_methods(active_sketch, "ISketch")
+        segments = active_sketch.GetSketchSegments()
+
+        # Expect N source lines + N mirrored lines + 1 centerline.
+        expected_total = 2 * len(sources) + 1
+        assert len(segments) == expected_total, (
+            f"expected {expected_total} segments after mirror "
+            f"(2*{len(sources)} lines + 1 centerline), got {len(segments)}"
+        )
+
+        line_endpoints: set[tuple[float, float, float, float]] = set()
+        construction_count = 0
+        for seg in segments:
+            for iface in ("ISketchSegment", "ISketchLine"):
+                sw_type_info.flag_methods(seg, iface)
+            if seg.ConstructionGeometry:
+                construction_count += 1
+                continue
+            sp = seg.GetStartPoint2()
+            ep = seg.GetEndPoint2()
+            # Normalise endpoint ordering so an SW-swapped (start, end)
+            # still matches.
+            p1 = (round(sp.X * 1000.0, 3), round(sp.Y * 1000.0, 3))
+            p2 = (round(ep.X * 1000.0, 3), round(ep.Y * 1000.0, 3))
+            if p1 > p2:
+                p1, p2 = p2, p1
+            line_endpoints.add((*p1, *p2))
+
+        assert construction_count == 1, (
+            f"expected 1 construction (centerline), got {construction_count}"
+        )
+
+        expected_endpoints: set[tuple[float, float, float, float]] = set()
+        for x1, y1, x2, y2 in sources:
+            for sx1, sx2 in ((x1, x2), (-x1, -x2)):  # source + mirrored
+                p1 = (round(sx1, 3), round(y1, 3))
+                p2 = (round(sx2, 3), round(y2, 3))
+                if p1 > p2:
+                    p1, p2 = p2, p1
+                expected_endpoints.add((*p1, *p2))
+
+        assert line_endpoints == expected_endpoints, (
+            f"observed line endpoints {sorted(line_endpoints)}\n"
+            f"expected                {sorted(expected_endpoints)}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_mirror_no_active_sketch_returns_error(
+    connected_adapter,
+) -> None:
+    """Calling sketch_mirror without a sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.sketch_mirror(["Line_1"], "Centerline_1")
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_mirror_rejects_unknown_mirror_line(
+    connected_adapter,
+) -> None:
+    """A mirror_line ID outside the registry must produce a clear error
+    without touching SW selection state."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+        l1 = await adapter.add_line(5.0, 0.0, 25.0, 0.0)
+        assert l1.is_success
+
+        bad = await adapter.sketch_mirror([l1.data], "Centerline_999")
+        assert bad.is_error
+        assert "Unknown mirror_line entity" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
 # ---- add_centerline live regression ----
 
 

@@ -635,14 +635,23 @@ class TestPyWin32AdapterBranches:
             await adapter.add_sketch_dimension("L1", None, "linear", 10.0)
         ).is_success
 
-        # Linear pattern was a placeholder before #16 and is now a real
-        # COM-touching impl. The minimum wiring it needs:
+        # Linear, circular, and mirror are real COM-touching impls now
+        # (placeholders only before #16/#17/#18). Wire the minimum:
         #   currentSketchManager.CreateLinearSketchStepAndRepeat(...)
+        #   currentSketchManager.CreateCircularSketchStepAndRepeat(...)
+        #   currentModel.SketchMirror() (mirror)
         #   currentModel.ClearSelection2 and SelectionManager.CreateSelectData
         #   adapter._sketch_entities[entity_id].Select4(...)
+        #   The mirror_line entity must use a ``Centerline_*`` ID since
+        #   the real impl rejects anything else.
         seed_entity = Mock()
         seed_entity.Select4 = Mock(return_value=True)
-        adapter._sketch_entities = {"L1": seed_entity}
+        centerline = Mock()
+        centerline.Select4 = Mock(return_value=True)
+        adapter._sketch_entities = {
+            "L1": seed_entity,
+            "Centerline_42": centerline,
+        }
 
         adapter.currentSketchManager = SimpleNamespace(
             InsertSketch=Mock(),
@@ -656,6 +665,7 @@ class TestPyWin32AdapterBranches:
         adapter.currentModel = SimpleNamespace(
             ClearSelection2=Mock(return_value=True),
             SelectionManager=selection_mgr,
+            SketchMirror=Mock(return_value=None),
         )
 
         assert (
@@ -664,7 +674,7 @@ class TestPyWin32AdapterBranches:
         assert (
             await adapter.sketch_circular_pattern(["L1"], 0.0, 0.0, 180.0, 4)
         ).is_success
-        assert (await adapter.sketch_mirror(["L1"], "CL1")).is_success
+        assert (await adapter.sketch_mirror(["L1"], "Centerline_42")).is_success
         assert (await adapter.sketch_offset(["L1"], 1.0, True)).is_success
 
         exited = await adapter.exit_sketch()

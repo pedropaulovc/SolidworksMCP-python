@@ -588,6 +588,66 @@ class TestMockAdapterSuccessPaths:
         assert result.status == AdapterResultStatus.SUCCESS
         assert result.data.startswith("CircularPattern_3x180.0deg_")
 
+    @pytest.mark.asyncio
+    async def test_sketch_mirror_success(self):
+        """Mock sketch_mirror returns a Mirror_* id with valid inputs."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        cl = await adapter.add_centerline(0.0, -30.0, 0.0, 30.0)
+        line = await adapter.add_line(5.0, 0.0, 25.0, 0.0)
+
+        result = await adapter.sketch_mirror([line.data], cl.data)
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.startswith(f"Mirror_{cl.data}_")
+
+    @pytest.mark.asyncio
+    async def test_sketch_mirror_error_when_no_sketch(self):
+        """Mock sketch_mirror returns ERROR when no sketch is open."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+
+        result = await adapter.sketch_mirror(["Line1"], "Centerline1")
+        assert result.status == AdapterResultStatus.ERROR
+        assert "No active sketch" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_sketch_mirror_rejects_unknown_entity(self):
+        """Mock sketch_mirror surfaces error for unknown source entities."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        cl = await adapter.add_centerline(0.0, -30.0, 0.0, 30.0)
+
+        result = await adapter.sketch_mirror(["Bogus_999"], cl.data)
+        assert result.status == AdapterResultStatus.ERROR
+        assert "Unknown sketch entity" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_sketch_mirror_input_validation(self):
+        """Empty entities and missing/unknown mirror_line each error."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        cl = await adapter.add_centerline(0.0, -30.0, 0.0, 30.0)
+        line = await adapter.add_line(5.0, 0.0, 25.0, 0.0)
+
+        result = await adapter.sketch_mirror([], cl.data)
+        assert result.status == AdapterResultStatus.ERROR
+        assert "at least one entity" in (result.error or "")
+
+        result = await adapter.sketch_mirror([line.data], "")
+        assert result.status == AdapterResultStatus.ERROR
+        assert "mirror_line entity ID" in (result.error or "")
+
+        result = await adapter.sketch_mirror([line.data], "NotACenterline_42")
+        assert result.status == AdapterResultStatus.ERROR
+        assert "Unknown mirror_line entity" in (result.error or "")
+
 
 # ---------------------------------------------------------------------------
 # Real (PyWin32) circular pattern impl — fake SketchManager unit tests

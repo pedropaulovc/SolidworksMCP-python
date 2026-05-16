@@ -1691,20 +1691,30 @@ def _sketch_circular_pattern_impl(
 def _sketch_mirror_impl(
     adapter: Any, entities: list[str], mirror_line: str
 ) -> AdapterResult[str]:
-    """Mirror sketch entities across a centre-line — placeholder, not yet fully implemented.
+    """Mirror sketch entities about a registered centreline.
 
-    Retained for interface compatibility.  Full implementation will select the
-    mirror line entity, append the source entities, and call
-    ``SketchManager.SketchMirror``.
+    Selects the ``entities`` under mark **1** and the ``mirror_line``
+    centreline under mark **2** — those are the marks SOLIDWORKS expects
+    per the ``IModelDoc2::SketchMirror`` documentation — then invokes the
+    method with no arguments.  ``SketchMirror`` returns ``void``, so
+    success is reported by the absence of a COM error and the resulting
+    ID is a synthesised ``"Mirror_<mirror_line_id>_<rand>"`` string.
 
     Args:
         adapter: A ``PyWin32Adapter`` with an open sketch.
-        entities: List of registered entity IDs to mirror (currently unused).
-        mirror_line: Registered entity ID of the centre-line to mirror across.
+        entities: Registered entity IDs to mirror.  Must be non-empty.
+        mirror_line: Registered entity ID of the centreline.  Must be a
+            value previously returned by ``add_centerline``.
 
     Returns:
-        AdapterResult[str]: ``data`` is a placeholder ID such as
-        ``"Mirror_Centerline_1_3456"``.
+        AdapterResult[str]: On success, ``data`` is a synthesised mirror
+        ID.  On failure, ``status`` is ``ERROR`` with the COM error or a
+        validation message describing the problem.
+
+    Raises:
+        Exception: Propagated through ``_handle_com_operation`` when the
+            inputs are invalid, an entity isn't in the registry, or the
+            COM call raises.
 
     Example::
 
@@ -1713,11 +1723,53 @@ def _sketch_mirror_impl(
         )
         print(result.data)  # "Mirror_Centerline_1_3456"
     """
-    _ = entities
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
     def _mirror_operation() -> str:
+        if not entities:
+            raise Exception("sketch_mirror requires at least one entity")
+        if not mirror_line:
+            raise Exception(
+                "sketch_mirror requires a mirror_line entity ID (add_centerline)"
+            )
+        if mirror_line not in adapter._sketch_entities:
+            raise Exception(
+                f"Unknown mirror_line entity '{mirror_line}'. Use the ID "
+                "returned by add_centerline."
+            )
+        # IModelDoc2::SketchMirror specifies that the mirror axis must be
+        # a centreline; selecting any other segment under mark=2 silently
+        # no-ops on SW. ``add_centerline`` returns IDs prefixed with
+        # ``Centerline_``, so reject anything else up front.
+        if not mirror_line.startswith("Centerline_"):
+            raise Exception(
+                f"mirror_line must be a centerline (from add_centerline), "
+                f"got '{mirror_line}'"
+            )
+
+        # Validate every source entity ID up front so an unknown ID does
+        # not leave SW with a half-built selection state.
+        for ent_id in entities:
+            if ent_id not in adapter._sketch_entities:
+                raise Exception(
+                    f"Unknown sketch entity '{ent_id}'. Use IDs returned by "
+                    "add_line/add_arc/add_circle/add_spline/add_centerline."
+                )
+
+        adapter.currentModel.ClearSelection2(True)
+        try:
+            # Mark 1 for the source segments per IModelDoc2::SketchMirror docs.
+            _select_sketch_entities(adapter, entities, mark=1)
+            # Mark 2 for the centreline.
+            _select_sketch_entities(adapter, [mirror_line], mark=2)
+
+            # IModelDoc2::SketchMirror is VT_VOID — no return value, so a
+            # successful invocation is its own success signal.
+            adapter.currentModel.SketchMirror()
+        finally:
+            adapter.currentModel.ClearSelection2(True)
+
         return f"Mirror_{mirror_line}_{int(time.time() * 1000) % 10000}"
 
     return cast(
