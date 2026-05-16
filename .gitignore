@@ -80,7 +80,8 @@ htmlcov/
 tmp/ui_smoke/
 
 # Claude local settings
-.claude/
+.claude/*
+!.claude/settings.json
 
 # random mypy artifacts
 mypy_*
