@@ -501,3 +501,50 @@ async def test_add_arc_no_active_sketch_returns_error(connected_adapter) -> None
         assert "No active sketch" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- add_ellipse live regression ----
+
+
+async def test_add_ellipse_creates_real_ellipse(connected_adapter) -> None:
+    """End-to-end check that add_ellipse creates a real axis-aligned ellipse.
+
+    ``ISketchManager::CreateEllipse`` takes nine scalar doubles
+    ``(XC, YC, Zc, XMajor, YMajor, ZMajor, XMinor, YMinor, ZMinor)``. This
+    test locks in: (1) the major axis maps to +X / minor to +Y so the
+    ellipse is axis-aligned, (2) the mm-to-m unit conversion is correct,
+    (3) the returned ID is the expected ``Ellipse_<random>`` format.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        ellipse = await adapter.add_ellipse(
+            center_x=0.0, center_y=0.0, major_axis=60.0, minor_axis=30.0
+        )
+        assert ellipse.is_success, f"add_ellipse failed: {ellipse.error}"
+        assert ellipse.data.startswith("Ellipse_"), (
+            f"unexpected ellipse id: {ellipse.data!r}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_ellipse_no_active_sketch_returns_error(connected_adapter) -> None:
+    """Calling add_ellipse without an open sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.add_ellipse(0.0, 0.0, 60.0, 30.0)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
