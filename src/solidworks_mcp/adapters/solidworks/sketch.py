@@ -952,7 +952,7 @@ def _add_sketch_constraint_impl(
         entity1_obj = adapter._sketch_entities.get(entity1)
         if entity1_obj is None:
             raise Exception(
-                f"Unknown sketch entity '{entity1}'. Use IDs returned by add_line/add_arc/add_circle."
+                f"Unknown sketch entity '{entity1}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
             )
 
         entities = [entity1_obj]
@@ -960,14 +960,14 @@ def _add_sketch_constraint_impl(
             entity2_obj = adapter._sketch_entities.get(entity2)
             if entity2_obj is None:
                 raise Exception(
-                    f"Unknown sketch entity '{entity2}'. Use IDs returned by add_line/add_arc/add_circle."
+                    f"Unknown sketch entity '{entity2}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
                 )
             entities.append(entity2_obj)
         if entity3:
             entity3_obj = adapter._sketch_entities.get(entity3)
             if entity3_obj is None:
                 raise Exception(
-                    f"Unknown sketch entity '{entity3}'. Use IDs returned by add_line/add_arc/add_circle."
+                    f"Unknown sketch entity '{entity3}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
                 )
             entities.append(entity3_obj)
 
@@ -1161,7 +1161,7 @@ def _add_sketch_dimension_impl(
         entity1_obj = adapter._sketch_entities.get(entity1)
         if entity1_obj is None:
             raise Exception(
-                f"Unknown sketch entity '{entity1}'. Use IDs returned by add_line/add_arc/add_circle."
+                f"Unknown sketch entity '{entity1}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
             )
 
         entity2_obj = None
@@ -1169,7 +1169,7 @@ def _add_sketch_dimension_impl(
             entity2_obj = adapter._sketch_entities.get(entity2)
             if entity2_obj is None:
                 raise Exception(
-                    f"Unknown sketch entity '{entity2}'. Use IDs returned by add_line/add_arc/add_circle."
+                    f"Unknown sketch entity '{entity2}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
                 )
 
         dim_type = (dimension_type or "linear").strip().lower()

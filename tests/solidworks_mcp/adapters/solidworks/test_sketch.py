@@ -174,11 +174,13 @@ def test_spline_centerline_polygon_and_ellipse_paths() -> None:
     adapter = _FakeSketchAdapter()
     spline_calls: list[tuple[object, bool]] = []
 
-    def _create_spline(points: object, is_closed: bool) -> object:
+    def _create_spline(points: object, simulate_natural_ends: bool) -> object:
         # Store the raw points argument (a VARIANT on Windows, a list on
         # other platforms) so the assertion below can unwrap it via the
-        # ``.value`` attribute when present.
-        spline_calls.append((points, is_closed))
+        # ``.value`` attribute when present. The second arg name matches
+        # the SolidWorks API parameter ``SimulateNaturalEnds`` (passed
+        # as False by add_spline), not an open/closed-spline flag.
+        spline_calls.append((points, simulate_natural_ends))
         return object()
 
     adapter.currentSketchManager = SimpleNamespace(
@@ -199,8 +201,8 @@ def test_spline_centerline_polygon_and_ellipse_paths() -> None:
     # them as a single SAFEARRAY argument instead of unpacking the list.
     # On non-Windows CI a bare list is passed through.
     assert len(spline_calls) == 1
-    points_arg, is_closed = spline_calls[0]
-    assert is_closed is False
+    points_arg, simulate_natural_ends = spline_calls[0]
+    assert simulate_natural_ends is False
     flat_points = getattr(points_arg, "value", points_arg)
     assert list(flat_points) == [0.0, 0.0, 0.0, 0.002, 0.001, 0.0]
 

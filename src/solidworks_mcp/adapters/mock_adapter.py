@@ -890,6 +890,19 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 status=AdapterResultStatus.ERROR,
                 error="add_spline requires at least 2 points",
             )
+        # Match the real adapter's point contract: each dict must carry
+        # both ``x`` and ``y`` keys, or the live impl raises KeyError on
+        # ``point["x"]``. Validating here keeps mock/live parity so tests
+        # that pass against the mock won't fail live on malformed input.
+        for index, point in enumerate(points):
+            if not isinstance(point, dict) or "x" not in point or "y" not in point:
+                return AdapterResult(
+                    status=AdapterResultStatus.ERROR,
+                    error=(
+                        f"add_spline point at index {index} is missing "
+                        "required 'x' and/or 'y' keys"
+                    ),
+                )
 
         await asyncio.sleep(self._delays["sketch_operation"] / 2)
         self._operation_count += 1
@@ -1031,7 +1044,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                     status=AdapterResultStatus.ERROR,
                     error=(
                         f"Unknown sketch entity '{ent}'. Use IDs returned by "
-                        "add_line/add_arc/add_circle."
+                        "add_line/add_arc/add_circle/add_spline/add_centerline."
                     ),
                 )
 
