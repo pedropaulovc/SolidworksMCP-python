@@ -1966,7 +1966,10 @@ def _sketch_offset_impl(
             adapter.currentModel.ClearSelection2(True)
 
         direction = "inward" if reverse_direction else "outward"
-        return f"Offset_{offset_distance}_{direction}_{int(time.time() * 1000) % 10000}"
+        return (
+            f"Offset_{offset_distance}_{direction}_"
+            f"{int(time.time() * 1000) % 10000}"
+        )
 
     return cast(
         AdapterResult[str],
