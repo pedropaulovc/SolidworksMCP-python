@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from datetime import datetime
 from types import SimpleNamespace
-import math
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -398,7 +398,7 @@ class TestMockAdapterSuccessPaths:
 
         result = await adapter.add_polygon(0.0, 0.0, 15.0, 6)
         assert result.status == AdapterResultStatus.SUCCESS
-        assert result.data.startswith("Polygon_6sided_")
+        assert result.data.startswith("Polygon_")
         assert result.data in adapter._sketch_entity_ids
 
     @pytest.mark.asyncio
@@ -845,6 +845,36 @@ class TestRealCircularPatternImpl:
         # ClearSelection2 runs before selecting and again in the finally
         # block after the COM failure.
         assert clear_selection.call_count == 2
+
+    def test_arc_angle_normalized_to_positive_when_seed_on_plus_x_axis(self):
+        """A seed at (+X, 0) must hand SW a positive ``ArcAngle`` (+π), not
+        the ``-π`` that Python's ``math.atan2(-0.0, -seed_x)`` produces.
+
+        Regression: ``CreateCircularSketchStepAndRepeat`` silently returns
+        ``False`` on negative angle values — both the live
+        ``test_sketch_circular_pattern_creates_real_pattern`` regression
+        and the Phase-0 live demo failed without this normalisation.
+        """
+        from src.solidworks_mcp.adapters.solidworks import sketch as sketch_ops
+
+        adapter, create_pattern, seed_entity = self._build_adapter()
+        # Seed at (+30 mm, 0): GetCenterPoint returns metres on the SW side,
+        # so the impl multiplies by 1000 to get mm.  Length-2 tuple suffices
+        # for the ``len(point) >= 2`` check.
+        seed_entity.GetCenterPoint = Mock(return_value=(0.030, 0.0))
+
+        result = sketch_ops._sketch_circular_pattern_impl(
+            adapter, ["Circle_1"], 0.0, 0.0, 360.0, 6
+        )
+
+        assert result.status == AdapterResultStatus.SUCCESS
+        # Signature: ArcRadius, ArcAngle, PatternNum, ...
+        args = create_pattern.call_args.args
+        assert args[0] == pytest.approx(0.030)  # radius in metres
+        # The angle must be ~+π (positive), not -π.  Without normalisation
+        # ``math.atan2(-0.0, -0.030)`` returns ``-π`` and SW silently rejects
+        # the call.
+        assert args[1] == pytest.approx(math.pi)
 
 
 # ---------------------------------------------------------------------------

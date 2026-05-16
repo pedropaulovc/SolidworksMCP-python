@@ -1076,8 +1076,13 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         await asyncio.sleep(self._delays["sketch_operation"] / 2)
         self._operation_count += 1
 
-        polygon_id = f"Polygon_{sides}sided_{random.randint(1000, 9999)}"
+        # ID format mirrors the real PyWin32 adapter, which uses
+        # ``_register_sketch_entity("Polygon", ...)`` (counter-based) so the
+        # returned ID is a valid input to downstream sketch_linear_pattern /
+        # sketch_circular_pattern / sketch_mirror / sketch_offset calls.
+        polygon_id = f"Polygon_{len(self._sketch_entity_ids) + 1}"
         self._sketch_entity_ids.add(polygon_id)
+        _ = sides  # informational only; the sides count is no longer part of the ID
 
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,

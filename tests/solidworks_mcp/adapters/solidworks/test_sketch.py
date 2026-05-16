@@ -210,7 +210,7 @@ def test_spline_centerline_polygon_and_ellipse_paths() -> None:
     polygon_ok = sketch._add_polygon_impl(adapter, 0, 0, 10, 6)
     ellipse_ok = sketch._add_ellipse_impl(adapter, 0, 0, 10, 4)
     assert center_ok.is_success and center_ok.data.startswith("Centerline_")
-    assert polygon_ok.is_success and polygon_ok.data.startswith("Polygon_6sided_")
+    assert polygon_ok.is_success and polygon_ok.data.startswith("Polygon_")
     assert ellipse_ok.is_success and ellipse_ok.data.startswith("Ellipse_")
 
 

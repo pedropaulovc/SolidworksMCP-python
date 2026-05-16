@@ -697,8 +697,15 @@ async def test_add_polygon_creates_real_polygon(connected_adapter) -> None:
             center_x=cx, center_y=cy, radius=radius, sides=sides
         )
         assert polygon.is_success, f"add_polygon failed: {polygon.error}"
-        assert polygon.data.startswith("Polygon_6sided_"), (
+        # Polygon is registered in adapter._sketch_entities so subsequent
+        # sketch_linear_pattern / sketch_mirror / sketch_offset calls can
+        # reference it. The registry prefixes the counter with the entity
+        # kind, mirroring add_line/add_arc/add_circle/add_ellipse.
+        assert polygon.data.startswith("Polygon_"), (
             f"unexpected polygon id: {polygon.data!r}"
+        )
+        assert polygon.data in adapter._sketch_entities, (
+            f"polygon id {polygon.data!r} not registered for downstream ops"
         )
 
         from solidworks_mcp.adapters import sw_type_info

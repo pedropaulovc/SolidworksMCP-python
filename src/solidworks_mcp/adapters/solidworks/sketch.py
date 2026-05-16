@@ -764,8 +764,11 @@ def _add_polygon_impl(
         sides: Number of polygon sides.  SolidWorks accepts 3–40.
 
     Returns:
-        AdapterResult[str]: On success, ``data`` is a descriptive timestamped
-        ID (e.g. ``"Polygon_6sided_1234"``).  On failure, ``status`` is
+        AdapterResult[str]: On success, ``data`` is the registered entity ID
+        (e.g. ``"Polygon_3"``).  The ID is stored in
+        ``adapter._sketch_entities`` so it can be passed back to
+        ``sketch_linear_pattern`` / ``sketch_circular_pattern`` /
+        ``sketch_mirror`` / ``sketch_offset``.  On failure, ``status`` is
         ``ERROR``.
 
     Raises:
@@ -777,7 +780,7 @@ def _add_polygon_impl(
         result = pywin32_sketch_ops.add_polygon(
             adapter, center_x=0, center_y=0, radius=15.0, sides=6
         )
-        print(result.data)  # "Polygon_6sided_4321"
+        print(result.data)  # "Polygon_3"
     """
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
@@ -786,7 +789,7 @@ def _add_polygon_impl(
         """Inner COM closure that calls CreatePolygon.
 
         Returns:
-            str: Descriptive timestamped ID for the polygon.
+            str: Registered entity ID for the polygon (e.g. ``"Polygon_3"``).
 
         Raises:
             Exception: If ``CreatePolygon`` returns ``None``.
@@ -803,7 +806,11 @@ def _add_polygon_impl(
         )
         if not polygon:
             raise Exception("Failed to create polygon")
-        return f"Polygon_{sides}sided_{int(time.time() * 1000) % 10000}"
+        # Register so the returned ID is usable by sketch_linear_pattern,
+        # sketch_circular_pattern, sketch_mirror, and sketch_offset — without
+        # this the polygon string is opaque and every downstream op fails
+        # with "Unknown sketch entity 'Polygon_*'".
+        return cast(str, adapter._register_sketch_entity("Polygon", polygon))
 
     return cast(
         AdapterResult[str],
@@ -1376,9 +1383,26 @@ def _select_sketch_entities(adapter: Any, entity_ids: list[str], mark: int) -> N
                 f"Unknown sketch entity '{ent_id}'. Use IDs returned by "
                 "add_line/add_arc/add_circle/add_spline/add_centerline."
             )
-        ok = entity.Select4(True, select_data)
-        if not ok:
-            raise Exception(f"Failed to select sketch entity '{ent_id}'")
+        # ``ISketchManager::CreatePolygon`` returns the polygon's edges as
+        # a SAFEARRAY, which pywin32 unmarshals to a tuple of
+        # ``ISketchSegment`` handles — there is no single COM object to
+        # ``Select4`` on.  Treat any iterable (tuple/list) as a group of
+        # segments and select each, so a polygon ID can flow into
+        # sketch_linear_pattern / sketch_circular_pattern / sketch_mirror /
+        # sketch_offset the same as any other entity.  Single-segment
+        # entities (lines, arcs, splines, ellipses, centerlines) keep the
+        # original Select4 path.
+        if isinstance(entity, (list, tuple)):
+            for segment in entity:
+                ok = segment.Select4(True, select_data)
+                if not ok:
+                    raise Exception(
+                        f"Failed to select segment of sketch entity '{ent_id}'"
+                    )
+        else:
+            ok = entity.Select4(True, select_data)
+            if not ok:
+                raise Exception(f"Failed to select sketch entity '{ent_id}'")
 
 
 def _sketch_linear_pattern_impl(
@@ -1621,8 +1645,19 @@ def _sketch_circular_pattern_impl(
             first_entity = adapter._sketch_entities.get(entities[0])
             seed_xy: tuple[float, float] | None = None
             if first_entity is not None and _sw_type_info is not None:
+                # GetCenterPoint lives on multiple sketch-entity interfaces
+                # (ISketchArc for arcs/circles, ISketchEllipse for ellipses),
+                # all with the same zero-arg signature. Flag every interface
+                # we might encounter so the lookup works regardless of seed
+                # type — without this, an ellipse seed silently resolves
+                # GetCenterPoint as a property and the pattern is laid out
+                # at a bogus 1 mm radius.
                 adapter._attempt(
-                    lambda: _sw_type_info.flag_methods(first_entity, "ISketchArc"),
+                    lambda: _sw_type_info.flag_methods(
+                        first_entity,
+                        "ISketchArc",
+                        "ISketchEllipse",
+                    ),
                     default=0,
                 )
                 point = adapter._attempt(lambda: first_entity.GetCenterPoint())
@@ -1644,6 +1679,15 @@ def _sketch_circular_pattern_impl(
             else:
                 arc_radius_mm = 0.0
                 arc_angle_rad = math.pi
+
+            # ``CreateCircularSketchStepAndRepeat`` silently returns False on
+            # negative ``ArcAngle`` values — the bundled VBA/C# examples all
+            # pass positive radians (e.g. ``4.732863934409`` ≈ 271°).  Python's
+            # ``atan2`` produces ``-π`` for a seed on the +X axis (because
+            # ``-seed_xy[1]`` is ``-0.0``), which is geometrically equivalent
+            # to ``+π`` but fails the COM call.  Normalise to ``[0, 2π)``.
+            if arc_angle_rad < 0:
+                arc_angle_rad += 2.0 * math.pi
 
             # 1 mm minimum keeps SW from silently rejecting the call when
             # the seed sits right on the pattern centre.
