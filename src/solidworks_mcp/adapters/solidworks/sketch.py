@@ -1324,9 +1324,11 @@ def _select_sketch_entities(adapter: Any, entity_ids: list[str], mark: int) -> N
     The ``ISelectionMgr`` dispatch needs ``sw_type_info.flag_methods``
     flagging or pywin32 late binding cannot resolve ``CreateSelectData``
     and surfaces ``"Member not found."`` from the COM boundary.  This
-    matches the lazy-import dance used by ``add_sketch_constraint``; on
-    non-Windows test stubs ``sw_type_info`` is absent and the call is a
-    no-op.
+    matches the lazy-import dance used by ``add_sketch_constraint``;
+    when ``sw_type_info`` cannot be imported the flagging step is skipped
+    but ``ISelectionMgr.CreateSelectData`` and ``ISketchSegment.Select4``
+    are still invoked.  Callers must therefore not invoke this helper
+    without a live ``ISelectionMgr`` on ``adapter.currentModel``.
 
     Args:
         adapter: A ``PyWin32Adapter``.  ``adapter.currentModel`` must be a
@@ -1395,7 +1397,6 @@ def _sketch_linear_pattern_impl(
         spacing: Distance between instances in **millimetres**.
         count: Total number of instances (including the seed).  Must be at
             least 2.
-        ``CreateLinearSketchStepAndRepeat`` returns ``False``.
 
     Returns:
         AdapterResult[str]: On success, ``data`` is a synthesised
@@ -1404,8 +1405,8 @@ def _sketch_linear_pattern_impl(
 
     Raises:
         Exception: Propagated through ``_handle_com_operation`` when
-            inputs are invalid, an entity isn't registered, or the COM
-            call returns ``False``.
+            inputs are invalid, an entity isn't registered, or
+            ``CreateLinearSketchStepAndRepeat`` returns ``False``.
 
     Example::
 
@@ -1431,33 +1432,45 @@ def _sketch_linear_pattern_impl(
                 "sketch_linear_pattern requires a non-zero direction vector"
             )
 
+        # Validate every entity ID exists in the registry before mutating
+        # selection state, so an unknown ID doesn't leave SW with a
+        # half-built selection.
+        for ent_id in entities:
+            if ent_id not in adapter._sketch_entities:
+                raise Exception(
+                    f"Unknown sketch entity '{ent_id}'. Use IDs returned by "
+                    "add_line/add_arc/add_circle/add_spline/add_centerline."
+                )
+
         # Clear any pre-existing selection so SW only sees the seed entities.
         adapter.currentModel.ClearSelection2(True)
-        _select_sketch_entities(adapter, entities, mark=0)
+        try:
+            _select_sketch_entities(adapter, entities, mark=0)
 
-        angle_x = math.atan2(direction_y, direction_x)
-        # Direction 2 (Y) goes 90° from direction 1; NumY=1 keeps it
-        # single-row so the second-axis spacing/angle aren't actually
-        # consumed, but SW still wants well-formed values.
-        angle_y = angle_x + math.pi / 2.0
+            angle_x = math.atan2(direction_y, direction_x)
+            # Direction 2 (Y) goes 90° from direction 1; NumY=1 keeps it
+            # single-row so the second-axis spacing/angle aren't actually
+            # consumed, but SW still wants well-formed values.
+            angle_y = angle_x + math.pi / 2.0
 
-        ok = adapter.currentSketchManager.CreateLinearSketchStepAndRepeat(
-            count,  # NumX
-            1,  # NumY
-            spacing / 1000.0,  # SpacingX (metres)
-            0.0,  # SpacingY
-            angle_x,  # AngleX (radians)
-            angle_y,  # AngleY (radians)
-            "",  # DeleteInstances
-            False,  # XSpacingDim
-            False,  # YSpacingDim
-            False,  # AngleDim
-            False,  # CreateNumOfInstancesDimInXDir
-            False,  # CreateNumOfInstancesDimInYDir
-        )
-        adapter.currentModel.ClearSelection2(True)
-        if not ok:
-            raise Exception("Failed to create linear sketch pattern")
+            ok = adapter.currentSketchManager.CreateLinearSketchStepAndRepeat(
+                count,  # NumX
+                1,  # NumY
+                spacing / 1000.0,  # SpacingX (metres)
+                0.0,  # SpacingY
+                angle_x,  # AngleX (radians)
+                angle_y,  # AngleY (radians)
+                "",  # DeleteInstances
+                False,  # XSpacingDim
+                False,  # YSpacingDim
+                False,  # AngleDim
+                False,  # CreateNumOfInstancesDimInXDir
+                False,  # CreateNumOfInstancesDimInYDir
+            )
+            if not ok:
+                raise Exception("Failed to create linear sketch pattern")
+        finally:
+            adapter.currentModel.ClearSelection2(True)
 
         return f"LinearPattern_{count}x{spacing}_{int(time.time() * 1000) % 10000}"
 

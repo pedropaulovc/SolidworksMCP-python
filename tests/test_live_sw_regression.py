@@ -516,11 +516,12 @@ async def test_sketch_linear_pattern_creates_real_pattern(connected_adapter) -> 
        binding will not resolve without ``sw_type_info.flag_methods``;
        without that, the helper raises ``"Member not found."`` from the
        COM boundary before the pattern call ever happens.
-    2. The mm-to-m conversion on ``SpacingX`` and the ``atan2`` mapping
-       from ``(direction_x, direction_y)`` to ``AngleX`` together have
-       to land instances on the expected axis. The earlier
-       ``is_success``-only assertion let a misaligned or mis-scaled
-       pattern pass silently (same failure mode that bit #17).
+    2. The mm-to-m conversion on ``SpacingX`` and the
+       ``atan2(direction_y, direction_x)`` conversion from a direction
+       vector to a radian ``AngleX`` together have to land instances on
+       the expected axis. The earlier ``is_success``-only assertion let
+       a misaligned or mis-scaled pattern pass silently (same failure
+       mode that bit #17).
 
     The check below reads the active sketch's circles back and asserts
     each centre is at ``seed + i * spacing * direction`` for

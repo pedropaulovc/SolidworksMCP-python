@@ -611,7 +611,14 @@ class TestPyWin32AdapterBranches:
 
     @pytest.mark.asyncio
     async def test_sketch_placeholder_and_exit_paths(self, monkeypatch):
-        """Test sketch placeholder helpers and exit-sketch branches."""
+        """Test sketch operation helpers and exit-sketch branches.
+
+        The linear pattern call is wired with a fake SketchManager so the
+        real impl (``CreateLinearSketchStepAndRepeat`` via the executor)
+        succeeds. Circular pattern, mirror, and offset are still
+        placeholders at this point in the stack — they don't touch COM
+        and so only need ``currentSketchManager`` to be truthy.
+        """
         adapter = self._build_adapter(monkeypatch)
 
         no_sketch = await adapter.exit_sketch()
@@ -622,9 +629,34 @@ class TestPyWin32AdapterBranches:
         # Unknown relation types now error out — the placeholder that always
         # returned success was replaced by a real SketchAddConstraints call.
         assert (await adapter.add_sketch_constraint("L1", None, "unknown")).is_error
+        # add_sketch_dimension's no-model fast path returns a synthesised ID
+        # when ``adapter.currentModel`` is ``None``.
         assert (
             await adapter.add_sketch_dimension("L1", None, "linear", 10.0)
         ).is_success
+
+        # Linear pattern was a placeholder before #16 and is now a real
+        # COM-touching impl. The minimum wiring it needs:
+        #   currentSketchManager.CreateLinearSketchStepAndRepeat(...)
+        #   currentModel.ClearSelection2 and SelectionManager.CreateSelectData
+        #   adapter._sketch_entities[entity_id].Select4(...)
+        seed_entity = Mock()
+        seed_entity.Select4 = Mock(return_value=True)
+        adapter._sketch_entities = {"L1": seed_entity}
+
+        adapter.currentSketchManager = SimpleNamespace(
+            InsertSketch=Mock(),
+            CreateLinearSketchStepAndRepeat=Mock(return_value=True),
+        )
+
+        select_data = Mock()
+        selection_mgr = Mock()
+        selection_mgr.CreateSelectData = Mock(return_value=select_data)
+        adapter.currentModel = SimpleNamespace(
+            ClearSelection2=Mock(return_value=True),
+            SelectionManager=selection_mgr,
+        )
+
         assert (
             await adapter.sketch_linear_pattern(["L1"], 1.0, 0.0, 5.0, 3)
         ).is_success
