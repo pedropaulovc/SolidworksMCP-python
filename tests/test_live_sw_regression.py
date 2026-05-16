@@ -503,6 +503,103 @@ async def test_add_arc_no_active_sketch_returns_error(connected_adapter) -> None
         await adapter.close_model(save=False)
 
 
+# ---- add_polygon live regression ----
+
+
+async def test_add_polygon_creates_real_polygon(connected_adapter) -> None:
+    """End-to-end check that add_polygon creates a real polygon in SW.
+
+    Regression: ``ISketchManager::CreatePolygon`` requires eight
+    arguments ``(XC, YC, Zc, Xp, Yp, Zp, Sides, Inscribed)``. The May-10
+    mixin refactor only forwarded six, so every call raised
+    ``"Parameter not optional."`` at the COM boundary.
+
+    Geometric assertions (not just ``is_success``):
+
+    * The active sketch contains ``sides`` line segments (6 here) plus
+      a construction circle SW adds to dimension the polygon.
+    * The unique vertex set has size ``sides`` — each line shares
+      endpoints with two neighbours so endpoint coordinates collapse
+      to exactly ``sides`` distinct points.
+    * Every vertex sits at distance ``radius`` from the requested
+      centre within 0.1 mm. An incorrectly-marshalled ``Inscribed``
+      flag (eg. circumscribed instead of inscribed) would put vertices
+      on a different circle and fail this check.
+    """
+    import math
+
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        cx, cy, radius, sides = 0.0, 0.0, 15.0, 6
+        polygon = await adapter.add_polygon(
+            center_x=cx, center_y=cy, radius=radius, sides=sides
+        )
+        assert polygon.is_success, f"add_polygon failed: {polygon.error}"
+        assert polygon.data.startswith("Polygon_6sided_"), (
+            f"unexpected polygon id: {polygon.data!r}"
+        )
+
+        from solidworks_mcp.adapters import sw_type_info
+
+        active_sketch = adapter.currentModel.GetActiveSketch2()
+        sw_type_info.flag_methods(active_sketch, "ISketch")
+        segments = active_sketch.GetSketchSegments()
+
+        line_segments = []
+        for seg in segments:
+            for iface in ("ISketchSegment", "ISketchLine"):
+                sw_type_info.flag_methods(seg, iface)
+            # Type 0 == line (per swSketchSegments_e probed empirically);
+            # type 2 is the construction circle SW inserts to anchor the
+            # polygon's inscribed-circle dimension.
+            if seg.GetType() == 0:
+                line_segments.append(seg)
+
+        assert len(line_segments) == sides, (
+            f"expected {sides} polygon edges, got {len(line_segments)}"
+        )
+
+        vertices: set[tuple[float, float]] = set()
+        for seg in line_segments:
+            for pt in (seg.GetStartPoint2(), seg.GetEndPoint2()):
+                vertices.add((round(pt.X * 1000.0, 3), round(pt.Y * 1000.0, 3)))
+        assert len(vertices) == sides, (
+            f"expected {sides} unique vertices, got {len(vertices)}: {vertices}"
+        )
+
+        for vx, vy in vertices:
+            r = math.hypot(vx - cx, vy - cy)
+            assert abs(r - radius) < 0.1, (
+                f"vertex ({vx}, {vy}) at r={r:.3f}mm, expected ~{radius}mm; "
+                f"all vertex radii: "
+                f"{[round(math.hypot(x - cx, y - cy), 3) for x, y in vertices]}"
+            )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_polygon_no_active_sketch_returns_error(connected_adapter) -> None:
+    """Calling add_polygon without an open sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.add_polygon(0.0, 0.0, 15.0, 6)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
 # ---- add_centerline live regression ----
 
 
