@@ -824,6 +824,11 @@ def _add_ellipse_impl(
     positive Y direction.  The ellipse is therefore axis-aligned and cannot
     be rotated via this function.
 
+    The created ellipse is registered in the adapter's sketch-entity
+    registry so subsequent constraint and dimension calls can reference it
+    by ID, matching the behaviour of ``add_line`` / ``add_circle`` /
+    ``add_arc`` and the mock adapter.
+
     Args:
         adapter: A ``PyWin32Adapter`` with an open sketch.
         center_x: Ellipse centre X in **millimetres**.
@@ -834,8 +839,8 @@ def _add_ellipse_impl(
             as the offset from centre).
 
     Returns:
-        AdapterResult[str]: On success, ``data`` is a timestamped ID string
-        (e.g. ``"Ellipse_6789"``).  On failure, ``status`` is ``ERROR``.
+        AdapterResult[str]: On success, ``data`` is the registered entity ID
+        (e.g. ``"Ellipse_4"``).  On failure, ``status`` is ``ERROR``.
 
     Raises:
         Exception: Propagated through ``_handle_com_operation`` when
@@ -846,16 +851,16 @@ def _add_ellipse_impl(
         result = pywin32_sketch_ops.add_ellipse(
             adapter, center_x=0, center_y=0, major_axis=30.0, minor_axis=15.0
         )
-        print(result.data)  # "Ellipse_2345"
+        print(result.data)  # "Ellipse_4"
     """
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
     def _ellipse_operation() -> str:
-        """Inner COM closure that calls CreateEllipse.
+        """Inner COM closure that calls CreateEllipse and registers the entity.
 
         Returns:
-            str: Timestamped unique ID for the ellipse.
+            str: Registered entity ID for the new ellipse.
 
         Raises:
             Exception: If ``CreateEllipse`` returns ``None``.
@@ -873,7 +878,9 @@ def _add_ellipse_impl(
         )
         if not ellipse:
             raise Exception("Failed to create ellipse")
-        return f"Ellipse_{int(time.time() * 1000) % 10000}"
+        return cast(
+            AdapterResult[str], adapter._register_sketch_entity("Ellipse", ellipse)
+        )
 
     return cast(
         AdapterResult[str],

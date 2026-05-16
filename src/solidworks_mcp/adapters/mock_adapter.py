@@ -1017,6 +1017,41 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             execution_time=self._delays["sketch_operation"],
         )
 
+    async def add_ellipse(
+        self,
+        center_x: float,
+        center_y: float,
+        major_axis: float,
+        minor_axis: float,
+    ) -> AdapterResult[str]:
+        """Mock adding an axis-aligned ellipse to sketch.
+
+        Args:
+            center_x (float): Ellipse centre X in millimetres.
+            center_y (float): Ellipse centre Y in millimetres.
+            major_axis (float): Full major-axis length in millimetres.
+            minor_axis (float): Full minor-axis length in millimetres.
+
+        Returns:
+            AdapterResult[str]: The result produced by the operation.
+        """
+        if not self._current_sketch:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active sketch"
+            )
+
+        await asyncio.sleep(self._delays["sketch_operation"] / 2)
+        self._operation_count += 1
+
+        ellipse_id = f"Ellipse_{random.randint(1000, 9999)}"
+        self._sketch_entity_ids.add(ellipse_id)
+
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=ellipse_id,
+            execution_time=self._delays["sketch_operation"] / 2,
+        )
+
     async def add_polygon(
         self, center_x: float, center_y: float, radius: float, sides: int
     ) -> AdapterResult[str]:

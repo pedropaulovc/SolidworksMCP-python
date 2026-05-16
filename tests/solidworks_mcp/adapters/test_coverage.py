@@ -364,6 +364,30 @@ class TestMockAdapterSuccessPaths:
         assert "at least 2 points" in (result.error or "")
 
     @pytest.mark.asyncio
+    async def test_add_ellipse_success(self):
+        """Mock add_ellipse returns an Ellipse_* id with an active sketch."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+
+        result = await adapter.add_ellipse(0.0, 0.0, 60.0, 30.0)
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.startswith("Ellipse_")
+        assert result.data in adapter._sketch_entity_ids
+
+    @pytest.mark.asyncio
+    async def test_add_ellipse_error_when_no_sketch(self):
+        """Mock add_ellipse returns ERROR when no sketch is open."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+
+        result = await adapter.add_ellipse(0.0, 0.0, 60.0, 30.0)
+        assert result.status == AdapterResultStatus.ERROR
+        assert "No active sketch" in (result.error or "")
+
+    @pytest.mark.asyncio
     async def test_add_polygon_success(self):
         """Mock add_polygon returns a Polygon_<sides>sided_* id with an active sketch."""
         adapter = MockSolidWorksAdapter({})
