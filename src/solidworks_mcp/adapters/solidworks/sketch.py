@@ -1497,26 +1497,26 @@ def _sketch_circular_pattern_impl(
     PatternNum, PatternSpacing, PatternRotate, DeleteInstances, RadiusDim,
     AngleDim, CreateNumOfInstancesDim)``.
 
-    The seed's position determines where instances land — ``ArcRadius`` is
-    only used for the on-canvas radius dimension (which we suppress), and
-    the pattern centre defaults to the sketch origin when no centre
-    selection is supplied.  ``ArcAngle`` is left at zero so the pattern
-    starts at the seed's existing angle.  ``PatternSpacing`` is the
-    per-instance angle in radians; for the typical "N instances around
-    360°" case the caller passes ``angle=360.0`` and we divide by
-    ``count`` so the last instance lands one slot before the seed.
+    ``ArcRadius`` is the radius at which SW places the pattern instances
+    — getting it wrong puts every copy on a tight cluster around the
+    seed rather than the intended ring.  We derive it from the first
+    registered entity's centre (via ``ISketchArc.GetCenterPoint`` once
+    the dispatch is flagged) and the user-supplied ``(center_x, center_y)``
+    pattern centre.  For non-circular seeds where ``GetCenterPoint`` is
+    not available, the impl falls back to ``hypot(center_x, center_y)``
+    — i.e. assume the seed sits at the desired radius along an axis.
 
-    ``center_x`` / ``center_y`` are accepted to match the tool-layer
-    contract but the COM API offers no way to set the pattern centre
-    without a separate sketch-point selection; SW falls back to the
-    sketch origin.  Position the seed accordingly.
+    ``ArcAngle`` is left at zero so the pattern starts at the seed's
+    existing angle.  ``PatternSpacing`` is the per-instance angle in
+    radians; for the typical "N instances around 360°" case the caller
+    passes ``angle=360.0`` and we divide by ``count`` so the last
+    instance lands one slot before the seed.
 
     Args:
         adapter: A ``PyWin32Adapter`` with an open sketch.
         entities: Registered entity IDs to pattern.  Must be non-empty.
-        center_x: Pattern centre X in **millimetres** (currently advisory
-            — see note above; SW uses the sketch origin).
-        center_y: Pattern centre Y in **millimetres** (currently advisory).
+        center_x: Pattern centre X in **millimetres**.
+        center_y: Pattern centre Y in **millimetres**.
         angle: Total swept angle in **degrees** (e.g. ``360`` for a full
             ring or ``180`` for a half-circle).  Must be > 0.
         count: Total number of instances (including the seed).  Must be
@@ -1540,7 +1540,6 @@ def _sketch_circular_pattern_impl(
         )
         print(result.data)  # "CircularPattern_6x360.0deg_4321"
     """
-    _ = center_x, center_y
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
@@ -1555,16 +1554,51 @@ def _sketch_circular_pattern_impl(
         adapter.currentModel.ClearSelection2(True)
         _select_sketch_entities(adapter, entities, mark=0)
 
-        # SW reads the actual seed position from the selection to place
-        # instances; ArcRadius only feeds the optional on-canvas radius
-        # dimension (suppressed here). It must, however, be strictly
-        # positive — passing zero causes SW to silently reject the call
-        # and return False, so we pass a small placeholder.
+        # ``ArcRadius`` actually drives the radius at which SW places the
+        # pattern instances — the earlier assumption that it was only a
+        # dimension placeholder was wrong. With ArcRadius=1 mm the
+        # instances cluster around the seed on a tiny circle instead of
+        # the intended ring (caught by the #17 live screenshot).
+        #
+        # Derive the radius from the seed's actual position. ISketchArc /
+        # ISketchCircle expose ``GetCenterPoint`` once the dispatch is
+        # flagged via sw_type_info; for non-circular seeds we fall back
+        # to ``hypot(center_x, center_y)`` which works when the user pre-
+        # positioned the seed at the desired radius along an axis.
+        try:
+            from .. import sw_type_info as _sw_type_info
+        except ImportError:
+            _sw_type_info = None  # type: ignore[assignment]
+
+        first_entity = adapter._sketch_entities.get(entities[0])
+        seed_xy: tuple[float, float] | None = None
+        if first_entity is not None and _sw_type_info is not None:
+            adapter._attempt(
+                lambda: _sw_type_info.flag_methods(first_entity, "ISketchArc"),
+                default=0,
+            )
+            point = adapter._attempt(lambda: first_entity.GetCenterPoint())
+            if (
+                point is not None
+                and hasattr(point, "__len__")
+                and len(point) >= 2
+            ):
+                seed_xy = (float(point[0]) * 1000.0, float(point[1]) * 1000.0)
+
+        if seed_xy is not None:
+            arc_radius_mm = math.hypot(
+                seed_xy[0] - center_x, seed_xy[1] - center_y
+            )
+        else:
+            arc_radius_mm = math.hypot(center_x, center_y)
+
+        # 1 mm minimum keeps SW from silently rejecting the call when the
+        # seed sits right on the pattern centre.
+        arc_radius_m = max(arc_radius_mm / 1000.0, 0.001)
         pattern_spacing = math.radians(angle) / count
-        arc_radius_placeholder_m = 0.001  # 1 mm
 
         ok = adapter.currentSketchManager.CreateCircularSketchStepAndRepeat(
-            arc_radius_placeholder_m,  # ArcRadius (metres)
+            arc_radius_m,  # ArcRadius (metres) — actual pattern radius
             0.0,  # ArcAngle (starting angle, radians)
             count,  # PatternNum
             pattern_spacing,  # PatternSpacing (radians)
