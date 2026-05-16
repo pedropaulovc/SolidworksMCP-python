@@ -1652,13 +1652,24 @@ def _sketch_circular_pattern_impl(
 
             seed_xy: tuple[float, float] | None = None
 
-            # ``CreatePolygon`` registers a SAFEARRAY of segment handles as a
-            # tuple, so the ``GetCenterPoint`` path below — which assumes a
-            # single dispatch — would silently fall back to a 1 mm placeholder
-            # radius. Use the center cached by ``_add_polygon_impl`` at
-            # register time instead.
+            # Group entities (polygons via ``CreatePolygon``, rectangles via
+            # ``CreateCornerRectangle``) register as a SAFEARRAY of segments
+            # — a tuple, not a single dispatch — so the ``GetCenterPoint``
+            # path below would silently fall back to a 1 mm placeholder
+            # radius. ``_add_polygon_impl`` stashes the seed centre in
+            # ``_sketch_entity_centers`` at register time; use that.
+            # Rectangle seeds don't populate the cache (yet), so reject them
+            # with a clear message rather than KeyError or build a bogus
+            # pattern at the wrong radius.
             if isinstance(first_entity, (list, tuple)):
-                seed_xy = adapter._sketch_entity_centers[entities[0]]
+                seed_xy = adapter._sketch_entity_centers.get(entities[0])
+                if seed_xy is None:
+                    raise Exception(
+                        f"sketch_circular_pattern can't derive the seed centre "
+                        f"for '{entities[0]}' — this entity type registers as "
+                        f"a group (tuple of segments) with no cached centre. "
+                        f"Use a circle, arc, ellipse, or polygon seed."
+                    )
 
             if seed_xy is None and first_entity is not None and _sw_type_info is not None:
                 # GetCenterPoint lives on multiple sketch-entity interfaces

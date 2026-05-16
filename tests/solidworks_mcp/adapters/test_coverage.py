@@ -869,6 +869,30 @@ class TestRealCircularPatternImpl:
         assert args[0] == pytest.approx(0.05)
         assert args[2] == 6
 
+    def test_tuple_seed_without_cached_center_raises_clear_error(self):
+        """Rectangles also register as a tuple of segment handles (from
+        ``CreateCornerRectangle``) but ``_add_rectangle_impl`` doesn't
+        populate ``_sketch_entity_centers``. Without a safety net the
+        direct subscript lookup would raise ``KeyError`` and surface as a
+        confusing bare key string. Surface a clear, actionable error
+        instead."""
+        from src.solidworks_mcp.adapters.solidworks import sketch as sketch_ops
+
+        adapter, create_pattern, _ = self._build_adapter()
+        # Stand in for a rectangle: tuple of segment-like Mocks, no entry
+        # in ``_sketch_entity_centers``.
+        adapter._sketch_entities["Rectangle_1"] = (Mock(), Mock(), Mock(), Mock())
+
+        result = sketch_ops._sketch_circular_pattern_impl(
+            adapter, ["Rectangle_1"], 0.0, 0.0, 360.0, 6
+        )
+
+        assert result.status == AdapterResultStatus.ERROR
+        # Error must name the offending entity and the accepted seed types.
+        assert "Rectangle_1" in (result.error or "")
+        assert "circle, arc, ellipse, or polygon" in (result.error or "")
+        create_pattern.assert_not_called()
+
     def test_arc_angle_normalized_to_positive_when_seed_on_plus_x_axis(self):
         """A seed at (+X, 0) must hand SW a positive ``ArcAngle`` (+π), not
         the ``-π`` that Python's ``math.atan2(-0.0, -seed_x)`` produces.
