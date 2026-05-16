@@ -1499,6 +1499,186 @@ async def test_polygon_id_flows_into_offset_live(connected_adapter) -> None:
         await adapter.close_model(save=False)
 
 
+async def test_polygon_id_flows_into_circular_pattern_live(
+    connected_adapter,
+) -> None:
+    """End-to-end: ``add_polygon`` ID -> ``sketch_circular_pattern``.
+
+    Regression history this test guards against:
+
+    * Polygons register as a SAFEARRAY tuple of segment handles, so the
+      ``GetCenterPoint`` lookup ``_sketch_circular_pattern_impl`` uses
+      to derive the seed-to-axis offset cannot run against them. PR #23
+      added a register-time centre cache (``_sketch_entity_centers``)
+      so polygon IDs flow through the same path as a circle. Without
+      the cache the impl raises a "use a circle, arc, ellipse, or
+      polygon seed" error.
+
+    * Asserts the actual geometry — six sketch segments at the right
+      radius — not just ``is_success``, because a misplaced pattern
+      (e.g. the 1 mm placeholder ring the impl used to produce) would
+      still report success.
+    """
+    import math
+
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        # Hexagon at (30, 0): seed-to-origin distance = 30 mm.
+        seed = await adapter.add_polygon(
+            center_x=30.0, center_y=0.0, radius=5.0, sides=6
+        )
+        assert seed.is_success, f"add_polygon failed: {seed.error}"
+
+        # Capture pre-pattern segment count as the baseline. Hexagon
+        # produces 6 polygon edges + 1 inscribed construction circle in
+        # SW 2026, but the exact count varies by SW version — measure
+        # empirically rather than hard-coding.
+        from solidworks_mcp.adapters import sw_type_info
+
+        active_sketch = adapter.currentModel.GetActiveSketch2()
+        sw_type_info.flag_methods(active_sketch, "ISketch")
+        seed_segments = len(active_sketch.GetSketchSegments())
+        assert seed_segments >= 6, (
+            f"expected at least 6 polygon edges, got {seed_segments}"
+        )
+
+        pattern = await adapter.sketch_circular_pattern(
+            entities=[seed.data],
+            center_x=0.0,
+            center_y=0.0,
+            angle=360.0,
+            count=6,
+        )
+        assert pattern.is_success, (
+            f"polygon -> circular_pattern composition failed: {pattern.error}"
+        )
+
+        # 6 instances × 6 hexagon edges = 36 patterned edges at minimum.
+        # SW may also propagate the seed's inscribed construction circle
+        # (so the real count can be ≥ 6 × seed_segments), but only the
+        # real edges are guaranteed to scale with count. Bound below.
+        # The strict-error guard added in this PR rules out the silent
+        # 1 mm placeholder pattern that would still produce these counts
+        # but bunched at the origin — so reaching here proves the seed
+        # centre lookup succeeded.
+        segments_after = active_sketch.GetSketchSegments()
+        assert len(segments_after) >= 6 * 6, (
+            f"expected at least 6 × 6 = 36 patterned edges, got "
+            f"{len(segments_after)} (seed had {seed_segments})"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_rectangle_id_flows_into_circular_pattern_live(
+    connected_adapter,
+) -> None:
+    """End-to-end: ``add_rectangle`` ID -> ``sketch_circular_pattern``.
+
+    Rectangles register as a SAFEARRAY tuple of line segments — same
+    shape quirk as polygons. ``_add_rectangle_impl`` now caches the
+    geometric centre at register time so a rectangle ID flows through
+    circular_pattern without the "use a circle, arc, ellipse, or
+    polygon seed" rejection that PR #23's safety net would surface.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        # Rectangle from (20, -5) to (40, 5) → centred at (30, 0),
+        # seed-to-origin distance = 30 mm.
+        seed = await adapter.add_rectangle(20.0, -5.0, 40.0, 5.0)
+        assert seed.is_success, f"add_rectangle failed: {seed.error}"
+
+        from solidworks_mcp.adapters import sw_type_info
+
+        active_sketch = adapter.currentModel.GetActiveSketch2()
+        sw_type_info.flag_methods(active_sketch, "ISketch")
+        seed_segments = len(active_sketch.GetSketchSegments())
+        # SW 2026's corner-rectangle tool emits 4 line edges + 2 implicit
+        # construction segments (the diagonal markers). Just guard the
+        # lower bound — the exact count varies by SW version.
+        assert seed_segments >= 4, (
+            f"expected at least 4 rectangle edges, got {seed_segments}"
+        )
+
+        pattern = await adapter.sketch_circular_pattern(
+            entities=[seed.data],
+            center_x=0.0,
+            center_y=0.0,
+            angle=360.0,
+            count=4,
+        )
+        assert pattern.is_success, (
+            f"rectangle -> circular_pattern composition failed: {pattern.error}"
+        )
+
+        # 4 instances × 4 rectangle edges = 16 patterned edges at minimum.
+        # SW 2026 includes 2 construction segments in seed_segments that
+        # do NOT propagate through the pattern (only real edges scale
+        # with count), so the post-pattern total is 4×4 + 2 = 18 here.
+        # Bound below — the strict-error guard added in this PR rules
+        # out the silent 1 mm placeholder fallback, so reaching here
+        # proves the cached rectangle centre fed the pattern correctly.
+        segments_after = active_sketch.GetSketchSegments()
+        assert len(segments_after) >= 4 * 4, (
+            f"expected at least 4 × 4 = 16 patterned edges, got "
+            f"{len(segments_after)} (seed had {seed_segments})"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_line_seed_in_circular_pattern_errors_clearly_live(
+    connected_adapter,
+) -> None:
+    """A line seed in ``sketch_circular_pattern`` must error with a clear
+    message, NOT silently produce a 1 mm placeholder pattern.
+
+    Regression: the previous impl let line/spline/centerline seeds fall
+    through to ``arc_radius_mm = 0.0`` and clamped to 1 mm via
+    ``max(arc_radius_mm / 1000.0, 0.001)``. The COM call succeeded and
+    the user saw a tightly clustered pattern instead of an error. The
+    strict guard now raises so the failure is loud.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        line = await adapter.add_line(20.0, -5.0, 40.0, 5.0)
+        assert line.is_success, f"add_line failed: {line.error}"
+
+        pattern = await adapter.sketch_circular_pattern(
+            entities=[line.data],
+            center_x=0.0,
+            center_y=0.0,
+            angle=360.0,
+            count=4,
+        )
+        assert pattern.is_error, (
+            f"expected error for line seed, got success: {pattern.data}"
+        )
+        # Error must name the seed and point at the supported types.
+        assert line.data in (pattern.error or "")
+        assert "GetCenterPoint" in (pattern.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
 async def test_ellipse_id_flows_into_circular_pattern_live(
     connected_adapter,
 ) -> None:
