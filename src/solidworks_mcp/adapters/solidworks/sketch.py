@@ -645,7 +645,29 @@ def _add_spline_impl(
         for point in points:
             spline_points.extend([point["x"] / 1000.0, point["y"] / 1000.0, 0.0])
 
-        spline = adapter.currentSketchManager.CreateSpline2(spline_points, False)
+        # pywin32 late binding unpacks a bare list into N positional
+        # VARIANTs, so SolidWorks sees 3*N+1 arguments instead of 2 and
+        # rejects the call with DISP_E_BADPARAMCOUNT. Wrap the doubles in a
+        # SAFEARRAY VARIANT (VT_ARRAY|VT_R8) — the same lazy-import dance as
+        # add_sketch_constraint so non-Windows CI still exercises this path.
+        try:
+            import pythoncom as _pythoncom
+            from win32com.client import VARIANT as _VARIANT
+        except ImportError:
+            _pythoncom = None  # type: ignore[assignment]
+            _VARIANT = None  # type: ignore[assignment]
+
+        points_arg: Any
+        if _pythoncom is not None and _VARIANT is not None:
+            points_arg = _VARIANT(
+                _pythoncom.VT_ARRAY | _pythoncom.VT_R8, spline_points
+            )
+        elif sys.platform == "win32":
+            raise Exception("pywin32 is required for add_spline on Windows")
+        else:
+            points_arg = spline_points
+
+        spline = adapter.currentSketchManager.CreateSpline2(points_arg, False)
         if not spline:
             raise Exception("Failed to create spline")
         return cast(str, adapter._register_sketch_entity("Spline", spline))
