@@ -1490,37 +1490,97 @@ def _sketch_circular_pattern_impl(
     angle: float,
     count: int,
 ) -> AdapterResult[str]:
-    """Create a circular sketch pattern — placeholder, not yet fully implemented.
+    """Create a circular sketch pattern from the registered seed entities.
 
-    Retained for interface compatibility.  Currently returns a descriptive
-    placeholder ID.  Full implementation will call
-    ``SketchManager.CreateCircularSketchStepAndRepeat``.
+    Selects ``entities`` then calls
+    ``ISketchManager::CreateCircularSketchStepAndRepeat(ArcRadius, ArcAngle,
+    PatternNum, PatternSpacing, PatternRotate, DeleteInstances, RadiusDim,
+    AngleDim, CreateNumOfInstancesDim)``.
+
+    The seed's position determines where instances land — ``ArcRadius`` is
+    only used for the on-canvas radius dimension (which we suppress), and
+    the pattern centre defaults to the sketch origin when no centre
+    selection is supplied.  ``ArcAngle`` is left at zero so the pattern
+    starts at the seed's existing angle.  ``PatternSpacing`` is the
+    per-instance angle in radians; for the typical "N instances around
+    360°" case the caller passes ``angle=360.0`` and we divide by
+    ``count`` so the last instance lands one slot before the seed.
+
+    ``center_x`` / ``center_y`` are accepted to match the tool-layer
+    contract but the COM API offers no way to set the pattern centre
+    without a separate sketch-point selection; SW falls back to the
+    sketch origin.  Position the seed accordingly.
 
     Args:
         adapter: A ``PyWin32Adapter`` with an open sketch.
-        entities: List of registered entity IDs to pattern (currently unused).
-        center_x: Pattern centre X in **millimetres** (currently unused).
-        center_y: Pattern centre Y in **millimetres** (currently unused).
-        angle: Angular spacing between instances in **degrees**.
-        count: Number of instances (including the seed).
+        entities: Registered entity IDs to pattern.  Must be non-empty.
+        center_x: Pattern centre X in **millimetres** (currently advisory
+            — see note above; SW uses the sketch origin).
+        center_y: Pattern centre Y in **millimetres** (currently advisory).
+        angle: Total swept angle in **degrees** (e.g. ``360`` for a full
+            ring or ``180`` for a half-circle).  Must be > 0.
+        count: Total number of instances (including the seed).  Must be
+            at least 2.
 
     Returns:
-        AdapterResult[str]: ``data`` is a placeholder ID such as
-        ``"CircularPattern_6x60.0deg_2345"``.
+        AdapterResult[str]: On success, ``data`` is a synthesised
+        ``"CircularPattern_<count>x<angle>deg_<rand>"`` ID — the COM
+        method only returns a boolean.
+
+    Raises:
+        Exception: Propagated through ``_handle_com_operation`` when
+            inputs are invalid, an entity isn't registered, or the COM
+            call returns ``False``.
 
     Example::
 
+        # 6 evenly-spaced copies of Circle_1 around the origin
         result = pywin32_sketch_ops.sketch_circular_pattern(
-            adapter, ["Circle_2"], 0, 0, 60.0, 6
+            adapter, ["Circle_1"], 0.0, 0.0, 360.0, 6
         )
-        print(result.data)  # "CircularPattern_6x60.0deg_2345"
+        print(result.data)  # "CircularPattern_6x360.0deg_4321"
     """
-    _ = entities, center_x, center_y
+    _ = center_x, center_y
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
     def _circular_pattern_operation() -> str:
-        return f"CircularPattern_{count}x{angle}deg_{int(time.time() * 1000) % 10000}"
+        if not entities:
+            raise Exception("sketch_circular_pattern requires at least one entity")
+        if count < 2:
+            raise Exception("sketch_circular_pattern requires count >= 2")
+        if angle <= 0:
+            raise Exception("sketch_circular_pattern requires angle > 0")
+
+        adapter.currentModel.ClearSelection2(True)
+        _select_sketch_entities(adapter, entities, mark=0)
+
+        # SW reads the actual seed position from the selection to place
+        # instances; ArcRadius only feeds the optional on-canvas radius
+        # dimension (suppressed here). It must, however, be strictly
+        # positive — passing zero causes SW to silently reject the call
+        # and return False, so we pass a small placeholder.
+        pattern_spacing = math.radians(angle) / count
+        arc_radius_placeholder_m = 0.001  # 1 mm
+
+        ok = adapter.currentSketchManager.CreateCircularSketchStepAndRepeat(
+            arc_radius_placeholder_m,  # ArcRadius (metres)
+            0.0,  # ArcAngle (starting angle, radians)
+            count,  # PatternNum
+            pattern_spacing,  # PatternSpacing (radians)
+            True,  # PatternRotate
+            "",  # DeleteInstances
+            False,  # RadiusDim
+            False,  # AngleDim
+            False,  # CreateNumOfInstancesDim
+        )
+        adapter.currentModel.ClearSelection2(True)
+        if not ok:
+            raise Exception("Failed to create circular sketch pattern")
+
+        return (
+            f"CircularPattern_{count}x{angle}deg_{int(time.time() * 1000) % 10000}"
+        )
 
     return cast(
         AdapterResult[str],

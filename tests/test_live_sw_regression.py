@@ -636,3 +636,92 @@ async def test_sketch_linear_pattern_rejects_unknown_entity(connected_adapter) -
         assert "Unknown sketch entity" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- sketch_circular_pattern live regression ----
+
+
+async def test_sketch_circular_pattern_creates_real_pattern(
+    connected_adapter,
+) -> None:
+    """End-to-end check that sketch_circular_pattern arrays a seed around
+    the sketch origin.
+
+    Regression: ``ISketchManager::CreateCircularSketchStepAndRepeat`` silently
+    returns ``False`` when ``ArcRadius`` is exactly zero — the COM call
+    succeeds with any positive placeholder because SW reads the seed's
+    actual position from the selection. The impl now passes a 1 mm
+    placeholder so degenerate-centre cases still produce a real pattern.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        # Seed circle offset from origin so SW has something to revolve
+        circle = await adapter.add_circle(30.0, 0.0, 3.0)
+        assert circle.is_success, f"add_circle failed: {circle.error}"
+
+        pattern = await adapter.sketch_circular_pattern(
+            entities=[circle.data],
+            center_x=0.0,
+            center_y=0.0,
+            angle=360.0,
+            count=6,
+        )
+        assert pattern.is_success, (
+            f"sketch_circular_pattern failed: {pattern.error}"
+        )
+        assert pattern.data.startswith("CircularPattern_6x360.0deg_"), (
+            f"unexpected circular pattern id: {pattern.data!r}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_circular_pattern_no_active_sketch_returns_error(
+    connected_adapter,
+) -> None:
+    """Calling sketch_circular_pattern without a sketch must error
+    without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.sketch_circular_pattern(["Circle_1"], 0.0, 0.0, 360.0, 6)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_circular_pattern_rejects_unknown_entity(
+    connected_adapter,
+) -> None:
+    """An entity ID outside the registry must produce a clear error."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        bad = await adapter.sketch_circular_pattern(
+            entities=["NotAnEntity_777"],
+            center_x=0.0,
+            center_y=0.0,
+            angle=360.0,
+            count=6,
+        )
+        assert bad.is_error
+        assert "Unknown sketch entity" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
