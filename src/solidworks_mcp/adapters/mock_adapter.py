@@ -1052,6 +1052,39 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             execution_time=self._delays["sketch_operation"] / 2,
         )
 
+    async def add_polygon(
+        self, center_x: float, center_y: float, radius: float, sides: int
+    ) -> AdapterResult[str]:
+        """Mock adding a regular polygon to sketch.
+
+        Args:
+            center_x (float): Polygon centre X in millimetres.
+            center_y (float): Polygon centre Y in millimetres.
+            radius (float): Circumradius in millimetres (distance from centre
+                to each vertex; matches the real adapter's
+                ``CreatePolygon(..., Inscribed=True)`` semantics).
+            sides (int): Number of polygon sides.
+
+        Returns:
+            AdapterResult[str]: The result produced by the operation.
+        """
+        if not self._current_sketch:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active sketch"
+            )
+
+        await asyncio.sleep(self._delays["sketch_operation"] / 2)
+        self._operation_count += 1
+
+        polygon_id = f"Polygon_{sides}sided_{random.randint(1000, 9999)}"
+        self._sketch_entity_ids.add(polygon_id)
+
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=polygon_id,
+            execution_time=self._delays["sketch_operation"] / 2,
+        )
+
     async def add_sketch_constraint(
         self,
         entity1: str,
