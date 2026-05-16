@@ -1769,21 +1769,39 @@ def _sketch_offset_impl(
     offset_distance: float,
     reverse_direction: bool,
 ) -> AdapterResult[str]:
-    """Offset sketch entities by a fixed distance — placeholder, not yet fully implemented.
+    """Offset selected sketch entities by a fixed distance.
 
-    Retained for interface compatibility.  Full implementation will select the
-    source entities and call ``SketchManager.SketchOffset``.
+    Selects ``entities`` then calls
+    ``ISketchManager::SketchOffset2(Offset, BothDirections, Chain, CapEnds,
+    MakeConstruction, AddDimensions)``.
+
+    ``Offset`` is in metres; a negative value flips the offset direction
+    per the COM docs, so ``reverse_direction=True`` is implemented by
+    negating the value rather than relying on ``BothDirections``.
+
+    The remaining flags are pinned to predictable defaults so the call is
+    deterministic for automation: no caps, no auto-conversion to
+    construction geometry, no on-canvas dimension, and ``Chain=False`` so
+    only the supplied entities are offset (rather than the entire
+    contour they belong to).
 
     Args:
         adapter: A ``PyWin32Adapter`` with an open sketch.
-        entities: List of registered entity IDs to offset (currently unused).
-        offset_distance: Offset distance in **millimetres**.
-        reverse_direction: When ``True``, offset inwards; when ``False``,
-            offset outwards.
+        entities: Registered entity IDs to offset.  Must be non-empty.
+        offset_distance: Offset distance in **millimetres**.  Must be > 0
+            — the direction is controlled by ``reverse_direction``, not
+            the sign.
+        reverse_direction: When ``True``, offset in the opposite of SW's
+            default direction (effectively a negated ``Offset`` argument).
 
     Returns:
-        AdapterResult[str]: ``data`` is a placeholder ID such as
-        ``"Offset_5.0_inward_9876"``.
+        AdapterResult[str]: On success, ``data`` is a synthesised
+        ``"Offset_<distance>_<direction>_<rand>"`` ID.
+
+    Raises:
+        Exception: Propagated through ``_handle_com_operation`` when
+            inputs are invalid, an entity isn't registered, or the COM
+            call returns ``False``.
 
     Example::
 
@@ -1792,13 +1810,41 @@ def _sketch_offset_impl(
         )
         print(result.data)  # "Offset_5.0_outward_9876"
     """
-    _ = entities
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
     def _offset_operation() -> str:
+        if not entities:
+            raise Exception("sketch_offset requires at least one entity")
+        if offset_distance <= 0:
+            raise Exception(
+                "sketch_offset requires offset_distance > 0 — use "
+                "reverse_direction to flip the side"
+            )
+
+        adapter.currentModel.ClearSelection2(True)
+        _select_sketch_entities(adapter, entities, mark=0)
+
+        # Negative Offset flips the side per SketchOffset2 docs.
+        offset_m = -offset_distance / 1000.0 if reverse_direction else offset_distance / 1000.0
+
+        ok = adapter.currentSketchManager.SketchOffset2(
+            offset_m,  # Offset (metres)
+            False,  # BothDirections
+            False,  # Chain
+            0,  # CapEnds (swSkOffsetCapEndType_e: 0 = no caps)
+            0,  # MakeConstruction (swSkOffsetMakeConstructionType_e: 0 = none)
+            False,  # AddDimensions
+        )
+        adapter.currentModel.ClearSelection2(True)
+        if not ok:
+            raise Exception("Failed to offset sketch entities")
+
         direction = "inward" if reverse_direction else "outward"
-        return f"Offset_{offset_distance}_{direction}_{int(time.time() * 1000) % 10000}"
+        return (
+            f"Offset_{offset_distance}_{direction}_"
+            f"{int(time.time() * 1000) % 10000}"
+        )
 
     return cast(
         AdapterResult[str],

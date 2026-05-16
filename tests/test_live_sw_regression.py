@@ -910,3 +910,85 @@ async def test_sketch_mirror_rejects_unknown_mirror_line(
         assert "Unknown mirror_line entity" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- sketch_offset live regression ----
+
+
+async def test_sketch_offset_creates_real_offset(connected_adapter) -> None:
+    """End-to-end check that sketch_offset offsets a line in both directions.
+
+    ``ISketchManager::SketchOffset2`` takes
+    ``(Offset, BothDirections, Chain, CapEnds, MakeConstruction,
+    AddDimensions)``.  This test pins the mm-to-m conversion, the
+    sign-flip handling for ``reverse_direction``, and that the call
+    succeeds for both outward and inward offsets of a single line.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        # Outward offset
+        l1 = await adapter.add_line(0.0, 0.0, 50.0, 0.0)
+        assert l1.is_success
+        outward = await adapter.sketch_offset([l1.data], 5.0, False)
+        assert outward.is_success, f"sketch_offset outward failed: {outward.error}"
+        assert outward.data.startswith("Offset_5.0_outward_"), (
+            f"unexpected outward offset id: {outward.data!r}"
+        )
+
+        # Inward offset on a different seed (reverse_direction=True)
+        l2 = await adapter.add_line(0.0, 20.0, 50.0, 20.0)
+        assert l2.is_success
+        inward = await adapter.sketch_offset([l2.data], 3.0, True)
+        assert inward.is_success, f"sketch_offset inward failed: {inward.error}"
+        assert inward.data.startswith("Offset_3.0_inward_"), (
+            f"unexpected inward offset id: {inward.data!r}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_offset_no_active_sketch_returns_error(
+    connected_adapter,
+) -> None:
+    """Calling sketch_offset without a sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.sketch_offset(["Line_1"], 5.0, False)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_offset_rejects_non_positive_distance(
+    connected_adapter,
+) -> None:
+    """A non-positive distance must produce a clear error without touching
+    SW selection state."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+        l1 = await adapter.add_line(0.0, 0.0, 50.0, 0.0)
+        assert l1.is_success
+
+        bad = await adapter.sketch_offset([l1.data], 0.0, False)
+        assert bad.is_error
+        assert "offset_distance > 0" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)

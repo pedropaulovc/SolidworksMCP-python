@@ -1226,6 +1226,62 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             execution_time=self._delays["sketch_operation"] / 2,
         )
 
+    async def sketch_offset(
+        self,
+        entities: list[str],
+        offset_distance: float,
+        reverse_direction: bool,
+    ) -> AdapterResult[str]:
+        """Mock offsetting sketch entities by a fixed distance.
+
+        Args:
+            entities (list[str]): IDs of segments to offset.
+            offset_distance (float): Distance in millimetres. Must be > 0.
+            reverse_direction (bool): Flip the offset direction.
+
+        Returns:
+            AdapterResult[str]: The result produced by the operation.
+        """
+        if not self._current_sketch:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active sketch"
+            )
+        if not entities:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="sketch_offset requires at least one entity",
+            )
+        if offset_distance <= 0:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=(
+                    "sketch_offset requires offset_distance > 0 — use "
+                    "reverse_direction to flip the side"
+                ),
+            )
+        for ent in entities:
+            if ent not in self._sketch_entity_ids:
+                return AdapterResult(
+                    status=AdapterResultStatus.ERROR,
+                    error=(
+                        f"Unknown sketch entity '{ent}'. Use IDs returned by "
+                        "add_line/add_arc/add_circle/add_spline/add_centerline."
+                    ),
+                )
+
+        await asyncio.sleep(self._delays["sketch_operation"] / 2)
+        self._operation_count += 1
+
+        direction = "inward" if reverse_direction else "outward"
+        offset_id = (
+            f"Offset_{offset_distance}_{direction}_{random.randint(1000, 9999)}"
+        )
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=offset_id,
+            execution_time=self._delays["sketch_operation"] / 2,
+        )
+
     async def add_sketch_constraint(
         self,
         entity1: str,
