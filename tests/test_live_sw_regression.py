@@ -501,3 +501,93 @@ async def test_add_arc_no_active_sketch_returns_error(connected_adapter) -> None
         assert "No active sketch" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- add_centerline live regression ----
+
+
+async def test_add_centerline_creates_real_centerline(connected_adapter) -> None:
+    """End-to-end check that add_centerline creates a real construction line in SW.
+
+    Asserts the resulting geometry, not just the return code:
+
+    * Exactly one segment is in the active sketch after the call.
+    * Its ``ISketchSegment.ConstructionGeometry`` property is ``True`` —
+      this is the construction-vs-real flag that distinguishes a
+      centerline from a regular line, so a regression that calls
+      ``CreateLine`` by mistake would fail here.
+    * The segment's start and end points round-trip through
+      ``ISketchLine.GetStartPoint2 / GetEndPoint2`` to the requested
+      ``(0, -20)`` and ``(0, 20)`` mm — pinning the mm-to-m conversion.
+
+    All readback calls need ``sw_type_info.flag_methods`` so pywin32
+    late binding resolves the zero-arg accessors as methods rather than
+    tuple-valued properties.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        x1, y1, x2, y2 = 0.0, -20.0, 0.0, 20.0
+        centerline = await adapter.add_centerline(x1, y1, x2, y2)
+        assert centerline.is_success, f"add_centerline failed: {centerline.error}"
+        assert centerline.data.startswith("Centerline_"), (
+            f"unexpected centerline id: {centerline.data!r}"
+        )
+        assert centerline.data in adapter._sketch_entities
+
+        from solidworks_mcp.adapters import sw_type_info
+
+        active_sketch = adapter.currentModel.GetActiveSketch2()
+        sw_type_info.flag_methods(active_sketch, "ISketch")
+        segments = active_sketch.GetSketchSegments()
+        assert len(segments) == 1, (
+            f"expected 1 sketch segment after add_centerline, got {len(segments)}"
+        )
+
+        seg = segments[0]
+        for iface in ("ISketchSegment", "ISketchLine"):
+            sw_type_info.flag_methods(seg, iface)
+
+        assert seg.ConstructionGeometry is True, (
+            "add_centerline must produce a construction-geometry segment "
+            "(ConstructionGeometry=True), not a regular line"
+        )
+
+        sp = seg.GetStartPoint2()
+        ep = seg.GetEndPoint2()
+        # Endpoints come back in metres; SW may swap start/end depending
+        # on internal direction, so compare as an unordered pair.
+        observed = {
+            (round(sp.X * 1000.0, 3), round(sp.Y * 1000.0, 3)),
+            (round(ep.X * 1000.0, 3), round(ep.Y * 1000.0, 3)),
+        }
+        expected = {(x1, y1), (x2, y2)}
+        assert observed == expected, (
+            f"centerline endpoints {observed} != requested {expected}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_centerline_no_active_sketch_returns_error(
+    connected_adapter,
+) -> None:
+    """Calling add_centerline without an open sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        # Intentionally skip create_sketch; currentSketchManager stays None.
+        bad = await adapter.add_centerline(0.0, -20.0, 0.0, 20.0)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
