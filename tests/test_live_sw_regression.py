@@ -514,6 +514,9 @@ async def test_add_ellipse_creates_real_ellipse(connected_adapter) -> None:
 
     Geometric assertions (not just ``is_success``):
 
+    * The returned ``Ellipse_*`` id is registered in
+      ``adapter._sketch_entities`` so downstream constraint/dimension
+      calls can look it up (parity with the mock adapter).
     * Exactly one sketch segment is present, and its type code (2 in
       ``swSketchSegments_e``) is the ellipse type — a regression that
       routed to ``CreateCircle`` instead would show type 1.
@@ -521,9 +524,10 @@ async def test_add_ellipse_creates_real_ellipse(connected_adapter) -> None:
       centre.
     * ``GetMajorPoint2`` / ``GetMinorPoint2`` sit on ``+X`` and ``+Y``
       from the centre respectively, at half the requested full-axis
-      length each. A flipped axis order (minor on +X, major on +Y)
-      would fail this — the adapter splits ``major_axis`` / 2 and
-      ``minor_axis`` / 2 internally.
+      length each — verified in **metres** against the mm/1000.0
+      conversion. A flipped axis order (minor on +X, major on +Y)
+      would fail this; so would a wrong unit conversion (a stray
+      mm-as-metres bug would produce a 1000x offset).
     """
     import math
 
@@ -548,6 +552,16 @@ async def test_add_ellipse_creates_real_ellipse(connected_adapter) -> None:
             f"unexpected ellipse id: {ellipse.data!r}"
         )
 
+        # The real adapter must register the ellipse for downstream
+        # constraints/dimensions to find it — parity with the mock
+        # adapter (otherwise mock-validated workflows fail live with
+        # "Unknown sketch entity").
+        assert ellipse.data in adapter._sketch_entities, (
+            f"ellipse id {ellipse.data!r} not registered in "
+            f"_sketch_entities; downstream add_sketch_constraint / "
+            f"add_dimension calls would fail with 'Unknown sketch entity'"
+        )
+
         from solidworks_mcp.adapters import sw_type_info
 
         active_sketch = adapter.currentModel.GetActiveSketch2()
@@ -557,7 +571,11 @@ async def test_add_ellipse_creates_real_ellipse(connected_adapter) -> None:
             f"expected 1 sketch segment after add_ellipse, got {len(segments)}"
         )
 
-        seg = segments[0]
+        # Pull the entity straight from the registry; this is the
+        # exact COM handle add_sketch_constraint / add_dimension would
+        # resolve, so anything we observe about it is what those
+        # downstream tools would see.
+        seg = adapter._sketch_entities[ellipse.data]
         for iface in ("ISketchSegment", "ISketchEllipse"):
             sw_type_info.flag_methods(seg, iface)
 
@@ -573,38 +591,53 @@ async def test_add_ellipse_creates_real_ellipse(connected_adapter) -> None:
         major_pt = seg.GetMajorPoint2()
         minor_pt = seg.GetMinorPoint2()
 
-        # Centre and axis endpoints (all in metres in COM).
-        cx_obs = round(center_pt.X * 1000.0, 3)
-        cy_obs = round(center_pt.Y * 1000.0, 3)
-        major_dx = round((major_pt.X - center_pt.X) * 1000.0, 3)
-        major_dy = round((major_pt.Y - center_pt.Y) * 1000.0, 3)
-        minor_dx = round((minor_pt.X - center_pt.X) * 1000.0, 3)
-        minor_dy = round((minor_pt.Y - center_pt.Y) * 1000.0, 3)
+        # Verify in **metres** — SolidWorks COM returns all coordinates
+        # in metres, so a regression that forgot the /1000.0 conversion
+        # would surface here as a 1000x offset.
+        expected_major_m = (major_axis / 2.0) / 1000.0  # 0.030
+        expected_minor_m = (minor_axis / 2.0) / 1000.0  # 0.015
+        expected_cx_m = cx / 1000.0
+        expected_cy_m = cy / 1000.0
+        tol_m = 1e-6  # 1 micron — comfortably tighter than SW's tolerance
 
-        assert (cx_obs, cy_obs) == (cx, cy), (
-            f"ellipse centre {(cx_obs, cy_obs)} != requested {(cx, cy)}"
+        assert abs(center_pt.X - expected_cx_m) < tol_m, (
+            f"ellipse centre X {center_pt.X} m != requested "
+            f"{expected_cx_m} m (mm-to-m conversion may be broken)"
+        )
+        assert abs(center_pt.Y - expected_cy_m) < tol_m, (
+            f"ellipse centre Y {center_pt.Y} m != requested "
+            f"{expected_cy_m} m (mm-to-m conversion may be broken)"
         )
 
         # Major endpoint expected on +X at major_axis / 2 from centre.
         # Minor endpoint expected on +Y at minor_axis / 2 from centre.
-        expected_major = major_axis / 2.0
-        expected_minor = minor_axis / 2.0
-        assert abs(major_dx - expected_major) < 0.1 and abs(major_dy) < 0.1, (
-            f"major-axis offset ({major_dx}, {major_dy}) mm, expected "
-            f"(~{expected_major}, ~0); axis order is probably flipped"
+        major_dx_m = major_pt.X - center_pt.X
+        major_dy_m = major_pt.Y - center_pt.Y
+        minor_dx_m = minor_pt.X - center_pt.X
+        minor_dy_m = minor_pt.Y - center_pt.Y
+
+        assert (
+            abs(major_dx_m - expected_major_m) < tol_m and abs(major_dy_m) < tol_m
+        ), (
+            f"major-axis offset ({major_dx_m}, {major_dy_m}) m, expected "
+            f"(~{expected_major_m}, ~0); axis order or mm-to-m conversion "
+            f"is probably broken"
         )
-        assert abs(minor_dx) < 0.1 and abs(minor_dy - expected_minor) < 0.1, (
-            f"minor-axis offset ({minor_dx}, {minor_dy}) mm, expected "
-            f"(~0, ~{expected_minor}); axis order is probably flipped"
+        assert (
+            abs(minor_dx_m) < tol_m and abs(minor_dy_m - expected_minor_m) < tol_m
+        ), (
+            f"minor-axis offset ({minor_dx_m}, {minor_dy_m}) m, expected "
+            f"(~0, ~{expected_minor_m}); axis order or mm-to-m "
+            f"conversion is probably broken"
         )
 
         # Sanity: the major axis should be the longer one. If a future
         # change swaps the half-/full-axis conversion this fails loudly.
-        major_len = math.hypot(major_dx, major_dy)
-        minor_len = math.hypot(minor_dx, minor_dy)
+        major_len = math.hypot(major_dx_m, major_dy_m)
+        minor_len = math.hypot(minor_dx_m, minor_dy_m)
         assert major_len > minor_len, (
-            f"major axis length {major_len:.3f} not greater than minor "
-            f"{minor_len:.3f} — half/full conversion may be inverted"
+            f"major axis length {major_len} m not greater than minor "
+            f"{minor_len} m — half/full conversion may be inverted"
         )
     finally:
         await adapter.close_model(save=False)
