@@ -1735,6 +1735,15 @@ def _sketch_circular_pattern_impl(
             if arc_angle_rad < 0:
                 arc_angle_rad += 2.0 * math.pi
 
+            # ``CreateCircularSketchStepAndRepeat`` silently returns False on
+            # negative ``ArcAngle`` values — the bundled VBA/C# examples all
+            # pass positive radians (e.g. ``4.732863934409`` ≈ 271°).  Python's
+            # ``atan2`` produces ``-π`` for a seed on the +X axis (because
+            # ``-seed_xy[1]`` is ``-0.0``), which is geometrically equivalent
+            # to ``+π`` but fails the COM call.  Normalise to ``[0, 2π)``.
+            if arc_angle_rad < 0:
+                arc_angle_rad += 2.0 * math.pi
+
             # 1 mm minimum keeps SW from silently rejecting the call when
             # the seed sits right on the pattern centre.
             arc_radius_m = max(arc_radius_mm / 1000.0, 0.001)
