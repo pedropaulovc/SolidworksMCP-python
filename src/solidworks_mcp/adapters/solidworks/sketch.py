@@ -606,55 +606,71 @@ def _add_spline_impl(
 ) -> AdapterResult[str]:
     """Add a NURBS spline through the supplied control points.
 
-    Calls ``SketchManager.CreateSpline2`` with the flattened XYZ coordinate
-    list.  Each point dict must contain ``"x"`` and ``"y"`` keys; the Z
-    component is forced to ``0``.
+    Calls ``SketchManager.CreateSpline2(points, simulateNaturalEnds=False)``
+    with a flattened XYZ coordinate list. Each point dict must contain
+    ``"x"`` and ``"y"`` keys; the Z component is forced to ``0``.
 
     Args:
         adapter: A ``PyWin32Adapter`` with an open sketch.
         points: Ordered list of control-point dicts with keys ``"x"`` and
-            ``"y"`` (in **millimetres**).  Minimum 2 points required by
-            SolidWorks.  Example::
+            ``"y"`` (in **millimetres**). Minimum 2 points required by
+            SolidWorks. Example::
 
                 [{"x": 0, "y": 0}, {"x": 25, "y": 10}, {"x": 50, "y": 0}]
 
     Returns:
-        AdapterResult[str]: On success, ``data`` is a timestamped entity ID
-        string (e.g. ``"Spline_7832"``).  On failure, ``status`` is
+        AdapterResult[str]: On success, ``data`` is the registered entity
+        ID string (e.g. ``"Spline_5"``). On failure, ``status`` is
         ``ERROR``.
 
     Raises:
-        Exception: Propagated through ``_handle_com_operation`` when
-            ``CreateSpline2`` returns ``None``.
+        Exception: Propagated through ``_handle_com_operation`` when fewer
+            than two points are supplied or ``CreateSpline2`` returns
+            ``None``.
 
     Example::
 
         pts = [{"x": 0, "y": 0}, {"x": 20, "y": 15}, {"x": 40, "y": 0}]
         result = pywin32_sketch_ops.add_spline(adapter, pts)
-        print(result.data)  # "Spline_5412"
+        print(result.data)  # "Spline_1"
     """
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
     def _spline_operation() -> str:
-        """Inner COM closure that flattens the point list and calls CreateSpline2.
+        if len(points) < 2:
+            raise Exception("add_spline requires at least 2 points")
 
-        Returns:
-            str: A timestamped unique spline ID (not registered in entity
-            registry because splines do not support individual selection by
-            the current dimension API).
-
-        Raises:
-            Exception: If ``CreateSpline2`` returns ``None``.
-        """
-        spline_points = []
+        spline_points: list[float] = []
         for point in points:
-            spline_points.extend([point["x"] / 1000.0, point["y"] / 1000.0, 0])
+            spline_points.extend([point["x"] / 1000.0, point["y"] / 1000.0, 0.0])
 
-        spline = adapter.currentSketchManager.CreateSpline2(spline_points, True, None)
+        # pywin32 late binding unpacks a bare list into N positional
+        # VARIANTs, so SolidWorks sees 3*N+1 arguments instead of 2 and
+        # rejects the call with DISP_E_BADPARAMCOUNT. Wrap the doubles in a
+        # SAFEARRAY VARIANT (VT_ARRAY|VT_R8) — the same lazy-import dance as
+        # add_sketch_constraint so non-Windows CI still exercises this path.
+        try:
+            import pythoncom as _pythoncom
+            from win32com.client import VARIANT as _VARIANT
+        except ImportError:
+            _pythoncom = None  # type: ignore[assignment]
+            _VARIANT = None  # type: ignore[assignment]
+
+        points_arg: Any
+        if _pythoncom is not None and _VARIANT is not None:
+            points_arg = _VARIANT(
+                _pythoncom.VT_ARRAY | _pythoncom.VT_R8, spline_points
+            )
+        elif sys.platform == "win32":
+            raise Exception("pywin32 is required for add_spline on Windows")
+        else:
+            points_arg = spline_points
+
+        spline = adapter.currentSketchManager.CreateSpline2(points_arg, False)
         if not spline:
             raise Exception("Failed to create spline")
-        return f"Spline_{int(time.time() * 1000) % 10000}"
+        return cast(str, adapter._register_sketch_entity("Spline", spline))
 
     return cast(
         AdapterResult[str],
@@ -936,7 +952,7 @@ def _add_sketch_constraint_impl(
         entity1_obj = adapter._sketch_entities.get(entity1)
         if entity1_obj is None:
             raise Exception(
-                f"Unknown sketch entity '{entity1}'. Use IDs returned by add_line/add_arc/add_circle."
+                f"Unknown sketch entity '{entity1}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
             )
 
         entities = [entity1_obj]
@@ -944,14 +960,14 @@ def _add_sketch_constraint_impl(
             entity2_obj = adapter._sketch_entities.get(entity2)
             if entity2_obj is None:
                 raise Exception(
-                    f"Unknown sketch entity '{entity2}'. Use IDs returned by add_line/add_arc/add_circle."
+                    f"Unknown sketch entity '{entity2}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
                 )
             entities.append(entity2_obj)
         if entity3:
             entity3_obj = adapter._sketch_entities.get(entity3)
             if entity3_obj is None:
                 raise Exception(
-                    f"Unknown sketch entity '{entity3}'. Use IDs returned by add_line/add_arc/add_circle."
+                    f"Unknown sketch entity '{entity3}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
                 )
             entities.append(entity3_obj)
 
@@ -1145,7 +1161,7 @@ def _add_sketch_dimension_impl(
         entity1_obj = adapter._sketch_entities.get(entity1)
         if entity1_obj is None:
             raise Exception(
-                f"Unknown sketch entity '{entity1}'. Use IDs returned by add_line/add_arc/add_circle."
+                f"Unknown sketch entity '{entity1}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
             )
 
         entity2_obj = None
@@ -1153,7 +1169,7 @@ def _add_sketch_dimension_impl(
             entity2_obj = adapter._sketch_entities.get(entity2)
             if entity2_obj is None:
                 raise Exception(
-                    f"Unknown sketch entity '{entity2}'. Use IDs returned by add_line/add_arc/add_circle."
+                    f"Unknown sketch entity '{entity2}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
                 )
 
         dim_type = (dimension_type or "linear").strip().lower()
