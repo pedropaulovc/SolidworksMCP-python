@@ -2,6 +2,30 @@
 
 This file is the quick orientation guide for contributors and coding agents.
 
+## Fork layout — read this before branching
+
+This checkout is `pedropaulovc/SolidworksMCP-python`, a fork of
+`andrewbartels1/SolidworksMCP-python`. **`FORK.md` is authoritative**
+for branch conventions, remote naming, sync, and what lives on
+`personal` vs `main`. Read it before creating branches or PRs.
+
+Quick rules to keep CI green:
+
+- **Upstream-bound PR** (going to `andrewbartels1/...`): branch off
+  `main`, name `feat/...` / `fix/...` / `docs/...`. The
+  `pedro-pr-guard` workflow fails if such a branch carries fork-only
+  paths (`FORK.md`, `pedro-*.yml`, `sync-upstream.*`,
+  `provision-fork.sh`, `.claude/skills/personal/`).
+- **Personal / fork-only PR** (going to `personal` on the fork):
+  branch off `personal`, name `pedro/<topic>`. The guard ignores
+  `personal` and `pedro/**` so the inherited fork-only files don't
+  trip it.
+- Don't use unprefixed branch names (`worktree-add-*`, `experiment-*`,
+  etc.) for personal work — the guard will flag them.
+
+Sync upstream changes into the fork with
+`./scripts/sync-upstream.ps1` (or `.sh`).
+
 ## Platform and Runtime
 
 - Primary runtime is Python 3.11+.
