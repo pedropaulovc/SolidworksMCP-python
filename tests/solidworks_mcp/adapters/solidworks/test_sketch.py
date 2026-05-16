@@ -363,23 +363,17 @@ def test_sketch_linear_pattern_clears_selection_on_com_failure() -> None:
     assert clear_selection.call_count == 2
 
 
-def test_sketch_circular_mirror_offset_placeholders() -> None:
-    """Circular pattern, mirror, and offset are still placeholders at this
-    point in the stack (#17/#18/#19 add the real impls). Verify the
-    placeholder shape so a future refactor knows what's been left behind.
+def test_sketch_mirror_offset_placeholders() -> None:
+    """Mirror and offset are still placeholders at this point in the
+    stack (#18 / #19 add the real impls). Verify the placeholder shape
+    so a future refactor knows what's been left behind.
     """
     adapter = _FakeSketchAdapter()
     adapter.currentSketchManager = object()
 
-    circular_pattern = sketch._sketch_circular_pattern_impl(
-        adapter, ["Line_1"], 0, 0, 45.0, 8
-    )
     mirror = sketch._sketch_mirror_impl(adapter, ["Line_1"], "Centerline_1")
     offset = sketch._sketch_offset_impl(adapter, ["Line_1"], 2.5, True)
 
-    assert circular_pattern.is_success and circular_pattern.data.startswith(
-        "CircularPattern_8x45.0deg_"
-    )
     assert mirror.is_success and mirror.data.startswith("Mirror_Centerline_1_")
     assert offset.is_success and "_inward_" in offset.data
 

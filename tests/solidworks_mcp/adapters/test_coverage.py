@@ -6,7 +6,8 @@ import asyncio
 import time
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+import math
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -504,6 +505,176 @@ class TestMockAdapterSuccessPaths:
         )
         assert result.status == AdapterResultStatus.ERROR
         assert "angle > 0" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_sketch_circular_pattern_rejects_non_origin_center(self):
+        """Mock matches the real adapter: only (0, 0) centres are honoured."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        circle = await adapter.add_circle(30.0, 0.0, 3.0)
+
+        result = await adapter.sketch_circular_pattern(
+            [circle.data], 5.0, 0.0, 360.0, 6
+        )
+        assert result.status == AdapterResultStatus.ERROR
+        assert "(0, 0)" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_sketch_circular_pattern_partial_sweep(self):
+        """Mock handles partial sweeps (e.g. 180° with 3 instances) the
+        same way as a full pattern — the mock only synthesises an ID, but
+        the real impl uses ``angle / (count - 1)`` for partial sweeps so
+        the last instance lands at the requested total angle.
+        """
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        circle = await adapter.add_circle(30.0, 0.0, 3.0)
+
+        result = await adapter.sketch_circular_pattern(
+            [circle.data], 0.0, 0.0, 180.0, 3
+        )
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.startswith("CircularPattern_3x180.0deg_")
+
+
+# ---------------------------------------------------------------------------
+# Real (PyWin32) circular pattern impl — fake SketchManager unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestRealCircularPatternImpl:
+    """Direct tests for ``_sketch_circular_pattern_impl`` against a fake
+    SketchManager. Verifies the COM-call argument shape so partial sweeps
+    and full circles use the right ``PatternSpacing`` formula.
+    """
+
+    @staticmethod
+    def _build_adapter() -> tuple[SimpleNamespace, Mock, Mock]:
+        """Build the minimum object graph the real impl reads from.
+
+        The impl needs:
+          * ``adapter._sketch_entities`` — registered seed entities
+          * ``adapter.currentSketchManager.CreateCircularSketchStepAndRepeat``
+          * ``adapter.currentModel.ClearSelection2`` and
+            ``adapter.currentModel.SelectionManager.CreateSelectData``
+          * ``adapter._handle_com_operation(name, fn)`` — invoked
+            synchronously
+          * ``adapter._attempt(fn, default=...)`` — synchronous
+        """
+        seed_entity = Mock()
+        seed_entity.Select4 = Mock(return_value=True)
+        sketch_entities = {"Circle_1": seed_entity}
+
+        create_pattern = Mock(return_value=True)
+        sketch_manager = Mock()
+        sketch_manager.CreateCircularSketchStepAndRepeat = create_pattern
+
+        select_data = Mock()
+        selection_mgr = Mock()
+        selection_mgr.CreateSelectData = Mock(return_value=select_data)
+        current_model = SimpleNamespace(
+            ClearSelection2=Mock(return_value=True),
+            SelectionManager=selection_mgr,
+        )
+
+        def _handle(_name, fn):
+            try:
+                return AdapterResult(
+                    status=AdapterResultStatus.SUCCESS, data=fn()
+                )
+            except Exception as exc:
+                return AdapterResult(
+                    status=AdapterResultStatus.ERROR, error=str(exc)
+                )
+
+        def _attempt(fn, default=None):
+            try:
+                return fn()
+            except Exception:
+                return default
+
+        adapter = SimpleNamespace(
+            _sketch_entities=sketch_entities,
+            currentSketchManager=sketch_manager,
+            currentModel=current_model,
+            _handle_com_operation=_handle,
+            _attempt=_attempt,
+        )
+        return adapter, create_pattern, seed_entity
+
+    def test_full_circle_uses_angle_over_count(self):
+        """A 360° pattern with count=6 should hand the COM call a
+        ``PatternSpacing`` of ``2π / 6`` so adjacent instances tile."""
+        from src.solidworks_mcp.adapters.solidworks import sketch as sketch_ops
+
+        adapter, create_pattern, _ = self._build_adapter()
+
+        result = sketch_ops._sketch_circular_pattern_impl(
+            adapter, ["Circle_1"], 0.0, 0.0, 360.0, 6
+        )
+
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.startswith("CircularPattern_6x360.0deg_")
+        create_pattern.assert_called_once()
+        args = create_pattern.call_args.args
+        # Signature: ArcRadius, ArcAngle, PatternNum, PatternSpacing,
+        # PatternRotate, DeleteInstances, RadiusDim, AngleDim,
+        # CreateNumOfInstancesDim
+        assert args[2] == 6  # PatternNum
+        assert args[3] == pytest.approx(math.radians(360.0) / 6)
+        assert args[4] is True  # PatternRotate
+
+    def test_partial_sweep_uses_angle_over_count_minus_one(self):
+        """For ``angle=180, count=3`` the partial-sweep formula puts the
+        last instance at 180°, so spacing must be ``π / (3 - 1)`` rad."""
+        from src.solidworks_mcp.adapters.solidworks import sketch as sketch_ops
+
+        adapter, create_pattern, _ = self._build_adapter()
+
+        result = sketch_ops._sketch_circular_pattern_impl(
+            adapter, ["Circle_1"], 0.0, 0.0, 180.0, 3
+        )
+
+        assert result.status == AdapterResultStatus.SUCCESS
+        args = create_pattern.call_args.args
+        assert args[2] == 3
+        assert args[3] == pytest.approx(math.radians(180.0) / 2)
+
+    def test_non_origin_center_is_rejected(self):
+        """The real impl rejects non-zero (center_x, center_y) up front."""
+        from src.solidworks_mcp.adapters.solidworks import sketch as sketch_ops
+
+        adapter, create_pattern, _ = self._build_adapter()
+
+        result = sketch_ops._sketch_circular_pattern_impl(
+            adapter, ["Circle_1"], 5.0, 0.0, 360.0, 6
+        )
+
+        assert result.status == AdapterResultStatus.ERROR
+        assert "(0, 0)" in (result.error or "")
+        create_pattern.assert_not_called()
+
+    def test_clear_selection_runs_on_com_failure(self):
+        """``CreateCircularSketchStepAndRepeat`` returning False must
+        still leave selection state cleaned up (try/finally)."""
+        from src.solidworks_mcp.adapters.solidworks import sketch as sketch_ops
+
+        adapter, create_pattern, _ = self._build_adapter()
+        create_pattern.return_value = False
+        clear_selection = adapter.currentModel.ClearSelection2
+
+        result = sketch_ops._sketch_circular_pattern_impl(
+            adapter, ["Circle_1"], 0.0, 0.0, 360.0, 6
+        )
+
+        assert result.status == AdapterResultStatus.ERROR
+        # ClearSelection2 runs before selecting and again in the finally
+        # block after the COM failure.
+        assert clear_selection.call_count == 2
 
 
 # ---------------------------------------------------------------------------

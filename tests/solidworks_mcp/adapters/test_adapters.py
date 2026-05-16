@@ -647,6 +647,7 @@ class TestPyWin32AdapterBranches:
         adapter.currentSketchManager = SimpleNamespace(
             InsertSketch=Mock(),
             CreateLinearSketchStepAndRepeat=Mock(return_value=True),
+            CreateCircularSketchStepAndRepeat=Mock(return_value=True),
         )
 
         select_data = Mock()
