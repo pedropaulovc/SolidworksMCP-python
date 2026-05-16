@@ -765,3 +765,89 @@ async def test_sketch_circular_pattern_rejects_unknown_entity(
         assert "Unknown sketch entity" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- sketch_mirror live regression ----
+
+
+async def test_sketch_mirror_reflects_lines_about_centerline(
+    connected_adapter,
+) -> None:
+    """End-to-end check that sketch_mirror reflects geometry about a
+    registered centreline.
+
+    Two regressions live in this test:
+
+    1. ``IModelDoc2::SketchMirror`` is invoked with no arguments and
+       returns void — it consumes the active selection.  Sketch segments
+       must be selected under mark **1** and the centerline under mark
+       **2** or SW silently no-ops.
+    2. The shared ``_select_sketch_entities`` helper handles per-mark
+       selection through ``ISelectionMgr.CreateSelectData`` (which
+       requires ``sw_type_info`` flagging — see the linear-pattern test
+       for that regression).
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        # Vertical centreline at x=0, lines to the right of it.
+        cl = await adapter.add_centerline(0.0, -30.0, 0.0, 30.0)
+        l1 = await adapter.add_line(5.0, 0.0, 25.0, 0.0)
+        l2 = await adapter.add_line(5.0, 10.0, 25.0, 10.0)
+        assert cl.is_success and l1.is_success and l2.is_success, (
+            f"setup failed: {cl.error} / {l1.error} / {l2.error}"
+        )
+
+        mirror = await adapter.sketch_mirror([l1.data, l2.data], cl.data)
+        assert mirror.is_success, f"sketch_mirror failed: {mirror.error}"
+        assert mirror.data.startswith(f"Mirror_{cl.data}_"), (
+            f"unexpected mirror id: {mirror.data!r}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_mirror_no_active_sketch_returns_error(
+    connected_adapter,
+) -> None:
+    """Calling sketch_mirror without a sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.sketch_mirror(["Line_1"], "Centerline_1")
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_mirror_rejects_unknown_mirror_line(
+    connected_adapter,
+) -> None:
+    """A mirror_line ID outside the registry must produce a clear error
+    without touching SW selection state."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+        l1 = await adapter.add_line(5.0, 0.0, 25.0, 0.0)
+        assert l1.is_success
+
+        bad = await adapter.sketch_mirror([l1.data], "Centerline_999")
+        assert bad.is_error
+        assert "Unknown mirror_line entity" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
