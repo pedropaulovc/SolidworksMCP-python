@@ -503,6 +503,258 @@ async def test_add_arc_no_active_sketch_returns_error(connected_adapter) -> None
         await adapter.close_model(save=False)
 
 
+# ---- add_ellipse live regression ----
+
+
+async def test_add_ellipse_creates_real_ellipse(connected_adapter) -> None:
+    """End-to-end check that add_ellipse creates a real axis-aligned ellipse.
+
+    ``ISketchManager::CreateEllipse`` takes nine scalar doubles
+    ``(XC, YC, Zc, XMajor, YMajor, ZMajor, XMinor, YMinor, ZMinor)``.
+
+    Geometric assertions (not just ``is_success``):
+
+    * The returned ``Ellipse_*`` id is registered in
+      ``adapter._sketch_entities`` so downstream constraint/dimension
+      calls can look it up (parity with the mock adapter).
+    * Exactly one sketch segment is present, and its type code (2 in
+      ``swSketchSegments_e``) is the ellipse type — a regression that
+      routed to ``CreateCircle`` instead would show type 1.
+    * ``ISketchEllipse.GetCenterPoint2`` round-trips to the requested
+      centre.
+    * ``GetMajorPoint2`` / ``GetMinorPoint2`` sit on ``+X`` and ``+Y``
+      from the centre respectively, at half the requested full-axis
+      length each — verified in **metres** against the mm/1000.0
+      conversion. A flipped axis order (minor on +X, major on +Y)
+      would fail this; so would a wrong unit conversion (a stray
+      mm-as-metres bug would produce a 1000x offset).
+    """
+    import math
+
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        cx, cy, major_axis, minor_axis = 0.0, 0.0, 60.0, 30.0
+        ellipse = await adapter.add_ellipse(
+            center_x=cx,
+            center_y=cy,
+            major_axis=major_axis,
+            minor_axis=minor_axis,
+        )
+        assert ellipse.is_success, f"add_ellipse failed: {ellipse.error}"
+        assert ellipse.data.startswith("Ellipse_"), (
+            f"unexpected ellipse id: {ellipse.data!r}"
+        )
+
+        # The real adapter must register the ellipse for downstream
+        # constraints/dimensions to find it — parity with the mock
+        # adapter (otherwise mock-validated workflows fail live with
+        # "Unknown sketch entity").
+        assert ellipse.data in adapter._sketch_entities, (
+            f"ellipse id {ellipse.data!r} not registered in "
+            f"_sketch_entities; downstream add_sketch_constraint / "
+            f"add_dimension calls would fail with 'Unknown sketch entity'"
+        )
+
+        from solidworks_mcp.adapters import sw_type_info
+
+        active_sketch = adapter.currentModel.GetActiveSketch2()
+        sw_type_info.flag_methods(active_sketch, "ISketch")
+        segments = active_sketch.GetSketchSegments()
+        assert len(segments) == 1, (
+            f"expected 1 sketch segment after add_ellipse, got {len(segments)}"
+        )
+
+        # Pull the entity straight from the registry; this is the
+        # exact COM handle add_sketch_constraint / add_dimension would
+        # resolve, so anything we observe about it is what those
+        # downstream tools would see.
+        seg = adapter._sketch_entities[ellipse.data]
+        for iface in ("ISketchSegment", "ISketchEllipse"):
+            sw_type_info.flag_methods(seg, iface)
+
+        # swSketchSegments_e: 2 = ellipse (probed empirically; SW docs
+        # don't ship enum values).
+        seg_type = seg.GetType()
+        assert seg_type == 2, (
+            f"expected ellipse segment type 2, got {seg_type} "
+            "(0 would mean CreateLine was called, 1 would mean CreateCircle)"
+        )
+
+        center_pt = seg.GetCenterPoint2()
+        major_pt = seg.GetMajorPoint2()
+        minor_pt = seg.GetMinorPoint2()
+
+        # Verify in **metres** — SolidWorks COM returns all coordinates
+        # in metres, so a regression that forgot the /1000.0 conversion
+        # would surface here as a 1000x offset.
+        expected_major_m = (major_axis / 2.0) / 1000.0  # 0.030
+        expected_minor_m = (minor_axis / 2.0) / 1000.0  # 0.015
+        expected_cx_m = cx / 1000.0
+        expected_cy_m = cy / 1000.0
+        tol_m = 1e-6  # 1 micron — comfortably tighter than SW's tolerance
+
+        assert abs(center_pt.X - expected_cx_m) < tol_m, (
+            f"ellipse centre X {center_pt.X} m != requested "
+            f"{expected_cx_m} m (mm-to-m conversion may be broken)"
+        )
+        assert abs(center_pt.Y - expected_cy_m) < tol_m, (
+            f"ellipse centre Y {center_pt.Y} m != requested "
+            f"{expected_cy_m} m (mm-to-m conversion may be broken)"
+        )
+
+        # Major endpoint expected on +X at major_axis / 2 from centre.
+        # Minor endpoint expected on +Y at minor_axis / 2 from centre.
+        major_dx_m = major_pt.X - center_pt.X
+        major_dy_m = major_pt.Y - center_pt.Y
+        minor_dx_m = minor_pt.X - center_pt.X
+        minor_dy_m = minor_pt.Y - center_pt.Y
+
+        assert (
+            abs(major_dx_m - expected_major_m) < tol_m and abs(major_dy_m) < tol_m
+        ), (
+            f"major-axis offset ({major_dx_m}, {major_dy_m}) m, expected "
+            f"(~{expected_major_m}, ~0); axis order or mm-to-m conversion "
+            f"is probably broken"
+        )
+        assert (
+            abs(minor_dx_m) < tol_m and abs(minor_dy_m - expected_minor_m) < tol_m
+        ), (
+            f"minor-axis offset ({minor_dx_m}, {minor_dy_m}) m, expected "
+            f"(~0, ~{expected_minor_m}); axis order or mm-to-m "
+            f"conversion is probably broken"
+        )
+
+        # Sanity: the major axis should be the longer one. If a future
+        # change swaps the half-/full-axis conversion this fails loudly.
+        major_len = math.hypot(major_dx_m, major_dy_m)
+        minor_len = math.hypot(minor_dx_m, minor_dy_m)
+        assert major_len > minor_len, (
+            f"major axis length {major_len} m not greater than minor "
+            f"{minor_len} m — half/full conversion may be inverted"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_ellipse_no_active_sketch_returns_error(connected_adapter) -> None:
+    """Calling add_ellipse without an open sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.add_ellipse(0.0, 0.0, 60.0, 30.0)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+# ---- add_polygon live regression ----
+
+
+async def test_add_polygon_creates_real_polygon(connected_adapter) -> None:
+    """End-to-end check that add_polygon creates a real polygon in SW.
+
+    Regression: ``ISketchManager::CreatePolygon`` requires eight
+    arguments ``(XC, YC, Zc, Xp, Yp, Zp, Sides, Inscribed)``. The May-10
+    mixin refactor only forwarded six, so every call raised
+    ``"Parameter not optional."`` at the COM boundary.
+
+    Geometric assertions (not just ``is_success``):
+
+    * The active sketch contains ``sides`` line segments (6 here) plus
+      a construction circle SW adds to dimension the polygon.
+    * The unique vertex set has size ``sides`` — each line shares
+      endpoints with two neighbours so endpoint coordinates collapse
+      to exactly ``sides`` distinct points.
+    * Every vertex sits at distance ``radius`` from the requested
+      centre within 0.1 mm. An incorrectly-marshalled ``Inscribed``
+      flag (eg. circumscribed instead of inscribed) would put vertices
+      on a different circle and fail this check.
+    """
+    import math
+
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        cx, cy, radius, sides = 0.0, 0.0, 15.0, 6
+        polygon = await adapter.add_polygon(
+            center_x=cx, center_y=cy, radius=radius, sides=sides
+        )
+        assert polygon.is_success, f"add_polygon failed: {polygon.error}"
+        assert polygon.data.startswith("Polygon_6sided_"), (
+            f"unexpected polygon id: {polygon.data!r}"
+        )
+
+        from solidworks_mcp.adapters import sw_type_info
+
+        active_sketch = adapter.currentModel.GetActiveSketch2()
+        sw_type_info.flag_methods(active_sketch, "ISketch")
+        segments = active_sketch.GetSketchSegments()
+
+        line_segments = []
+        for seg in segments:
+            for iface in ("ISketchSegment", "ISketchLine"):
+                sw_type_info.flag_methods(seg, iface)
+            # Type 0 == line (per swSketchSegments_e probed empirically);
+            # type 2 is the construction circle SW inserts to anchor the
+            # polygon's inscribed-circle dimension.
+            if seg.GetType() == 0:
+                line_segments.append(seg)
+
+        assert len(line_segments) == sides, (
+            f"expected {sides} polygon edges, got {len(line_segments)}"
+        )
+
+        vertices: set[tuple[float, float]] = set()
+        for seg in line_segments:
+            for pt in (seg.GetStartPoint2(), seg.GetEndPoint2()):
+                vertices.add((round(pt.X * 1000.0, 3), round(pt.Y * 1000.0, 3)))
+        assert len(vertices) == sides, (
+            f"expected {sides} unique vertices, got {len(vertices)}: {vertices}"
+        )
+
+        for vx, vy in vertices:
+            r = math.hypot(vx - cx, vy - cy)
+            assert abs(r - radius) < 0.1, (
+                f"vertex ({vx}, {vy}) at r={r:.3f}mm, expected ~{radius}mm; "
+                f"all vertex radii: "
+                f"{[round(math.hypot(x - cx, y - cy), 3) for x, y in vertices]}"
+            )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_polygon_no_active_sketch_returns_error(connected_adapter) -> None:
+    """Calling add_polygon without an open sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.add_polygon(0.0, 0.0, 15.0, 6)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
 # ---- sketch_linear_pattern live regression ----
 
 
@@ -908,5 +1160,95 @@ async def test_sketch_mirror_rejects_unknown_mirror_line(
         bad = await adapter.sketch_mirror([l1.data], "Centerline_999")
         assert bad.is_error
         assert "Unknown mirror_line entity" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+# ---- add_centerline live regression ----
+
+
+async def test_add_centerline_creates_real_centerline(connected_adapter) -> None:
+    """End-to-end check that add_centerline creates a real construction line in SW.
+
+    Asserts the resulting geometry, not just the return code:
+
+    * Exactly one segment is in the active sketch after the call.
+    * Its ``ISketchSegment.ConstructionGeometry`` property is ``True`` —
+      this is the construction-vs-real flag that distinguishes a
+      centerline from a regular line, so a regression that calls
+      ``CreateLine`` by mistake would fail here.
+    * The segment's start and end points round-trip through
+      ``ISketchLine.GetStartPoint2 / GetEndPoint2`` to the requested
+      ``(0, -20)`` and ``(0, 20)`` mm — pinning the mm-to-m conversion.
+
+    All readback calls need ``sw_type_info.flag_methods`` so pywin32
+    late binding resolves the zero-arg accessors as methods rather than
+    tuple-valued properties.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        x1, y1, x2, y2 = 0.0, -20.0, 0.0, 20.0
+        centerline = await adapter.add_centerline(x1, y1, x2, y2)
+        assert centerline.is_success, f"add_centerline failed: {centerline.error}"
+        assert centerline.data.startswith("Centerline_"), (
+            f"unexpected centerline id: {centerline.data!r}"
+        )
+        assert centerline.data in adapter._sketch_entities
+
+        from solidworks_mcp.adapters import sw_type_info
+
+        active_sketch = adapter.currentModel.GetActiveSketch2()
+        sw_type_info.flag_methods(active_sketch, "ISketch")
+        segments = active_sketch.GetSketchSegments()
+        assert len(segments) == 1, (
+            f"expected 1 sketch segment after add_centerline, got {len(segments)}"
+        )
+
+        seg = segments[0]
+        for iface in ("ISketchSegment", "ISketchLine"):
+            sw_type_info.flag_methods(seg, iface)
+
+        assert seg.ConstructionGeometry is True, (
+            "add_centerline must produce a construction-geometry segment "
+            "(ConstructionGeometry=True), not a regular line"
+        )
+
+        sp = seg.GetStartPoint2()
+        ep = seg.GetEndPoint2()
+        # Endpoints come back in metres; SW may swap start/end depending
+        # on internal direction, so compare as an unordered pair.
+        observed = {
+            (round(sp.X * 1000.0, 3), round(sp.Y * 1000.0, 3)),
+            (round(ep.X * 1000.0, 3), round(ep.Y * 1000.0, 3)),
+        }
+        expected = {(x1, y1), (x2, y2)}
+        assert observed == expected, (
+            f"centerline endpoints {observed} != requested {expected}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_centerline_no_active_sketch_returns_error(
+    connected_adapter,
+) -> None:
+    """Calling add_centerline without an open sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        # Intentionally skip create_sketch; currentSketchManager stays None.
+        bad = await adapter.add_centerline(0.0, -20.0, 0.0, 20.0)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
