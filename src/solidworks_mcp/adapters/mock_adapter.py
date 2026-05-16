@@ -863,7 +863,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         await asyncio.sleep(self._delays["sketch_operation"] / 2)
         self._operation_count += 1
 
-        centerline_id = f"Centerline{random.randint(1000, 9999)}"
+        centerline_id = f"Centerline_{random.randint(1000, 9999)}"
         self._sketch_entity_ids.add(centerline_id)
 
         return AdapterResult(
@@ -1194,6 +1194,16 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 error=(
                     f"Unknown mirror_line entity '{mirror_line}'. Use the "
                     "ID returned by add_centerline."
+                ),
+            )
+        # Mirror the real adapter — IModelDoc2::SketchMirror needs a
+        # centreline as the mirror axis; other segments silently no-op.
+        if not mirror_line.startswith("Centerline_"):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=(
+                    f"mirror_line must be a centerline (from add_centerline), "
+                    f"got '{mirror_line}'"
                 ),
             )
         for ent in entities:

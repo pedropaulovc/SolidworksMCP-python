@@ -1723,17 +1723,37 @@ def _sketch_mirror_impl(
                 f"Unknown mirror_line entity '{mirror_line}'. Use the ID "
                 "returned by add_centerline."
             )
+        # IModelDoc2::SketchMirror specifies that the mirror axis must be
+        # a centreline; selecting any other segment under mark=2 silently
+        # no-ops on SW. ``add_centerline`` returns IDs prefixed with
+        # ``Centerline_``, so reject anything else up front.
+        if not mirror_line.startswith("Centerline_"):
+            raise Exception(
+                f"mirror_line must be a centerline (from add_centerline), "
+                f"got '{mirror_line}'"
+            )
+
+        # Validate every source entity ID up front so an unknown ID does
+        # not leave SW with a half-built selection state.
+        for ent_id in entities:
+            if ent_id not in adapter._sketch_entities:
+                raise Exception(
+                    f"Unknown sketch entity '{ent_id}'. Use IDs returned by "
+                    "add_line/add_arc/add_circle/add_spline/add_centerline."
+                )
 
         adapter.currentModel.ClearSelection2(True)
-        # Mark 1 for the source segments per IModelDoc2::SketchMirror docs.
-        _select_sketch_entities(adapter, entities, mark=1)
-        # Mark 2 for the centreline.
-        _select_sketch_entities(adapter, [mirror_line], mark=2)
+        try:
+            # Mark 1 for the source segments per IModelDoc2::SketchMirror docs.
+            _select_sketch_entities(adapter, entities, mark=1)
+            # Mark 2 for the centreline.
+            _select_sketch_entities(adapter, [mirror_line], mark=2)
 
-        # IModelDoc2::SketchMirror is VT_VOID — no return value, so a
-        # successful invocation is its own success signal.
-        adapter.currentModel.SketchMirror()
-        adapter.currentModel.ClearSelection2(True)
+            # IModelDoc2::SketchMirror is VT_VOID — no return value, so a
+            # successful invocation is its own success signal.
+            adapter.currentModel.SketchMirror()
+        finally:
+            adapter.currentModel.ClearSelection2(True)
 
         return f"Mirror_{mirror_line}_{int(time.time() * 1000) % 10000}"
 
