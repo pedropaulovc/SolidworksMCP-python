@@ -624,13 +624,37 @@ def test_add_sketch_constraint_unknown_entity3_returns_error() -> None:
     assert "Unknown sketch entity 'CL_99'" in (result.error or "")
 
 
-def test_exit_sketch_warning_and_success_paths() -> None:
+def test_exit_sketch_no_model_returns_warning() -> None:
+    """Without a ``currentModel`` nothing can be in sketch-edit mode; return
+    WARNING so defensive-cleanup callers don't see spurious errors."""
     adapter = _FakeSketchAdapter()
+    result = sketch._exit_sketch_impl(adapter)
+    assert result.status == AdapterResultStatus.WARNING
+    assert "No active sketch to exit" in (result.error or "")
+
+
+def test_exit_sketch_warning_and_success_paths() -> None:
+    """Cover both branches of the SW-state-aware exit:
+
+    - SW reports no active sketch AND adapter has no manager -> WARNING
+      (already-exited is not a failure).
+    - SW reports an active sketch -> InsertSketch toggled and adapter
+      state cleared.
+    """
+    adapter = _FakeSketchAdapter()
+    # Model present but nothing is in sketch-edit mode anywhere.
+    inactive_manager = SimpleNamespace(InsertSketch=Mock())
+    adapter.currentModel = SimpleNamespace(
+        GetActiveSketch2=lambda: None,
+        SketchManager=inactive_manager,
+    )
     warning = sketch._exit_sketch_impl(adapter)
     assert warning.status == AdapterResultStatus.WARNING
+    inactive_manager.InsertSketch.assert_not_called()
 
-    manager = SimpleNamespace(InsertSketch=Mock())
-    adapter.currentSketchManager = manager
+    # Adapter-side state populated (the original-fixture happy path).
+    active_manager = SimpleNamespace(InsertSketch=Mock())
+    adapter.currentSketchManager = active_manager
     adapter.currentSketch = object()
     adapter._sketch_entities = {"Line_1": object()}
 
@@ -638,6 +662,37 @@ def test_exit_sketch_warning_and_success_paths() -> None:
     assert success.status == AdapterResultStatus.SUCCESS
     assert adapter.currentSketch is None
     assert adapter.currentSketchManager is None
+    assert adapter._sketch_entities == {}
+    active_manager.InsertSketch.assert_called_once_with(True)
+
+
+def test_exit_sketch_sw_active_but_adapter_state_empty() -> None:
+    """Regression for the bug: SW has a sketch open (e.g. from a prior
+    aborted run) but ``adapter.currentSketchManager`` is ``None``.
+
+    The fix must still toggle SW out of sketch-edit mode using
+    ``currentModel.SketchManager`` rather than reporting "no active
+    sketch" — otherwise every subsequent ``create_sketch("Front")``
+    fails with ``Failed to select plane: Front Plane`` because SW
+    cannot open a new sketch while one is already active.
+    """
+    adapter = _FakeSketchAdapter()
+    sketch_manager = SimpleNamespace(InsertSketch=Mock())
+    sw_active_sketch = object()
+    adapter.currentModel = SimpleNamespace(
+        GetActiveSketch2=lambda: sw_active_sketch,
+        SketchManager=sketch_manager,
+    )
+    assert adapter.currentSketchManager is None  # the divergent state
+
+    result = sketch._exit_sketch_impl(adapter)
+    assert result.status == AdapterResultStatus.SUCCESS, (
+        f"unexpected: {result.error}"
+    )
+    sketch_manager.InsertSketch.assert_called_once_with(True)
+    # Adapter state stays clean afterwards.
+    assert adapter.currentSketchManager is None
+    assert adapter.currentSketch is None
     assert adapter._sketch_entities == {}
 
 

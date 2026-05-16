@@ -1927,53 +1927,120 @@ def _sketch_offset_impl(
 
 
 def _exit_sketch_impl(adapter: Any) -> AdapterResult[None]:
-    """Exit the current sketch editing mode and return to the part/assembly context.
+    """Exit any sketch-edit mode the active model is in and reset adapter state.
 
-    Calls ``SketchManager.InsertSketch(True)`` which toggles the sketch editor
-    off.  After the call succeeds, ``adapter.currentSketch``,
-    ``adapter.currentSketchManager``, and the sketch entity registry are all
-    cleared.
+    The previous implementation trusted ``adapter.currentSketchManager`` —
+    a Python-side handle populated only by ``create_sketch`` on **this**
+    adapter instance.  A fresh adapter pointing at a SolidWorks process
+    that already has a sketch open (from a crashed prior run, an
+    aborted automation, or a manual user edit) would report
+    ``WARNING: "No active sketch to exit"`` while SW was still sitting
+    in sketch-edit mode — and every subsequent ``create_sketch`` then
+    failed with ``Failed to select plane: Front Plane`` because SW
+    can't open a new sketch while one is already active.
+
+    Now queries ``IModelDoc2.GetActiveSketch2`` to find out what SW
+    actually has open, and toggles ``SketchManager.InsertSketch(True)``
+    when either SW or the adapter thinks a sketch is in edit mode.
+    Adapter-side state is always cleared on success.
 
     Args:
-        adapter: A ``PyWin32Adapter`` that is currently in sketch-edit mode
-            (``currentSketchManager`` must be non-``None``).
+        adapter: A ``PyWin32Adapter`` with a non-``None`` ``currentModel``.
 
     Returns:
-        AdapterResult[None]: On success, ``status`` is ``SUCCESS`` and
-        ``data`` is ``None``.  When no sketch is active, ``status`` is
-        ``WARNING`` (not an error, already exited).
+        AdapterResult[None]: On success, ``status`` is ``SUCCESS``.
+        When neither SW nor the adapter has an active sketch,
+        ``status`` is ``WARNING`` (already-exited is not a failure).
+        When ``currentModel`` is ``None``, returns ``ERROR``.
 
     Raises:
-        Exception: Propagated through ``_handle_com_operation`` when the COM
-            call raises unexpectedly.
+        Exception: Propagated through ``_handle_com_operation`` when the
+            ``InsertSketch`` call itself raises.
 
     Example::
 
         pywin32_sketch_ops.add_line(adapter, 0, 0, 50, 0)
         pywin32_sketch_ops.exit_sketch(adapter)
-        # adapter.currentSketch is now None
+        # adapter.currentSketch is now None and SW is out of sketch-edit mode
     """
-    if not adapter.currentSketchManager:
+    if adapter.currentModel is None:
+        # No document means nothing can be in sketch-edit mode either.
+        # Match the legacy "already exited" semantics so cleanup callers
+        # that fire exit_sketch defensively don't see spurious errors.
         return AdapterResult(
-            status=AdapterResultStatus.WARNING, error="No active sketch to exit"
+            status=AdapterResultStatus.WARNING,
+            error="No active sketch to exit",
         )
 
-    def _exit_operation() -> None:
-        """Inner COM closure that toggles the sketch editor off and clears state.
+    def _exit_operation() -> str:
+        try:
+            from .. import sw_type_info as _sw_type_info
+        except ImportError:
+            _sw_type_info = None  # type: ignore[assignment]
 
-        Returns:
-            None: Always returns ``None`` on success.
-        """
-        adapter.currentSketchManager.InsertSketch(True)
+        # ``GetActiveSketch2`` is a real zero-arg method on IModelDoc2.
+        # Without flagging, pywin32 late binding resolves it as a property
+        # and SW returns ``Member not found`` — the same root cause as
+        # the cross-thread bugs in runbook #5.
+        if _sw_type_info is not None:
+            adapter._attempt(
+                lambda: _sw_type_info.flag_methods(
+                    adapter.currentModel, "IModelDoc2"
+                ),
+                default=0,
+            )
+
+        sw_active = adapter._attempt(
+            lambda: adapter.currentModel.GetActiveSketch2()
+        )
+        adapter_active = adapter.currentSketchManager
+
+        # Already out of sketch-edit mode — clean up adapter state so a
+        # future create_sketch starts from a known-good baseline, then
+        # warn.  Using ``data`` to signal "no_op" lets callers tell the
+        # difference between "I exited a sketch" and "nothing was open".
+        if sw_active is None and adapter_active is None:
+            return "no_active_sketch"
+
+        # Prefer the adapter's SketchManager handle when available (it was
+        # captured at create_sketch time on the executor thread, so it's
+        # apartment-safe); fall back to a fresh ``currentModel.SketchManager``
+        # for the SW-only state case.
+        sketch_manager = adapter_active or adapter.currentModel.SketchManager
+        if _sw_type_info is not None:
+            adapter._attempt(
+                lambda: _sw_type_info.flag_methods(
+                    sketch_manager, "ISketchManager"
+                ),
+                default=0,
+            )
+        sketch_manager.InsertSketch(True)
         adapter.currentSketch = None
         adapter.currentSketchManager = None
         adapter._reset_sketch_entity_registry()
-        return None
+        return "exited"
 
-    return cast(
+    result = cast(
         AdapterResult[str],
         adapter._handle_com_operation("exit_sketch", _exit_operation),
     )
+    # Translate "no sketch was open" into a WARNING so callers that branch
+    # on ``is_error`` still treat already-exited as benign.  ``data`` is
+    # the operation tag; ``error`` carries the human message.
+    if result.is_success and result.data == "no_active_sketch":
+        return cast(
+            AdapterResult[None],
+            AdapterResult(
+                status=AdapterResultStatus.WARNING,
+                error="No active sketch to exit",
+            ),
+        )
+    if result.is_success:
+        return cast(
+            AdapterResult[None],
+            AdapterResult(status=AdapterResultStatus.SUCCESS, data=None),
+        )
+    return cast(AdapterResult[None], result)
 
 
 def _check_sketch_fully_defined_impl(

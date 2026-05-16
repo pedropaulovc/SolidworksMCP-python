@@ -1391,3 +1391,312 @@ async def test_add_centerline_no_active_sketch_returns_error(
         assert "No active sketch" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- Composition: live creator -> consumer chains ----
+#
+# These tests pipe the ID returned by each ``add_*`` op into a downstream
+# consumer (``sketch_*_pattern`` / ``sketch_mirror`` / ``sketch_offset``).
+# The whole shape of every Phase-0 bug I fixed in PR #22 was "creator's
+# isolated test passed, consumer's isolated test passed, but the
+# combination failed".  These tests pin the contract on the live adapter
+# so a future regression in either side breaks here, not in a user demo.
+
+
+async def test_polygon_id_flows_into_linear_pattern_live(
+    connected_adapter,
+) -> None:
+    """End-to-end: ``add_polygon`` ID must be a valid input to
+    ``sketch_linear_pattern``.
+
+    Regression: ``_add_polygon_impl`` originally synthesised a
+    ``Polygon_6sided_<rand>`` string and skipped
+    ``_register_sketch_entity``, so every downstream op failed with
+    ``Unknown sketch entity 'Polygon_*'`` even though the isolated
+    polygon test in this file passed.  Catches both halves of that
+    failure: the missing registration AND the
+    tuple-not-Select4-able handler in ``_select_sketch_entities``.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, (
+            f"create_sketch failed: {sketch_result.error}"
+        )
+
+        seed = await adapter.add_polygon(
+            center_x=-50.0, center_y=0.0, radius=5.0, sides=6
+        )
+        assert seed.is_success, f"add_polygon failed: {seed.error}"
+        assert seed.data in adapter._sketch_entities, (
+            f"polygon id {seed.data!r} must be in the registry; otherwise "
+            "downstream pattern/mirror/offset cannot resolve it."
+        )
+
+        pattern = await adapter.sketch_linear_pattern(
+            entities=[seed.data],
+            direction_x=1.0,
+            direction_y=0.0,
+            spacing=15.0,
+            count=4,
+        )
+        assert pattern.is_success, (
+            f"polygon -> linear_pattern composition failed: {pattern.error}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_polygon_id_flows_into_mirror_live(connected_adapter) -> None:
+    """``add_polygon`` ID + ``add_centerline`` ID -> ``sketch_mirror``."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        poly = await adapter.add_polygon(-30.0, 20.0, 5.0, 6)
+        cl = await adapter.add_centerline(-50.0, 0.0, 50.0, 0.0)
+        assert poly.is_success and cl.is_success, (
+            f"setup failed: {poly.error} / {cl.error}"
+        )
+
+        mirrored = await adapter.sketch_mirror(
+            entities=[poly.data], mirror_line=cl.data
+        )
+        assert mirrored.is_success, (
+            f"polygon -> mirror composition failed: {mirrored.error}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_polygon_id_flows_into_offset_live(connected_adapter) -> None:
+    """``add_polygon`` ID -> ``sketch_offset``."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        poly = await adapter.add_polygon(0.0, 0.0, 10.0, 6)
+        assert poly.is_success, f"add_polygon failed: {poly.error}"
+
+        offset = await adapter.sketch_offset(
+            entities=[poly.data], offset_distance=2.0, reverse_direction=False
+        )
+        assert offset.is_success, (
+            f"polygon -> offset composition failed: {offset.error}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_ellipse_id_flows_into_circular_pattern_live(
+    connected_adapter,
+) -> None:
+    """End-to-end: ``add_ellipse`` ID -> ``sketch_circular_pattern``
+    with the seed on the +X axis at y=0.
+
+    Regression: ``math.atan2(-0.0, -seed_x)`` returns ``-π`` for a seed
+    on the +X axis (because ``-seed_xy[1]`` is ``-0.0``), and
+    ``CreateCircularSketchStepAndRepeat`` silently rejects negative
+    ``ArcAngle`` values.  Combined with PR #21's earlier non-ellipse
+    flagging, the live circular_pattern call returned False until both
+    were fixed.  The seed coordinates ``(+X, 0)`` matter — the bug
+    does NOT reproduce off-axis.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        seed = await adapter.add_ellipse(
+            center_x=30.0, center_y=0.0, major_axis=12.0, minor_axis=6.0
+        )
+        assert seed.is_success, f"add_ellipse failed: {seed.error}"
+
+        pattern = await adapter.sketch_circular_pattern(
+            entities=[seed.data],
+            center_x=0.0,
+            center_y=0.0,
+            angle=360.0,
+            count=6,
+        )
+        assert pattern.is_success, (
+            f"ellipse -> circular_pattern composition failed: {pattern.error}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_arc_id_flows_into_mirror_and_offset_live(
+    connected_adapter,
+) -> None:
+    """``add_arc`` ID -> ``sketch_mirror`` AND ``sketch_offset`` from the
+    same arc (the bottom-band shape from the Phase-0 live demo)."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        cl = await adapter.add_centerline(-90.0, -50.0, 90.0, -50.0)
+        arc = await adapter.add_arc(
+            center_x=-50.0,
+            center_y=-40.0,
+            start_x=-70.0,
+            start_y=-40.0,
+            end_x=-30.0,
+            end_y=-40.0,
+        )
+        assert cl.is_success and arc.is_success, (
+            f"setup failed: {cl.error} / {arc.error}"
+        )
+
+        mirrored = await adapter.sketch_mirror(
+            entities=[arc.data], mirror_line=cl.data
+        )
+        assert mirrored.is_success, f"arc -> mirror failed: {mirrored.error}"
+
+        offset = await adapter.sketch_offset(
+            entities=[arc.data], offset_distance=3.0, reverse_direction=False
+        )
+        assert offset.is_success, f"arc -> offset failed: {offset.error}"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_exit_sketch_clears_leftover_sw_sketch_live(
+    connected_adapter,
+) -> None:
+    """Regression: ``adapter.exit_sketch()`` must toggle SW out of
+    sketch-edit mode even when the **adapter** doesn't think it opened
+    that sketch.
+
+    Scenario this reproduces: a prior aborted demo / test run left
+    SolidWorks sitting in sketch-edit mode.  A fresh adapter connects,
+    knows nothing about the previous sketch, and calling
+    ``adapter.exit_sketch()`` used to short-circuit on the Python-side
+    ``currentSketchManager is None`` check — leaving SW stuck.  Every
+    subsequent ``create_sketch("Front")`` then failed with
+    ``Failed to select plane: Front Plane`` because SW cannot open a
+    new sketch while one is already active.
+
+    We reproduce that state by opening a sketch via raw COM (bypassing
+    ``adapter.create_sketch`` so ``adapter.currentSketchManager`` stays
+    ``None``), then assert ``exit_sketch`` actually toggles it off and
+    a follow-up ``create_sketch`` succeeds.
+    """
+    adapter = connected_adapter
+
+    # Best-effort cleanup: prior test runs may have left SW in sketch-edit
+    # mode.  Use the fixed exit_sketch itself to clear that state; if SW
+    # has no document open, the WARNING result is benign.
+    await adapter.exit_sketch()
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        # --- Stage the divergent state: open a sketch through the
+        # standard adapter path (so SW actually goes into sketch-edit
+        # mode), then **manually null out the adapter-side handles** so
+        # the next ``exit_sketch`` looks like a fresh connection that
+        # never knew about the open sketch.
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, (
+            f"create_sketch staging failed: {sketch_result.error}"
+        )
+        # Drop the adapter's pointer to the just-opened sketch — this is
+        # exactly what happens when a previous demo / test run crashed
+        # before exiting and a new adapter instance reconnects.
+        adapter.currentSketchManager = None
+        adapter.currentSketch = None
+        adapter._reset_sketch_entity_registry()
+
+        # SW still has the sketch open (verify before the actual exercise).
+        from solidworks_mcp.adapters import sw_type_info
+
+        def _probe_sw_state() -> object:
+            sw_type_info.flag_methods(adapter.currentModel, "IModelDoc2")
+            return adapter.currentModel.GetActiveSketch2()
+
+        pre = adapter._handle_com_operation("probe_pre_exit", _probe_sw_state)
+        assert pre.is_success and pre.data is not None, (
+            f"staging failed: SW reports no active sketch ({pre.data!r}); "
+            f"err={pre.error}"
+        )
+
+        # --- The actual test: exit_sketch must toggle SW out of the
+        #     leftover sketch despite adapter-side state being empty.
+        exit_result = await adapter.exit_sketch()
+        assert exit_result.is_success, (
+            f"exit_sketch should succeed on SW-side leftover sketch, got "
+            f"status={exit_result.status} err={exit_result.error}"
+        )
+
+        # Verify SW reports no active sketch afterwards.
+        post = adapter._handle_com_operation("probe_post_exit", _probe_sw_state)
+        assert post.is_success and post.data is None, (
+            f"SW still reports an active sketch after exit_sketch: "
+            f"data={post.data!r} err={post.error}"
+        )
+
+        # Final proof: a fresh create_sketch must succeed now, which is
+        # exactly the user-visible symptom this bug surfaced as.
+        follow_up = await adapter.create_sketch("Front")
+        assert follow_up.is_success, (
+            f"create_sketch after exit_sketch failed: {follow_up.error}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_spline_id_flows_into_mirror_live(connected_adapter) -> None:
+    """``add_spline`` ID -> ``sketch_mirror``.
+
+    Catches a future regression in spline-segment selection mirroring
+    the polygon-tuple bug — splines come back as a single
+    ``ISketchSegment`` today but a future SW version could split them.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        spl = await adapter.add_spline(
+            [
+                {"x": -30.0, "y": 5.0},
+                {"x": 0.0, "y": 15.0},
+                {"x": 30.0, "y": 5.0},
+            ]
+        )
+        cl = await adapter.add_centerline(-50.0, 0.0, 50.0, 0.0)
+        assert spl.is_success and cl.is_success, (
+            f"setup failed: {spl.error} / {cl.error}"
+        )
+
+        mirrored = await adapter.sketch_mirror(
+            entities=[spl.data], mirror_line=cl.data
+        )
+        assert mirrored.is_success, (
+            f"spline -> mirror composition failed: {mirrored.error}"
+        )
+    finally:
+        await adapter.close_model(save=False)
