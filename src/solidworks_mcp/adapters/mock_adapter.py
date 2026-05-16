@@ -1017,6 +1017,76 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             execution_time=self._delays["sketch_operation"],
         )
 
+    async def sketch_linear_pattern(
+        self,
+        entities: list[str],
+        direction_x: float,
+        direction_y: float,
+        spacing: float,
+        count: int,
+    ) -> AdapterResult[str]:
+        """Mock creating a linear sketch pattern.
+
+        Mirrors the real adapter's validation rules — empty entities,
+        count < 2, non-positive spacing, and a zero direction vector each
+        produce a clear error without "creating" a pattern.
+
+        Args:
+            entities (list[str]): Seed entity IDs.
+            direction_x (float): Pattern direction X component.
+            direction_y (float): Pattern direction Y component.
+            spacing (float): Distance between instances in millimetres.
+            count (int): Total number of instances (including the seed).
+
+        Returns:
+            AdapterResult[str]: The result produced by the operation.
+        """
+        if not self._current_sketch:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active sketch"
+            )
+        if not entities:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="sketch_linear_pattern requires at least one entity",
+            )
+        if count < 2:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="sketch_linear_pattern requires count >= 2",
+            )
+        if spacing <= 0:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="sketch_linear_pattern requires spacing > 0",
+            )
+        if direction_x == 0 and direction_y == 0:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=(
+                    "sketch_linear_pattern requires a non-zero direction vector"
+                ),
+            )
+        for ent in entities:
+            if ent not in self._sketch_entity_ids:
+                return AdapterResult(
+                    status=AdapterResultStatus.ERROR,
+                    error=(
+                        f"Unknown sketch entity '{ent}'. Use IDs returned by "
+                        "add_line/add_arc/add_circle/add_spline/add_centerline."
+                    ),
+                )
+
+        await asyncio.sleep(self._delays["sketch_operation"] / 2)
+        self._operation_count += 1
+
+        pattern_id = f"LinearPattern_{count}x{spacing}_{random.randint(1000, 9999)}"
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=pattern_id,
+            execution_time=self._delays["sketch_operation"] / 2,
+        )
+
     async def add_sketch_constraint(
         self,
         entity1: str,

@@ -501,3 +501,88 @@ async def test_add_arc_no_active_sketch_returns_error(connected_adapter) -> None
         assert "No active sketch" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- sketch_linear_pattern live regression ----
+
+
+async def test_sketch_linear_pattern_creates_real_pattern(connected_adapter) -> None:
+    """End-to-end check that sketch_linear_pattern arrays a seed entity.
+
+    Two regressions live in this test:
+
+    1. ``ISelectionMgr::CreateSelectData`` is a method that pywin32 late
+       binding will not resolve without ``sw_type_info.flag_methods``;
+       without that, the helper raises ``"Member not found."`` from the
+       COM boundary before the pattern call ever happens.
+    2. The mm-to-m unit conversion on ``SpacingX`` and the degree-to-
+       radian conversion via ``atan2(direction_y, direction_x)`` together
+       have to land the instances on the expected axis.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        circle = await adapter.add_circle(0.0, 0.0, 3.0)
+        assert circle.is_success, f"add_circle failed: {circle.error}"
+
+        pattern = await adapter.sketch_linear_pattern(
+            entities=[circle.data],
+            direction_x=1.0,
+            direction_y=0.0,
+            spacing=12.0,
+            count=4,
+        )
+        assert pattern.is_success, f"sketch_linear_pattern failed: {pattern.error}"
+        assert pattern.data.startswith("LinearPattern_4x12.0_"), (
+            f"unexpected linear pattern id: {pattern.data!r}"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_linear_pattern_no_active_sketch_returns_error(
+    connected_adapter,
+) -> None:
+    """Calling sketch_linear_pattern without a sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.sketch_linear_pattern(["Line_1"], 1.0, 0.0, 10.0, 3)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_linear_pattern_rejects_unknown_entity(connected_adapter) -> None:
+    """An entity ID outside the registry must produce a clear error
+    without touching SW selection state."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        bad = await adapter.sketch_linear_pattern(
+            entities=["NotAnEntity_999"],
+            direction_x=1.0,
+            direction_y=0.0,
+            spacing=10.0,
+            count=3,
+        )
+        assert bad.is_error
+        assert "Unknown sketch entity" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)

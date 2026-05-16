@@ -363,6 +363,81 @@ class TestMockAdapterSuccessPaths:
         assert result.status == AdapterResultStatus.ERROR
         assert "at least 2 points" in (result.error or "")
 
+    @pytest.mark.asyncio
+    async def test_sketch_linear_pattern_success(self):
+        """Mock sketch_linear_pattern returns a LinearPattern_* id."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        circle = await adapter.add_circle(0.0, 0.0, 3.0)
+
+        result = await adapter.sketch_linear_pattern(
+            [circle.data], 1.0, 0.0, 10.0, 4
+        )
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.startswith("LinearPattern_4x10.0_")
+
+    @pytest.mark.asyncio
+    async def test_sketch_linear_pattern_error_when_no_sketch(self):
+        """Mock sketch_linear_pattern returns ERROR when no sketch is open."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+
+        result = await adapter.sketch_linear_pattern(["Line1"], 1.0, 0.0, 10.0, 3)
+        assert result.status == AdapterResultStatus.ERROR
+        assert "No active sketch" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_sketch_linear_pattern_rejects_unknown_entity(self):
+        """Mock sketch_linear_pattern surfaces a clear error for missing IDs."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+
+        result = await adapter.sketch_linear_pattern(
+            ["Bogus_123"], 1.0, 0.0, 10.0, 3
+        )
+        assert result.status == AdapterResultStatus.ERROR
+        assert "Unknown sketch entity" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_sketch_linear_pattern_input_validation(self):
+        """Empty entities / count<2 / spacing<=0 / zero direction → ERROR."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        circle = await adapter.add_circle(0.0, 0.0, 3.0)
+
+        # Empty entities
+        result = await adapter.sketch_linear_pattern([], 1.0, 0.0, 10.0, 3)
+        assert result.status == AdapterResultStatus.ERROR
+        assert "at least one entity" in (result.error or "")
+
+        # count < 2
+        result = await adapter.sketch_linear_pattern(
+            [circle.data], 1.0, 0.0, 10.0, 1
+        )
+        assert result.status == AdapterResultStatus.ERROR
+        assert "count >= 2" in (result.error or "")
+
+        # spacing <= 0
+        result = await adapter.sketch_linear_pattern(
+            [circle.data], 1.0, 0.0, 0.0, 3
+        )
+        assert result.status == AdapterResultStatus.ERROR
+        assert "spacing > 0" in (result.error or "")
+
+        # zero direction vector
+        result = await adapter.sketch_linear_pattern(
+            [circle.data], 0.0, 0.0, 10.0, 3
+        )
+        assert result.status == AdapterResultStatus.ERROR
+        assert "non-zero direction" in (result.error or "")
+
 
 # ---------------------------------------------------------------------------
 # CircuitBreakerAdapter — lines 119, 137, 165-173, 187, 197-198, 235, 367+
