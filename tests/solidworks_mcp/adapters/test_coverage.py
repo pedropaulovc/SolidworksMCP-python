@@ -769,6 +769,7 @@ class TestRealCircularPatternImpl:
 
         adapter = SimpleNamespace(
             _sketch_entities=sketch_entities,
+            _sketch_entity_centers={},
             currentSketchManager=sketch_manager,
             currentModel=current_model,
             _handle_com_operation=_handle,
@@ -846,26 +847,27 @@ class TestRealCircularPatternImpl:
         # block after the COM failure.
         assert clear_selection.call_count == 2
 
-    def test_polygon_seed_is_rejected_with_clear_error(self):
-        """A polygon registers as a tuple of segment handles, not a single
-        dispatch with ``GetCenterPoint``.  Passing it to circular_pattern
-        used to silently fall back to the 1 mm placeholder radius —
-        produce an error with an actionable message instead."""
+    def test_polygon_seed_with_cached_center_drives_arc_radius(self):
+        """When ``_add_polygon_impl`` cached the polygon center at register
+        time, circular_pattern must use that cached center to derive the
+        seed-to-axis distance instead of rejecting the seed."""
         from src.solidworks_mcp.adapters.solidworks import sketch as sketch_ops
 
         adapter, create_pattern, _ = self._build_adapter()
-        # Stand in for a polygon: tuple of segment-like Mocks.
         adapter._sketch_entities["Polygon_1"] = (Mock(), Mock(), Mock())
+        # Polygon at (30, 40) mm → seed-to-origin distance is 50 mm.
+        adapter._sketch_entity_centers["Polygon_1"] = (30.0, 40.0)
 
         result = sketch_ops._sketch_circular_pattern_impl(
             adapter, ["Polygon_1"], 0.0, 0.0, 360.0, 6
         )
 
-        assert result.status == AdapterResultStatus.ERROR
-        assert "polygon seeds" in (result.error or "")
-        # COM call must NOT have fired — we'd rather error than build a
-        # pattern at the wrong radius.
-        create_pattern.assert_not_called()
+        assert result.status == AdapterResultStatus.SUCCESS
+        create_pattern.assert_called_once()
+        args = create_pattern.call_args.args
+        # ArcRadius is in metres: hypot(30, 40) / 1000 = 0.05.
+        assert args[0] == pytest.approx(0.05)
+        assert args[2] == 6
 
     def test_arc_angle_normalized_to_positive_when_seed_on_plus_x_axis(self):
         """A seed at (+X, 0) must hand SW a positive ``ArcAngle`` (+π), not

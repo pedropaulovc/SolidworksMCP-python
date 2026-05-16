@@ -810,7 +810,13 @@ def _add_polygon_impl(
         # sketch_circular_pattern, sketch_mirror, and sketch_offset — without
         # this the polygon string is opaque and every downstream op fails
         # with "Unknown sketch entity 'Polygon_*'".
-        return cast(str, adapter._register_sketch_entity("Polygon", polygon))
+        entity_id = cast(str, adapter._register_sketch_entity("Polygon", polygon))
+        # Polygons register as a SAFEARRAY tuple of segments — there's no
+        # single dispatch ``GetCenterPoint`` to recover the center from later.
+        # Stash the known center so ``sketch_circular_pattern`` can derive the
+        # seed-to-axis offset for polygon seeds.
+        adapter._sketch_entity_centers[entity_id] = (center_x, center_y)
+        return entity_id
 
     return cast(
         AdapterResult[str],
@@ -1644,25 +1650,17 @@ def _sketch_circular_pattern_impl(
 
             first_entity = adapter._sketch_entities.get(entities[0])
 
-            # ``CreatePolygon`` registers a SAFEARRAY of segment handles as a
-            # tuple (the same group-entity quirk the selector handles); the
-            # seed-center lookup below assumes a single dispatch with
-            # ``GetCenterPoint`` and would silently fall back to the 1 mm
-            # placeholder radius for a polygon seed, producing a bogus
-            # pattern at the wrong radius.  Reject with a clear message
-            # rather than build a broken pattern — supporting polygon seeds
-            # requires either a per-entity center cache at register time or
-            # a centroid walk over the polygon's segments, neither of which
-            # is in scope for issue #1.
-            if isinstance(first_entity, (list, tuple)):
-                raise Exception(
-                    "sketch_circular_pattern does not yet support polygon "
-                    "seeds — the radius cannot be derived from the segment "
-                    "tuple. Use a circle, arc, or ellipse seed for now."
-                )
-
             seed_xy: tuple[float, float] | None = None
-            if first_entity is not None and _sw_type_info is not None:
+
+            # ``CreatePolygon`` registers a SAFEARRAY of segment handles as a
+            # tuple, so the ``GetCenterPoint`` path below — which assumes a
+            # single dispatch — would silently fall back to a 1 mm placeholder
+            # radius. Use the center cached by ``_add_polygon_impl`` at
+            # register time instead.
+            if isinstance(first_entity, (list, tuple)):
+                seed_xy = adapter._sketch_entity_centers[entities[0]]
+
+            if seed_xy is None and first_entity is not None and _sw_type_info is not None:
                 # GetCenterPoint lives on multiple sketch-entity interfaces
                 # (ISketchArc for arcs/circles, ISketchEllipse for ellipses),
                 # all with the same zero-arg signature. Flag every interface
