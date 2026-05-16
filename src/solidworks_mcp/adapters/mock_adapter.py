@@ -99,9 +99,10 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         self._features: dict[str, SolidWorksFeature] = {}
         self._sketches: dict[str, str] = {}
         self._current_sketch: str | None = None
-        # Tracks IDs returned by add_line/add_circle/add_centerline/add_rectangle/
-        # add_spline so add_sketch_constraint can validate entity1/entity2 the
-        # same way the real adapter validates against its sketch-entity registry.
+        # Tracks IDs returned by add_line/add_arc/add_circle/add_centerline/
+        # add_rectangle/add_spline so add_sketch_constraint can validate
+        # entity1/entity2 the same way the real adapter validates against
+        # its sketch-entity registry.
         self._sketch_entity_ids: set[str] = set()
         self._dimensions: dict[str, float] = {}
         self._operation_count = 0
@@ -943,6 +944,45 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
             data=circle_id,
+            execution_time=self._delays["sketch_operation"] / 2,
+        )
+
+    async def add_arc(
+        self,
+        center_x: float,
+        center_y: float,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+    ) -> AdapterResult[str]:
+        """Mock adding a circular arc to sketch.
+
+        Args:
+            center_x (float): Arc centre X.
+            center_y (float): Arc centre Y.
+            start_x (float): Arc start point X.
+            start_y (float): Arc start point Y.
+            end_x (float): Arc end point X.
+            end_y (float): Arc end point Y.
+
+        Returns:
+            AdapterResult[str]: The result produced by the operation.
+        """
+        if not self._current_sketch:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active sketch"
+            )
+
+        await asyncio.sleep(self._delays["sketch_operation"] / 2)
+        self._operation_count += 1
+
+        arc_id = f"Arc{random.randint(1000, 9999)}"
+        self._sketch_entity_ids.add(arc_id)
+
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=arc_id,
             execution_time=self._delays["sketch_operation"] / 2,
         )
 
