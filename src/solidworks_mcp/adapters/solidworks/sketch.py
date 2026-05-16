@@ -1822,23 +1822,38 @@ def _sketch_offset_impl(
                 "reverse_direction to flip the side"
             )
 
-        adapter.currentModel.ClearSelection2(True)
-        _select_sketch_entities(adapter, entities, mark=0)
+        # Validate every entity ID up front so an unknown ID does not
+        # leave SW with a half-built selection.
+        for ent_id in entities:
+            if ent_id not in adapter._sketch_entities:
+                raise Exception(
+                    f"Unknown sketch entity '{ent_id}'. Use IDs returned by "
+                    "add_line/add_arc/add_circle/add_spline/add_centerline."
+                )
 
-        # Negative Offset flips the side per SketchOffset2 docs.
-        offset_m = -offset_distance / 1000.0 if reverse_direction else offset_distance / 1000.0
-
-        ok = adapter.currentSketchManager.SketchOffset2(
-            offset_m,  # Offset (metres)
-            False,  # BothDirections
-            False,  # Chain
-            0,  # CapEnds (swSkOffsetCapEndType_e: 0 = no caps)
-            0,  # MakeConstruction (swSkOffsetMakeConstructionType_e: 0 = none)
-            False,  # AddDimensions
-        )
         adapter.currentModel.ClearSelection2(True)
-        if not ok:
-            raise Exception("Failed to offset sketch entities")
+        try:
+            _select_sketch_entities(adapter, entities, mark=0)
+
+            # Negative Offset flips the side per SketchOffset2 docs.
+            offset_m = (
+                -offset_distance / 1000.0
+                if reverse_direction
+                else offset_distance / 1000.0
+            )
+
+            ok = adapter.currentSketchManager.SketchOffset2(
+                offset_m,  # Offset (metres)
+                False,  # BothDirections
+                False,  # Chain
+                0,  # CapEnds (swSkOffsetCapEndType_e: 0 = no caps)
+                0,  # MakeConstruction (swSkOffsetMakeConstructionType_e: 0 = none)
+                False,  # AddDimensions
+            )
+            if not ok:
+                raise Exception("Failed to offset sketch entities")
+        finally:
+            adapter.currentModel.ClearSelection2(True)
 
         direction = "inward" if reverse_direction else "outward"
         return (

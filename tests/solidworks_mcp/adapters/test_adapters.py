@@ -657,6 +657,7 @@ class TestPyWin32AdapterBranches:
             InsertSketch=Mock(),
             CreateLinearSketchStepAndRepeat=Mock(return_value=True),
             CreateCircularSketchStepAndRepeat=Mock(return_value=True),
+            SketchOffset2=Mock(return_value=True),
         )
 
         select_data = Mock()

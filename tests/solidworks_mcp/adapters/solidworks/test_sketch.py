@@ -363,17 +363,83 @@ def test_sketch_linear_pattern_clears_selection_on_com_failure() -> None:
     assert clear_selection.call_count == 2
 
 
-def test_sketch_offset_placeholder() -> None:
-    """Offset is still a placeholder at this point in the stack
-    (#19 adds the real impl). Verify the placeholder shape so a future
-    refactor knows what's been left behind.
+def _make_offset_adapter() -> tuple[_FakeSketchAdapter, Mock, Mock]:
+    """Build a fake adapter wired for the real sketch_offset impl.
+
+    Mirrors ``_make_pattern_adapter`` — entity registered, SketchOffset2
+    on the sketch manager, ClearSelection2 + CreateSelectData on the
+    model. Returns the adapter + key mocks for assertions.
     """
     adapter = _FakeSketchAdapter()
-    adapter.currentSketchManager = object()
+    seed_entity = Mock()
+    seed_entity.Select4 = Mock(return_value=True)
+    adapter._sketch_entities = {"Line_1": seed_entity}
 
-    offset = sketch._sketch_offset_impl(adapter, ["Line_1"], 2.5, True)
+    sketch_offset2 = Mock(return_value=True)
+    sketch_manager = Mock()
+    sketch_manager.SketchOffset2 = sketch_offset2
+    adapter.currentSketchManager = sketch_manager
 
-    assert offset.is_success and "_inward_" in offset.data
+    select_data = Mock()
+    selection_mgr = Mock()
+    selection_mgr.CreateSelectData = Mock(return_value=select_data)
+
+    clear_selection = Mock(return_value=True)
+    adapter.currentModel = SimpleNamespace(
+        ClearSelection2=clear_selection,
+        SelectionManager=selection_mgr,
+    )
+    return adapter, sketch_offset2, clear_selection
+
+
+def test_sketch_offset_outward_calls_com_with_positive_offset() -> None:
+    """``reverse_direction=False`` passes a positive metre value to
+    ``SketchOffset2`` and synthesises an ``_outward_`` ID."""
+    adapter, sketch_offset2, clear_selection = _make_offset_adapter()
+
+    result = sketch._sketch_offset_impl(adapter, ["Line_1"], 5.0, False)
+
+    assert result.is_success
+    assert "_outward_" in result.data
+    sketch_offset2.assert_called_once()
+    args = sketch_offset2.call_args.args
+    assert args[0] == 5.0 / 1000.0  # mm → m
+    # ClearSelection2 runs once before selecting and once in the finally.
+    assert clear_selection.call_count == 2
+
+
+def test_sketch_offset_inward_flips_sign() -> None:
+    """``reverse_direction=True`` negates ``Offset`` per SketchOffset2 docs."""
+    adapter, sketch_offset2, _ = _make_offset_adapter()
+
+    result = sketch._sketch_offset_impl(adapter, ["Line_1"], 2.5, True)
+
+    assert result.is_success
+    assert "_inward_" in result.data
+    args = sketch_offset2.call_args.args
+    assert args[0] == -2.5 / 1000.0
+
+
+def test_sketch_offset_unknown_entity_does_not_mutate_selection() -> None:
+    adapter, _, clear_selection = _make_offset_adapter()
+
+    result = sketch._sketch_offset_impl(adapter, ["Line_NOPE"], 5.0, False)
+
+    assert result.status == AdapterResultStatus.ERROR
+    assert "Unknown sketch entity 'Line_NOPE'" in (result.error or "")
+    clear_selection.assert_not_called()
+
+
+def test_sketch_offset_clears_selection_on_com_failure() -> None:
+    """``SketchOffset2`` returning False must still leave selection
+    state cleaned up (try/finally invariant)."""
+    adapter, sketch_offset2, clear_selection = _make_offset_adapter()
+    sketch_offset2.return_value = False
+
+    result = sketch._sketch_offset_impl(adapter, ["Line_1"], 5.0, False)
+
+    assert result.status == AdapterResultStatus.ERROR
+    assert clear_selection.call_count == 2
 
 
 def _make_constraint_adapter(
