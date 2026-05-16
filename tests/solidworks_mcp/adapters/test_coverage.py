@@ -300,6 +300,30 @@ class TestMockAdapterSuccessPaths:
         assert "Centerline" in result.data
 
     @pytest.mark.asyncio
+    async def test_add_arc_success(self):
+        """Mock add_arc returns an Arc* id with an active sketch."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+
+        result = await adapter.add_arc(0.0, 0.0, 5.0, 0.0, 0.0, 5.0)
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.startswith("Arc")
+        assert result.data in adapter._sketch_entity_ids
+
+    @pytest.mark.asyncio
+    async def test_add_arc_error_when_no_sketch(self):
+        """Mock add_arc returns ERROR when no sketch is open."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+
+        result = await adapter.add_arc(0.0, 0.0, 5.0, 0.0, 0.0, 5.0)
+        assert result.status == AdapterResultStatus.ERROR
+        assert "No active sketch" in (result.error or "")
+
+    @pytest.mark.asyncio
     async def test_add_spline_success(self):
         """Mock add_spline returns a Spline* id with an active sketch."""
         adapter = MockSolidWorksAdapter({})

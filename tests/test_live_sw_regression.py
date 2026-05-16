@@ -447,3 +447,57 @@ async def test_add_spline_too_few_points_returns_error(connected_adapter) -> Non
         assert "at least 2 points" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- add_arc live regression ----
+
+
+async def test_add_arc_creates_real_arc(connected_adapter) -> None:
+    """End-to-end check that add_arc creates a real ISketchArc in SW.
+
+    ``ISketchManager::CreateArc`` takes nine scalar doubles plus a short
+    direction (no SAFEARRAY), so the spline VT_ARRAY|VT_R8 wrapper is not
+    needed. This test locks in: (1) the mm-to-m unit conversion stays
+    correct, (2) the CCW direction sentinel (``+1``) is accepted, and
+    (3) the returned entity gets registered in ``_sketch_entities`` so
+    later dimension/constraint calls can reference it.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        # Quarter arc (CCW): centre at origin, start at (15,0), end at (0,15).
+        arc = await adapter.add_arc(
+            center_x=0.0,
+            center_y=0.0,
+            start_x=15.0,
+            start_y=0.0,
+            end_x=0.0,
+            end_y=15.0,
+        )
+        assert arc.is_success, f"add_arc failed: {arc.error}"
+        assert arc.data.startswith("Arc_"), f"unexpected arc id: {arc.data!r}"
+        assert arc.data in adapter._sketch_entities
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_arc_no_active_sketch_returns_error(connected_adapter) -> None:
+    """Calling add_arc without an open sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        # Intentionally skip create_sketch; currentSketchManager stays None.
+        bad = await adapter.add_arc(0.0, 0.0, 15.0, 0.0, 0.0, 15.0)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
