@@ -644,15 +644,26 @@ async def test_sketch_linear_pattern_rejects_unknown_entity(connected_adapter) -
 async def test_sketch_circular_pattern_creates_real_pattern(
     connected_adapter,
 ) -> None:
-    """End-to-end check that sketch_circular_pattern arrays a seed around
-    the sketch origin.
+    """End-to-end geometric check that sketch_circular_pattern arrays a
+    seed around the user-supplied centre.
 
-    Regression: ``ISketchManager::CreateCircularSketchStepAndRepeat`` silently
-    returns ``False`` when ``ArcRadius`` is exactly zero — the COM call
-    succeeds with any positive placeholder because SW reads the seed's
-    actual position from the selection. The impl now passes a 1 mm
-    placeholder so degenerate-centre cases still produce a real pattern.
+    Regression history this test guards against:
+
+    1. ``ISketchManager::CreateCircularSketchStepAndRepeat`` silently
+       returns ``False`` when ``ArcRadius`` is exactly zero, so the
+       impl passes a positive minimum.
+    2. The COM ``ArcAngle`` argument is **not** a starting angle — it's
+       the direction (radians) from the seed to the rotation axis.
+       Passing 0 puts the axis at +X from the seed regardless of the
+       caller's ``(center_x, center_y)``, which lands every instance
+       in the wrong place. The earlier ``is_success``-only assertion
+       passed for that broken impl while the live screenshot showed
+       circles clustered around the seed. This test now asserts the
+       actual geometry — count and per-instance radius — so a
+       silently-misplaced pattern fails the check.
     """
+    import math
+
     adapter = connected_adapter
 
     part_result = await adapter.create_part()
@@ -662,8 +673,11 @@ async def test_sketch_circular_pattern_creates_real_pattern(
         sketch_result = await adapter.create_sketch("Front")
         assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
 
-        # Seed circle offset from origin so SW has something to revolve
-        circle = await adapter.add_circle(30.0, 0.0, 3.0)
+        # Seed circle at (30, 0); pattern around the sketch origin →
+        # all six instances should land on a 30 mm circle centred at
+        # (0, 0). The seed itself counts as one of the six.
+        seed_x, seed_y, expected_r = 30.0, 0.0, 30.0
+        circle = await adapter.add_circle(seed_x, seed_y, 3.0)
         assert circle.is_success, f"add_circle failed: {circle.error}"
 
         pattern = await adapter.sketch_circular_pattern(
@@ -679,6 +693,32 @@ async def test_sketch_circular_pattern_creates_real_pattern(
         assert pattern.data.startswith("CircularPattern_6x360.0deg_"), (
             f"unexpected circular pattern id: {pattern.data!r}"
         )
+
+        # Geometric assertion: read every sketch arc/circle from the
+        # active sketch and confirm each centre is at the expected
+        # radius from (0, 0). Uses sw_type_info flagging because
+        # pywin32 late binding otherwise resolves GetSketchSegments and
+        # GetCenterPoint as zero-arg properties returning a tuple.
+        from solidworks_mcp.adapters import sw_type_info
+
+        active_sketch = adapter.currentModel.GetActiveSketch2()
+        sw_type_info.flag_methods(active_sketch, "ISketch")
+        segments = active_sketch.GetSketchSegments()
+        assert len(segments) == 6, (
+            f"expected 6 sketch segments after pattern, got {len(segments)}"
+        )
+
+        radii_mm: list[float] = []
+        for seg in segments:
+            sw_type_info.flag_methods(seg, "ISketchArc")
+            point = seg.GetCenterPoint()
+            radii_mm.append(math.hypot(point[0] * 1000.0, point[1] * 1000.0))
+
+        for r in radii_mm:
+            assert abs(r - expected_r) < 0.5, (
+                f"instance at radius {r:.2f}mm, expected ~{expected_r}mm; "
+                f"all radii: {[round(x, 2) for x in radii_mm]}"
+            )
     finally:
         await adapter.close_model(save=False)
 

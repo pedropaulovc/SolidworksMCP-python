@@ -1554,17 +1554,25 @@ def _sketch_circular_pattern_impl(
         adapter.currentModel.ClearSelection2(True)
         _select_sketch_entities(adapter, entities, mark=0)
 
-        # ``ArcRadius`` actually drives the radius at which SW places the
-        # pattern instances — the earlier assumption that it was only a
-        # dimension placeholder was wrong. With ArcRadius=1 mm the
-        # instances cluster around the seed on a tiny circle instead of
-        # the intended ring (caught by the #17 live screenshot).
+        # The COM API doesn't take pattern-centre coordinates directly.
+        # Instead:
+        #   ``ArcRadius`` = distance from the seed to the rotation axis.
+        #   ``ArcAngle``  = angle (radians) **from the seed toward the
+        #                   rotation axis**, NOT a starting angle. With
+        #                   ArcAngle=0 SW puts the axis at +X relative
+        #                   to the seed.
+        # We recover both by reading the seed's centre via
+        # ``ISketchArc.GetCenterPoint`` (after flagging the dispatch
+        # with sw_type_info — pywin32 late binding otherwise resolves
+        # the method as a tuple-valued property) and computing the
+        # offset to ``(center_x, center_y)``.
         #
-        # Derive the radius from the seed's actual position. ISketchArc /
-        # ISketchCircle expose ``GetCenterPoint`` once the dispatch is
-        # flagged via sw_type_info; for non-circular seeds we fall back
-        # to ``hypot(center_x, center_y)`` which works when the user pre-
-        # positioned the seed at the desired radius along an axis.
+        # Without this fix, ArcAngle=0 + ArcRadius=1 mm puts every
+        # instance on a tiny ring beside the seed instead of the
+        # intended pattern (caught by the #17 live screenshot). Falls
+        # back to placing the axis at angle π from the seed if
+        # GetCenterPoint isn't available; that still works when the
+        # user positions the seed on the +X side of the desired centre.
         try:
             from .. import sw_type_info as _sw_type_info
         except ImportError:
@@ -1586,20 +1594,22 @@ def _sketch_circular_pattern_impl(
                 seed_xy = (float(point[0]) * 1000.0, float(point[1]) * 1000.0)
 
         if seed_xy is not None:
-            arc_radius_mm = math.hypot(
-                seed_xy[0] - center_x, seed_xy[1] - center_y
-            )
+            dx_mm = center_x - seed_xy[0]
+            dy_mm = center_y - seed_xy[1]
+            arc_radius_mm = math.hypot(dx_mm, dy_mm)
+            arc_angle_rad = math.atan2(dy_mm, dx_mm) if arc_radius_mm > 0 else 0.0
         else:
             arc_radius_mm = math.hypot(center_x, center_y)
+            arc_angle_rad = math.pi
 
-        # 1 mm minimum keeps SW from silently rejecting the call when the
-        # seed sits right on the pattern centre.
+        # 1 mm minimum keeps SW from silently rejecting the call when
+        # the seed sits right on the pattern centre.
         arc_radius_m = max(arc_radius_mm / 1000.0, 0.001)
         pattern_spacing = math.radians(angle) / count
 
         ok = adapter.currentSketchManager.CreateCircularSketchStepAndRepeat(
-            arc_radius_m,  # ArcRadius (metres) — actual pattern radius
-            0.0,  # ArcAngle (starting angle, radians)
+            arc_radius_m,  # ArcRadius — seed-to-axis distance (metres)
+            arc_angle_rad,  # ArcAngle — direction from seed to axis (radians)
             count,  # PatternNum
             pattern_spacing,  # PatternSpacing (radians)
             True,  # PatternRotate
