@@ -1643,6 +1643,24 @@ def _sketch_circular_pattern_impl(
                 _sw_type_info = None  # type: ignore[assignment]
 
             first_entity = adapter._sketch_entities.get(entities[0])
+
+            # ``CreatePolygon`` registers a SAFEARRAY of segment handles as a
+            # tuple (the same group-entity quirk the selector handles); the
+            # seed-center lookup below assumes a single dispatch with
+            # ``GetCenterPoint`` and would silently fall back to the 1 mm
+            # placeholder radius for a polygon seed, producing a bogus
+            # pattern at the wrong radius.  Reject with a clear message
+            # rather than build a broken pattern — supporting polygon seeds
+            # requires either a per-entity center cache at register time or
+            # a centroid walk over the polygon's segments, neither of which
+            # is in scope for issue #1.
+            if isinstance(first_entity, (list, tuple)):
+                raise Exception(
+                    "sketch_circular_pattern does not yet support polygon "
+                    "seeds — the radius cannot be derived from the segment "
+                    "tuple. Use a circle, arc, or ellipse seed for now."
+                )
+
             seed_xy: tuple[float, float] | None = None
             if first_entity is not None and _sw_type_info is not None:
                 # GetCenterPoint lives on multiple sketch-entity interfaces
