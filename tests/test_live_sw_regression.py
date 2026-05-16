@@ -392,3 +392,58 @@ async def test_add_sketch_constraint_unsupported_relation(connected_adapter) -> 
         assert "Unsupported relation type" in (bogus.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- add_spline live regression ----
+
+
+async def test_add_spline_creates_real_spline(connected_adapter) -> None:
+    """End-to-end check that add_spline actually creates a spline in SW.
+
+    Regression: pywin32 late binding unpacks a bare list of floats into N
+    positional VARIANT arguments, so ``CreateSpline2`` saw 3*N+1 args and
+    returned ``DISP_E_BADPARAMCOUNT``. The fix wraps the doubles in
+    ``VARIANT(VT_ARRAY|VT_R8, [...])`` so they marshal as a single SAFEARRAY.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        spline = await adapter.add_spline(
+            [
+                {"x": 0.0, "y": 0.0},
+                {"x": 25.0, "y": 15.0},
+                {"x": 50.0, "y": 0.0},
+                {"x": 75.0, "y": -15.0},
+            ]
+        )
+        assert spline.is_success, f"add_spline failed: {spline.error}"
+        assert spline.data.startswith("Spline_"), (
+            f"unexpected spline id: {spline.data!r}"
+        )
+        assert spline.data in adapter._sketch_entities
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_spline_too_few_points_returns_error(connected_adapter) -> None:
+    """A single point must surface a clear error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        bad = await adapter.add_spline([{"x": 0.0, "y": 0.0}])
+        assert bad.is_error
+        assert "at least 2 points" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)

@@ -172,10 +172,13 @@ def test_basic_entity_success_paths_register_entities() -> None:
 
 def test_spline_centerline_polygon_and_ellipse_paths() -> None:
     adapter = _FakeSketchAdapter()
-    spline_calls: list[tuple[list[float], bool]] = []
+    spline_calls: list[tuple[object, bool]] = []
 
-    def _create_spline(points: list[float], is_closed: bool) -> object:
-        spline_calls.append((list(points), is_closed))
+    def _create_spline(points: object, is_closed: bool) -> object:
+        # Store the raw points argument (a VARIANT on Windows, a list on
+        # other platforms) so the assertion below can unwrap it via the
+        # ``.value`` attribute when present.
+        spline_calls.append((points, is_closed))
         return object()
 
     adapter.currentSketchManager = SimpleNamespace(
@@ -191,11 +194,15 @@ def test_spline_centerline_polygon_and_ellipse_paths() -> None:
     assert spline_ok.is_success
     assert spline_ok.data.startswith("Spline_")
     # CreateSpline2 must be called with the SW-spec 2-arg signature:
-    # (flattened XYZ doubles, simulateNaturalEnds=False).
+    # (flattened XYZ doubles, simulateNaturalEnds=False). On Windows the
+    # impl wraps the doubles in VARIANT(VT_ARRAY|VT_R8) so pywin32 marshals
+    # them as a single SAFEARRAY argument instead of unpacking the list.
+    # On non-Windows CI a bare list is passed through.
     assert len(spline_calls) == 1
-    flat_points, is_closed = spline_calls[0]
+    points_arg, is_closed = spline_calls[0]
     assert is_closed is False
-    assert flat_points == [0.0, 0.0, 0.0, 0.002, 0.001, 0.0]
+    flat_points = getattr(points_arg, "value", points_arg)
+    assert list(flat_points) == [0.0, 0.0, 0.0, 0.002, 0.001, 0.0]
 
     center_ok = sketch._add_centerline_impl(adapter, 0, 0, 10, 0)
     polygon_ok = sketch._add_polygon_impl(adapter, 0, 0, 10, 6)
