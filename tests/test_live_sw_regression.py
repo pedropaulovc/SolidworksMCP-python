@@ -501,3 +501,52 @@ async def test_add_arc_no_active_sketch_returns_error(connected_adapter) -> None
         assert "No active sketch" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- add_centerline live regression ----
+
+
+async def test_add_centerline_creates_real_centerline(connected_adapter) -> None:
+    """End-to-end check that add_centerline creates a real construction line in SW.
+
+    ``ISketchManager::CreateCenterLine`` takes six scalar doubles (two XYZ
+    points). This test locks in: (1) the mm-to-m unit conversion stays
+    correct, and (2) the centerline gets registered in
+    ``_sketch_entities`` so it can be referenced later as the third entity
+    for a ``symmetric`` relation or as the mirror line for ``sketch_mirror``.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        centerline = await adapter.add_centerline(0.0, -20.0, 0.0, 20.0)
+        assert centerline.is_success, f"add_centerline failed: {centerline.error}"
+        assert centerline.data.startswith("Centerline_"), (
+            f"unexpected centerline id: {centerline.data!r}"
+        )
+        assert centerline.data in adapter._sketch_entities
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_centerline_no_active_sketch_returns_error(
+    connected_adapter,
+) -> None:
+    """Calling add_centerline without an open sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        # Intentionally skip create_sketch; currentSketchManager stays None.
+        bad = await adapter.add_centerline(0.0, -20.0, 0.0, 20.0)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
