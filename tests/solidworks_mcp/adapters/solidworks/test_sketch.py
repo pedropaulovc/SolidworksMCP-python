@@ -243,22 +243,140 @@ def test_spline_error_when_too_few_points() -> None:
     assert "at least 2 points" in (result.error or "")
 
 
-def test_pattern_placeholders() -> None:
+def _make_pattern_adapter() -> tuple[_FakeSketchAdapter, Mock, Mock, Mock, Mock]:
+    """Build a fake adapter wired for the real sketch_linear_pattern impl.
+
+    The impl resolves entity IDs against ``adapter._sketch_entities``,
+    calls ``adapter.currentModel.ClearSelection2`` before/after,
+    invokes ``adapter.currentModel.SelectionManager.CreateSelectData``
+    to obtain an ``ISelectData`` with the mark, calls ``Select4(True,
+    select_data)`` on each entity, and finally calls
+    ``adapter.currentSketchManager.CreateLinearSketchStepAndRepeat(...)``.
+    The returned mocks let assertions verify each call.
+    """
+    adapter = _FakeSketchAdapter()
+    seed_entity = Mock()
+    seed_entity.Select4 = Mock(return_value=True)
+    adapter._sketch_entities = {"Line_1": seed_entity}
+
+    create_pattern = Mock(return_value=True)
+    sketch_manager = Mock()
+    sketch_manager.CreateLinearSketchStepAndRepeat = create_pattern
+    adapter.currentSketchManager = sketch_manager
+
+    select_data = Mock()
+    selection_mgr = Mock()
+    selection_mgr.CreateSelectData = Mock(return_value=select_data)
+
+    clear_selection = Mock(return_value=True)
+    adapter.currentModel = SimpleNamespace(
+        ClearSelection2=clear_selection,
+        SelectionManager=selection_mgr,
+    )
+    return adapter, create_pattern, clear_selection, seed_entity, selection_mgr
+
+
+def test_sketch_linear_pattern_calls_com_with_converted_args() -> None:
+    """Real ``_sketch_linear_pattern_impl`` selects the seed entities and
+    calls ``CreateLinearSketchStepAndRepeat`` with mm-to-m and
+    direction-vector-to-radian conversions.
+    """
+    adapter, create_pattern, clear_selection, seed_entity, _ = (
+        _make_pattern_adapter()
+    )
+
+    result = sketch._sketch_linear_pattern_impl(
+        adapter, ["Line_1"], 1, 0, 5.0, 3
+    )
+
+    assert result.is_success
+    assert result.data.startswith("LinearPattern_3x5.0_")
+    # ClearSelection2 is called twice (before + finally after).
+    assert clear_selection.call_count == 2
+    # The seed entity was selected with the mark-0 select data.
+    assert seed_entity.Select4.call_count == 1
+    create_pattern.assert_called_once()
+    call_args = create_pattern.call_args.args
+    # Signature: NumX, NumY, SpacingX(m), SpacingY, AngleX(rad), AngleY,
+    # DeleteInstances, XSpacingDim, YSpacingDim, AngleDim,
+    # CreateNumOfInstancesDimInXDir, CreateNumOfInstancesDimInYDir
+    assert call_args[0] == 3  # NumX == count
+    assert call_args[1] == 1  # NumY == 1 (single row)
+    assert call_args[2] == 5.0 / 1000.0  # SpacingX in metres
+    # AngleX == atan2(0, 1) == 0 for direction (1, 0)
+    assert call_args[4] == 0.0
+
+
+def test_sketch_linear_pattern_validates_inputs() -> None:
+    adapter, _, _, _, _ = _make_pattern_adapter()
+
+    assert (
+        sketch._sketch_linear_pattern_impl(adapter, [], 1, 0, 5.0, 3).status
+        == AdapterResultStatus.ERROR
+    )
+    assert (
+        sketch._sketch_linear_pattern_impl(
+            adapter, ["Line_1"], 1, 0, 5.0, 1
+        ).status
+        == AdapterResultStatus.ERROR
+    )
+    assert (
+        sketch._sketch_linear_pattern_impl(
+            adapter, ["Line_1"], 1, 0, 0.0, 3
+        ).status
+        == AdapterResultStatus.ERROR
+    )
+    assert (
+        sketch._sketch_linear_pattern_impl(
+            adapter, ["Line_1"], 0, 0, 5.0, 3
+        ).status
+        == AdapterResultStatus.ERROR
+    )
+
+
+def test_sketch_linear_pattern_unknown_entity_does_not_mutate_selection() -> None:
+    """Validating IDs happens before ``ClearSelection2`` so an unknown ID
+    does not leave SW with a half-built selection state."""
+    adapter, _, clear_selection, _, _ = _make_pattern_adapter()
+
+    result = sketch._sketch_linear_pattern_impl(
+        adapter, ["Line_NOPE"], 1, 0, 5.0, 3
+    )
+
+    assert result.status == AdapterResultStatus.ERROR
+    assert "Unknown sketch entity 'Line_NOPE'" in (result.error or "")
+    clear_selection.assert_not_called()
+
+
+def test_sketch_linear_pattern_clears_selection_on_com_failure() -> None:
+    """``CreateLinearSketchStepAndRepeat`` returning ``False`` must still
+    leave selection state cleaned up (try/finally invariant)."""
+    adapter, create_pattern, clear_selection, _, _ = _make_pattern_adapter()
+    create_pattern.return_value = False
+
+    result = sketch._sketch_linear_pattern_impl(
+        adapter, ["Line_1"], 1, 0, 5.0, 3
+    )
+
+    assert result.status == AdapterResultStatus.ERROR
+    # ClearSelection2 must run both before selecting and after the failure.
+    assert clear_selection.call_count == 2
+
+
+def test_sketch_circular_mirror_offset_placeholders() -> None:
+    """Circular pattern, mirror, and offset are still placeholders at this
+    point in the stack (#17/#18/#19 add the real impls). Verify the
+    placeholder shape so a future refactor knows what's been left behind.
+    """
     adapter = _FakeSketchAdapter()
     adapter.currentSketchManager = object()
 
-    linear_pattern = sketch._sketch_linear_pattern_impl(
-        adapter, ["Line_1"], 1, 0, 5.0, 3
-    )
     circular_pattern = sketch._sketch_circular_pattern_impl(
         adapter, ["Line_1"], 0, 0, 45.0, 8
     )
     mirror = sketch._sketch_mirror_impl(adapter, ["Line_1"], "Centerline_1")
     offset = sketch._sketch_offset_impl(adapter, ["Line_1"], 2.5, True)
 
-    assert linear_pattern.is_success and linear_pattern.data.startswith(
-        "LinearPattern_3x5.0_"
-    )
     assert circular_pattern.is_success and circular_pattern.data.startswith(
         "CircularPattern_8x45.0deg_"
     )

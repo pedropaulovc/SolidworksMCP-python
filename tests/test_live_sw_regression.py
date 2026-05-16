@@ -755,6 +755,141 @@ async def test_add_polygon_no_active_sketch_returns_error(connected_adapter) -> 
         await adapter.close_model(save=False)
 
 
+# ---- sketch_linear_pattern live regression ----
+
+
+async def test_sketch_linear_pattern_creates_real_pattern(connected_adapter) -> None:
+    """End-to-end geometric check that sketch_linear_pattern arrays a
+    seed entity along the requested direction at the requested spacing.
+
+    Regressions this guards against:
+
+    1. ``ISelectionMgr::CreateSelectData`` is a method that pywin32 late
+       binding will not resolve without ``sw_type_info.flag_methods``;
+       without that, the helper raises ``"Member not found."`` from the
+       COM boundary before the pattern call ever happens.
+    2. The mm-to-m conversion on ``SpacingX`` and the
+       ``atan2(direction_y, direction_x)`` conversion from a direction
+       vector to a radian ``AngleX`` together have to land instances on
+       the expected axis. The earlier ``is_success``-only assertion let
+       a misaligned or mis-scaled pattern pass silently (same failure
+       mode that bit #17).
+
+    The check below reads the active sketch's circles back and asserts
+    each centre is at ``seed + i * spacing * direction`` for
+    ``i = 0..count-1``.
+    """
+    import math
+
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+
+        seed_x, seed_y = 0.0, 0.0
+        dx, dy = 1.0, 0.0
+        spacing, count = 12.0, 4
+        circle = await adapter.add_circle(seed_x, seed_y, 3.0)
+        assert circle.is_success, f"add_circle failed: {circle.error}"
+
+        pattern = await adapter.sketch_linear_pattern(
+            entities=[circle.data],
+            direction_x=dx,
+            direction_y=dy,
+            spacing=spacing,
+            count=count,
+        )
+        assert pattern.is_success, f"sketch_linear_pattern failed: {pattern.error}"
+        assert pattern.data.startswith("LinearPattern_4x12.0_"), (
+            f"unexpected linear pattern id: {pattern.data!r}"
+        )
+
+        from solidworks_mcp.adapters import sw_type_info
+
+        active_sketch = adapter.currentModel.GetActiveSketch2()
+        sw_type_info.flag_methods(active_sketch, "ISketch")
+        segments = active_sketch.GetSketchSegments()
+        # Each instance is a circle; SW does not insert auxiliary
+        # construction geometry for a linear pattern.
+        assert len(segments) == count, (
+            f"expected {count} circles after linear pattern, got {len(segments)}"
+        )
+
+        centres = []
+        for seg in segments:
+            for iface in ("ISketchSegment", "ISketchArc"):
+                sw_type_info.flag_methods(seg, iface)
+            cp = seg.GetCenterPoint()
+            centres.append((round(cp[0] * 1000.0, 3), round(cp[1] * 1000.0, 3)))
+        centres.sort()  # ordered along +X for this scenario
+
+        # Expected lattice along the direction unit vector.
+        length = math.hypot(dx, dy)
+        ux, uy = dx / length, dy / length
+        expected = [
+            (
+                round(seed_x + i * spacing * ux, 3),
+                round(seed_y + i * spacing * uy, 3),
+            )
+            for i in range(count)
+        ]
+        expected.sort()
+
+        for (ox, oy), (ex, ey) in zip(centres, expected):
+            assert abs(ox - ex) < 0.1 and abs(oy - ey) < 0.1, (
+                f"instance ({ox}, {oy}) != expected ({ex}, {ey})\n"
+                f"all centres: {centres}\nexpected: {expected}"
+            )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_linear_pattern_no_active_sketch_returns_error(
+    connected_adapter,
+) -> None:
+    """Calling sketch_linear_pattern without a sketch must error without touching SW."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        bad = await adapter.sketch_linear_pattern(["Line_1"], 1.0, 0.0, 10.0, 3)
+        assert bad.is_error
+        assert "No active sketch" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_sketch_linear_pattern_rejects_unknown_entity(connected_adapter) -> None:
+    """An entity ID outside the registry must produce a clear error
+    without touching SW selection state."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success
+
+        bad = await adapter.sketch_linear_pattern(
+            entities=["NotAnEntity_999"],
+            direction_x=1.0,
+            direction_y=0.0,
+            spacing=10.0,
+            count=3,
+        )
+        assert bad.is_error
+        assert "Unknown sketch entity" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
 # ---- add_centerline live regression ----
 
 

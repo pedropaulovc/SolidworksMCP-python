@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 from typing import Any, cast
@@ -1326,6 +1327,60 @@ def _add_sketch_dimension_impl(
     )
 
 
+def _select_sketch_entities(adapter: Any, entity_ids: list[str], mark: int) -> None:
+    """Select sketch entities from the registry under a specific mark.
+
+    Resolves each ID against ``adapter._sketch_entities`` and calls
+    ``ISketchSegment.Select4(Append=True, Data)`` on each — with ``Data``
+    being a configured ``ISelectData`` carrying the requested ``mark`` so
+    SolidWorks knows how to interpret the selection (e.g. mark=1 sketch
+    segments + mark=2 centerline for ``SketchMirror``).
+
+    The ``ISelectionMgr`` dispatch needs ``sw_type_info.flag_methods``
+    flagging or pywin32 late binding cannot resolve ``CreateSelectData``
+    and surfaces ``"Member not found."`` from the COM boundary.  This
+    matches the lazy-import dance used by ``add_sketch_constraint``;
+    when ``sw_type_info`` cannot be imported the flagging step is skipped
+    but ``ISelectionMgr.CreateSelectData`` and ``ISketchSegment.Select4``
+    are still invoked.  Callers must therefore not invoke this helper
+    without a live ``ISelectionMgr`` on ``adapter.currentModel``.
+
+    Args:
+        adapter: A ``PyWin32Adapter``.  ``adapter.currentModel`` must be a
+            live ``IModelDoc2`` dispatch.
+        entity_ids: Registry IDs returned by ``add_line`` / ``add_arc`` /
+            etc.  Must be non-empty; resolution failure raises.
+        mark: ``ISelectData.Mark`` value applied to every selection.
+
+    Raises:
+        Exception: If an entity ID is not in the registry or a Select4
+            call returns ``False``.
+    """
+    try:
+        from .. import sw_type_info as _sw_type_info
+    except ImportError:
+        _sw_type_info = None  # type: ignore[assignment]
+
+    sel_mgr = adapter.currentModel.SelectionManager
+    if _sw_type_info is not None:
+        adapter._attempt(
+            lambda: _sw_type_info.flag_methods(sel_mgr, "ISelectionMgr"),
+            default=0,
+        )
+    select_data = sel_mgr.CreateSelectData()
+    select_data.Mark = mark
+    for ent_id in entity_ids:
+        entity = adapter._sketch_entities.get(ent_id)
+        if entity is None:
+            raise Exception(
+                f"Unknown sketch entity '{ent_id}'. Use IDs returned by "
+                "add_line/add_arc/add_circle/add_spline/add_centerline."
+            )
+        ok = entity.Select4(True, select_data)
+        if not ok:
+            raise Exception(f"Failed to select sketch entity '{ent_id}'")
+
+
 def _sketch_linear_pattern_impl(
     adapter: Any,
     entities: list[str],
@@ -1334,36 +1389,104 @@ def _sketch_linear_pattern_impl(
     spacing: float,
     count: int,
 ) -> AdapterResult[str]:
-    """Create a linear sketch pattern — placeholder, not yet fully implemented.
+    """Create a linear sketch pattern from the registered seed entities.
 
-    Retained for interface compatibility.  Currently returns a descriptive
-    placeholder ID without invoking SolidWorks.  Full implementation will call
-    ``SketchManager.CreateLinearSketchStepAndRepeat``.
+    Selects ``entities`` then calls
+    ``ISketchManager::CreateLinearSketchStepAndRepeat(NumX, NumY, SpacingX,
+    SpacingY, AngleX, AngleY, DeleteInstances, XSpacingDim, YSpacingDim,
+    AngleDim, CreateNumOfInstancesDimInXDir, CreateNumOfInstancesDimInYDir)``.
+    The COM API expects spacing in metres and angles in radians; this
+    function does both conversions internally.
+
+    The ``(direction_x, direction_y)`` vector defines pattern direction 1
+    (``AngleX``).  Direction 2 (``AngleY``) is set perpendicular so the SW
+    UI shows a clean axis frame, but ``NumY`` stays at 1 so no second-axis
+    instances are produced.
 
     Args:
         adapter: A ``PyWin32Adapter`` with an open sketch.
-        entities: List of registered entity IDs to pattern (currently unused).
-        direction_x: Pattern direction X component (currently unused).
-        direction_y: Pattern direction Y component (currently unused).
+        entities: Registered entity IDs to pattern.  Must be non-empty.
+        direction_x: Pattern direction X component (unit-less, any non-zero
+            vector is normalised internally via ``atan2``).
+        direction_y: Pattern direction Y component.
         spacing: Distance between instances in **millimetres**.
-        count: Number of instances (including the seed).
+        count: Total number of instances (including the seed).  Must be at
+            least 2.
 
     Returns:
-        AdapterResult[str]: ``data`` is a placeholder ID string such as
-        ``"LinearPattern_4x10.0_1234"``.
+        AdapterResult[str]: On success, ``data`` is a synthesised
+        ``"LinearPattern_<count>x<spacing>_<rand>"`` ID — the COM method
+        only returns a boolean, so no usable SW handle exists.
+
+    Raises:
+        Exception: Propagated through ``_handle_com_operation`` when
+            inputs are invalid, an entity isn't registered, or
+            ``CreateLinearSketchStepAndRepeat`` returns ``False``.
 
     Example::
 
+        # 5 copies of Line_1 along +X, 15 mm apart
         result = pywin32_sketch_ops.sketch_linear_pattern(
-            adapter, ["Line_1"], 1, 0, 10.0, 4
+            adapter, ["Line_1"], direction_x=1.0, direction_y=0.0,
+            spacing=15.0, count=5
         )
-        print(result.data)  # "LinearPattern_4x10.0_8765"
+        print(result.data)  # "LinearPattern_5x15.0_8765"
     """
-    _ = entities, direction_x, direction_y
     if not adapter.currentSketchManager:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active sketch")
 
     def _linear_pattern_operation() -> str:
+        if not entities:
+            raise Exception("sketch_linear_pattern requires at least one entity")
+        if count < 2:
+            raise Exception("sketch_linear_pattern requires count >= 2")
+        if spacing <= 0:
+            raise Exception("sketch_linear_pattern requires spacing > 0")
+        if direction_x == 0 and direction_y == 0:
+            raise Exception(
+                "sketch_linear_pattern requires a non-zero direction vector"
+            )
+
+        # Validate every entity ID exists in the registry before mutating
+        # selection state, so an unknown ID doesn't leave SW with a
+        # half-built selection.
+        for ent_id in entities:
+            if ent_id not in adapter._sketch_entities:
+                raise Exception(
+                    f"Unknown sketch entity '{ent_id}'. Use IDs returned by "
+                    "add_line/add_arc/add_circle/add_spline/add_centerline."
+                )
+
+        # Clear any pre-existing selection so SW only sees the seed entities.
+        adapter.currentModel.ClearSelection2(True)
+        try:
+            _select_sketch_entities(adapter, entities, mark=0)
+
+            angle_x = math.atan2(direction_y, direction_x)
+            # Direction 2 (Y) goes 90° from direction 1; NumY=1 keeps it
+            # single-row so the second-axis spacing/angle aren't actually
+            # consumed, but SW still wants well-formed values.
+            angle_y = angle_x + math.pi / 2.0
+
+            ok = adapter.currentSketchManager.CreateLinearSketchStepAndRepeat(
+                count,  # NumX
+                1,  # NumY
+                spacing / 1000.0,  # SpacingX (metres)
+                0.0,  # SpacingY
+                angle_x,  # AngleX (radians)
+                angle_y,  # AngleY (radians)
+                "",  # DeleteInstances
+                False,  # XSpacingDim
+                False,  # YSpacingDim
+                False,  # AngleDim
+                False,  # CreateNumOfInstancesDimInXDir
+                False,  # CreateNumOfInstancesDimInYDir
+            )
+            if not ok:
+                raise Exception("Failed to create linear sketch pattern")
+        finally:
+            adapter.currentModel.ClearSelection2(True)
+
         return f"LinearPattern_{count}x{spacing}_{int(time.time() * 1000) % 10000}"
 
     return cast(
