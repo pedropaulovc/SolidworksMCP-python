@@ -154,8 +154,10 @@ Collected while implementing the nine sketch primitives in
 SolidWorks API doc set lives next to the bundled
 `developing-solidworks` skill — read those first. These are the
 gotchas that surfaced in *practice* against SOLIDWORKS 2026 +
-`pywin32` 311 + Python 3.14 and that bit our specific code path
-several times. The pattern below covers them all:
+`pywin32` v311 (the package version observed at the time of writing)
+running under Python 3.11 — matching the project's pinned environment
+(`solidworks_mcp.yml` pins `python=3.11`; `pyproject.toml` constrains
+`pywin32>=306`). The pattern below covers them all:
 
 1. **Look up the COM signature in the bundled API docs before you
    write the call.** The signature in the upstream issue text or the
@@ -203,10 +205,12 @@ several times. The pattern below covers them all:
    catches placement / orientation / count bugs at review time. The
    COM `IModelDoc2::SaveAs3` image-export path drops in-progress
    sketch geometry, so prefer a Windows GDI window grab of the
-   SOLIDWORKS top-level window. See
-   `C:/Users/pedro/.claude/jobs/c3e913d5/capture_one.py` (kept in the
-   private notes directory) for a working Python ctypes
-   implementation.
+   SOLIDWORKS top-level window. The approach: a small Python ctypes
+   script that uses `user32.EnumWindows` to locate the SLDWORKS
+   top-level window by class/title, then `PrintWindow` (or `BitBlt`
+   on the window DC) to copy the client area into a DIB that's
+   written to PNG. No script is committed in-tree; build one under
+   `scripts/` if you need it.
 
 5. **Selection-based COM methods need marks.** `IModelDoc2::SketchMirror`
    and `ISketchManager::SketchOffset2` / both pattern methods consume
@@ -218,9 +222,11 @@ several times. The pattern below covers them all:
 
 6. **`ArcRadius` for circular patterns must be strictly positive.**
    Zero causes `CreateCircularSketchStepAndRepeat` to return `False`
-   even when everything else is valid. The current impl uses
-   `max(actual_distance, 1 mm)` so a seed sitting on the pattern
-   centre still produces a usable call.
+   even when everything else is valid. `ArcRadius` is used only for
+   the on-canvas pattern dimension, so the design intent is to clamp
+   it to `max(actual_distance_from_seed_to_centre, 1 mm)` — a seed
+   sitting exactly on the pattern centre still produces a usable
+   call, and a normal seed gets a sensible dimension.
 
 7. **Each PR's screenshots live in `docs/screenshots/` on that PR's
    branch** and are referenced from the PR body via
