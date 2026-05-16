@@ -17,6 +17,7 @@ class _FakeSketchAdapter:
         self._sketch_count = 0
         self._last_sketch_name = None
         self._sketch_entities: dict[str, object] = {}
+        self._sketch_entity_centers: dict[str, tuple[float, float]] = {}
         self._next_id = 1
         self.constants = {
             "swSmartDimensionDirectionRight": 0,
