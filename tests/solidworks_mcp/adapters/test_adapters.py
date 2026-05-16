@@ -646,6 +646,11 @@ class TestPyWin32AdapterBranches:
         #   the real impl rejects anything else.
         seed_entity = Mock()
         seed_entity.Select4 = Mock(return_value=True)
+        # Circular pattern now requires a resolvable seed centre — either via
+        # GetCenterPoint (single dispatch) or via _sketch_entity_centers
+        # (group entities). Wire GetCenterPoint so this test's seed stands in
+        # for a circle/arc/ellipse rather than a line.
+        seed_entity.GetCenterPoint = Mock(return_value=(0.030, 0.0))
         centerline = Mock()
         centerline.Select4 = Mock(return_value=True)
         adapter._sketch_entities = {

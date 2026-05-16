@@ -517,9 +517,16 @@ def _add_rectangle_impl(
         )
         if not lines:
             raise Exception("Failed to create rectangle")
-        return cast(
-            AdapterResult[str], adapter._register_sketch_entity("Rectangle", lines)
+        entity_id = cast(str, adapter._register_sketch_entity("Rectangle", lines))
+        # Like polygons, rectangles register as a SAFEARRAY tuple of segment
+        # handles — no single dispatch ``GetCenterPoint`` to recover the
+        # geometric centre from later. Stash it now so the rectangle ID is a
+        # valid seed for ``sketch_circular_pattern``.
+        adapter._sketch_entity_centers[entity_id] = (
+            (x1 + x2) / 2.0,
+            (y1 + y2) / 2.0,
         )
+        return entity_id
 
     return cast(
         AdapterResult[str],
@@ -1695,17 +1702,27 @@ def _sketch_circular_pattern_impl(
                 ):
                     seed_xy = (float(point[0]) * 1000.0, float(point[1]) * 1000.0)
 
-            if seed_xy is not None:
-                # Rotation axis is at the sketch origin (0, 0) — the
-                # ``center_x != 0 or center_y != 0`` guard above forces
-                # this — so dx/dy from seed to axis is just ``-seed``.
-                dx_mm = -seed_xy[0]
-                dy_mm = -seed_xy[1]
-                arc_radius_mm = math.hypot(dx_mm, dy_mm)
-                arc_angle_rad = math.atan2(dy_mm, dx_mm) if arc_radius_mm > 0 else 0.0
-            else:
-                arc_radius_mm = 0.0
-                arc_angle_rad = math.pi
+            # Single-dispatch seeds without ``GetCenterPoint`` (line, spline,
+            # centerline) used to fall through here with ``seed_xy is None``
+            # and silently produce a 1 mm placeholder pattern at the wrong
+            # radius — same bug class as the polygon/rectangle tuple case,
+            # but quieter because no exception fires. Surface a clear error
+            # naming the offending seed instead.
+            if seed_xy is None:
+                raise Exception(
+                    f"sketch_circular_pattern can't derive the seed centre "
+                    f"for '{entities[0]}' — this seed type has no "
+                    f"GetCenterPoint dispatch on ISketchArc/ISketchEllipse. "
+                    f"Use a circle, arc, ellipse, or polygon seed."
+                )
+
+            # Rotation axis is at the sketch origin (0, 0) — the
+            # ``center_x != 0 or center_y != 0`` guard above forces this — so
+            # dx/dy from seed to axis is just ``-seed``.
+            dx_mm = -seed_xy[0]
+            dy_mm = -seed_xy[1]
+            arc_radius_mm = math.hypot(dx_mm, dy_mm)
+            arc_angle_rad = math.atan2(dy_mm, dx_mm) if arc_radius_mm > 0 else 0.0
 
             # ``CreateCircularSketchStepAndRepeat`` silently returns False on
             # negative ``ArcAngle`` values — the bundled VBA/C# examples all

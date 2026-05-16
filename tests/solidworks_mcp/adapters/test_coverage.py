@@ -737,6 +737,12 @@ class TestRealCircularPatternImpl:
         """
         seed_entity = Mock()
         seed_entity.Select4 = Mock(return_value=True)
+        # GetCenterPoint must resolve to a length-2 tuple of metres for the
+        # impl's seed-centre lookup to succeed; without this the impl would
+        # raise the "can't derive the seed centre" error and tests that
+        # don't care about the seed position would break. (30, 0) mm puts
+        # the seed on +X — a sensible default for circular-pattern tests.
+        seed_entity.GetCenterPoint = Mock(return_value=(0.030, 0.0))
         sketch_entities = {"Circle_1": seed_entity}
 
         create_pattern = Mock(return_value=True)
@@ -868,6 +874,62 @@ class TestRealCircularPatternImpl:
         # ArcRadius is in metres: hypot(30, 40) / 1000 = 0.05.
         assert args[0] == pytest.approx(0.05)
         assert args[2] == 6
+
+    def test_rectangle_seed_with_cached_center_drives_arc_radius(self):
+        """Rectangles register as a SAFEARRAY tuple of line segments — same
+        shape as polygons. ``_add_rectangle_impl`` now caches the geometric
+        centre at register time, so a rectangle seed must flow through
+        circular_pattern the same as a polygon seed, deriving ArcRadius
+        from the cached centre.
+        """
+        from src.solidworks_mcp.adapters.solidworks import sketch as sketch_ops
+
+        adapter, create_pattern, _ = self._build_adapter()
+        adapter._sketch_entities["Rectangle_1"] = (Mock(), Mock(), Mock(), Mock())
+        # Rectangle centred at (60, 80) mm → seed-to-origin distance is 100 mm.
+        adapter._sketch_entity_centers["Rectangle_1"] = (60.0, 80.0)
+
+        result = sketch_ops._sketch_circular_pattern_impl(
+            adapter, ["Rectangle_1"], 0.0, 0.0, 360.0, 4
+        )
+
+        assert result.status == AdapterResultStatus.SUCCESS
+        create_pattern.assert_called_once()
+        args = create_pattern.call_args.args
+        # ArcRadius is in metres: hypot(60, 80) / 1000 = 0.100.
+        assert args[0] == pytest.approx(0.100)
+        assert args[2] == 4
+
+    def test_single_dispatch_seed_without_get_center_point_raises(self):
+        """Lines, splines, and centerlines register as a single dispatch but
+        none of them expose ``GetCenterPoint`` on the flagged interfaces
+        (``ISketchArc``/``ISketchEllipse``). The previous impl let this fall
+        through to a 1 mm placeholder radius, silently producing a tightly
+        clustered pattern instead of the intended one. Surface a clear
+        error pointing the caller at the supported seed types instead."""
+        from src.solidworks_mcp.adapters.solidworks import sketch as sketch_ops
+
+        adapter, create_pattern, _ = self._build_adapter()
+        # Stand-in for a line/spline/centerline: single dispatch whose
+        # GetCenterPoint returns a non-iterable value (the real impl swallows
+        # the AttributeError via ``_attempt`` and ``point`` stays as a Mock
+        # that fails the ``len(point) >= 2`` check). Use return_value=None to
+        # be explicit.
+        bare_seed = Mock()
+        bare_seed.Select4 = Mock(return_value=True)
+        bare_seed.GetCenterPoint = Mock(return_value=None)
+        adapter._sketch_entities["Line_1"] = bare_seed
+
+        result = sketch_ops._sketch_circular_pattern_impl(
+            adapter, ["Line_1"], 0.0, 0.0, 360.0, 6
+        )
+
+        assert result.status == AdapterResultStatus.ERROR
+        assert "Line_1" in (result.error or "")
+        assert "GetCenterPoint" in (result.error or "")
+        # COM call must NOT have fired — silent 1 mm placeholder pattern
+        # was the bug.
+        create_pattern.assert_not_called()
 
     def test_tuple_seed_without_cached_center_raises_clear_error(self):
         """Rectangles also register as a tuple of segment handles (from
