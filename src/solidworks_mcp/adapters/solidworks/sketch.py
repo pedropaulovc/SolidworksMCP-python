@@ -748,17 +748,18 @@ def _add_polygon_impl(
 
     Calls ``SketchManager.CreatePolygon(XC, YC, Zc, Xp, Yp, Zp, Sides,
     Inscribed)``.  All eight arguments are required by the COM API — passing
-    fewer surfaces a pywin32 ``"Parameter not optional."`` error at the
-    SOLIDWORKS boundary.  The vertex point ``(Xp, Yp, Zp)`` is placed on the
-    positive X axis at ``radius`` from centre, which fixes the polygon's
+    fewer arguments surfaces a pywin32 ``"Parameter not optional."`` error at
+    the SOLIDWORKS boundary.  The vertex point ``(Xp, Yp, Zp)`` is placed on
+    the positive X axis at ``radius`` from centre, which fixes the polygon's
     rotation reproducibly.
 
     Args:
         adapter: A ``PyWin32Adapter`` with an open sketch.
         center_x: Polygon centre X in **millimetres**.
         center_y: Polygon centre Y in **millimetres**.
-        radius: Inscribed-circle radius in **millimetres** (distance from
-            centre to each vertex).
+        radius: Circumradius in **millimetres** (distance from centre to each
+            vertex). Corresponds to ``CreatePolygon(..., Inscribed=True)``,
+            i.e. the polygon is inscribed in a circle of this radius.
         sides: Number of polygon sides.  SolidWorks accepts 3–40.
 
     Returns:

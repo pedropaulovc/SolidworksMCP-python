@@ -1025,7 +1025,9 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         Args:
             center_x (float): Polygon centre X in millimetres.
             center_y (float): Polygon centre Y in millimetres.
-            radius (float): Inscribed-circle radius in millimetres.
+            radius (float): Circumradius in millimetres (distance from centre
+                to each vertex; matches the real adapter's
+                ``CreatePolygon(..., Inscribed=True)`` semantics).
             sides (int): Number of polygon sides.
 
         Returns:
