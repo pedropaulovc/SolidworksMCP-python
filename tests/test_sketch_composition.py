@@ -1,4 +1,4 @@
-"""Mock-based composition tests for Phase-0 sketch ops.
+"""Mock-based composition tests for the new sketch ops.
 
 Every method that landed under issue #1 returns an entity ID.  PRs #11-#21
 shipped isolated regression tests for each method but **none** chained an
@@ -147,8 +147,6 @@ async def test_ellipse_flows_into_circular_pattern(
     assert seed.is_success
     pattern = await sketch_adapter.sketch_circular_pattern(
         entities=[seed.data],
-        center_x=0.0,
-        center_y=0.0,
         angle=360.0,
         count=6,
     )
@@ -162,7 +160,7 @@ async def test_arc_flows_into_mirror_and_offset(
 ) -> None:
     """Arc seed -> both sketch_mirror and sketch_offset must succeed.
 
-    Mirrors the bottom band of the Phase-0 live demo (arc + spline +
+    Mirrors the bottom band of the live demo (arc + spline +
     mirror + offset) but in a chain so a future ID-format change in
     ``add_arc`` breaks here without needing a live SW box.
     """
@@ -209,8 +207,6 @@ async def test_spline_flows_into_mirror(
             "count": 3,
         }),
         ("sketch_circular_pattern", {
-            "center_x": 0.0,
-            "center_y": 0.0,
             "angle": 360.0,
             "count": 6,
         }),

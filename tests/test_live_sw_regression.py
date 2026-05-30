@@ -846,7 +846,7 @@ async def test_sketch_linear_pattern_creates_real_pattern(connected_adapter) -> 
         ]
         expected.sort()
 
-        for (ox, oy), (ex, ey) in zip(centres, expected):
+        for (ox, oy), (ex, ey) in zip(centres, expected, strict=True):
             assert abs(ox - ex) < 0.1 and abs(oy - ey) < 0.1, (
                 f"instance ({ox}, {oy}) != expected ({ex}, {ey})\n"
                 f"all centres: {centres}\nexpected: {expected}"
@@ -941,8 +941,6 @@ async def test_sketch_circular_pattern_creates_real_pattern(
 
         pattern = await adapter.sketch_circular_pattern(
             entities=[circle.data],
-            center_x=0.0,
-            center_y=0.0,
             angle=360.0,
             count=6,
         )
@@ -993,7 +991,7 @@ async def test_sketch_circular_pattern_no_active_sketch_returns_error(
     assert part_result.is_success
 
     try:
-        bad = await adapter.sketch_circular_pattern(["Circle_1"], 0.0, 0.0, 360.0, 6)
+        bad = await adapter.sketch_circular_pattern(["Circle_1"], 360.0, 6)
         assert bad.is_error
         assert "No active sketch" in (bad.error or "")
     finally:
@@ -1015,8 +1013,6 @@ async def test_sketch_circular_pattern_rejects_unknown_entity(
 
         bad = await adapter.sketch_circular_pattern(
             entities=["NotAnEntity_777"],
-            center_x=0.0,
-            center_y=0.0,
             angle=360.0,
             count=6,
         )
@@ -1397,7 +1393,7 @@ async def test_add_centerline_no_active_sketch_returns_error(
 #
 # These tests pipe the ID returned by each ``add_*`` op into a downstream
 # consumer (``sketch_*_pattern`` / ``sketch_mirror`` / ``sketch_offset``).
-# The whole shape of every Phase-0 bug I fixed in PR #22 was "creator's
+# The whole shape of every bug fixed in PR #22 was "creator's
 # isolated test passed, consumer's isolated test passed, but the
 # combination failed".  These tests pin the contract on the live adapter
 # so a future regression in either side breaks here, not in a user demo.
@@ -1519,7 +1515,6 @@ async def test_polygon_id_flows_into_circular_pattern_live(
       (e.g. the 1 mm placeholder ring the impl used to produce) would
       still report success.
     """
-    import math
 
     adapter = connected_adapter
 
@@ -1550,8 +1545,6 @@ async def test_polygon_id_flows_into_circular_pattern_live(
 
         pattern = await adapter.sketch_circular_pattern(
             entities=[seed.data],
-            center_x=0.0,
-            center_y=0.0,
             angle=360.0,
             count=6,
         )
@@ -1614,8 +1607,6 @@ async def test_rectangle_id_flows_into_circular_pattern_live(
 
         pattern = await adapter.sketch_circular_pattern(
             entities=[seed.data],
-            center_x=0.0,
-            center_y=0.0,
             angle=360.0,
             count=4,
         )
@@ -1664,8 +1655,6 @@ async def test_line_seed_in_circular_pattern_errors_clearly_live(
 
         pattern = await adapter.sketch_circular_pattern(
             entities=[line.data],
-            center_x=0.0,
-            center_y=0.0,
             angle=360.0,
             count=4,
         )
@@ -1708,8 +1697,6 @@ async def test_ellipse_id_flows_into_circular_pattern_live(
 
         pattern = await adapter.sketch_circular_pattern(
             entities=[seed.data],
-            center_x=0.0,
-            center_y=0.0,
             angle=360.0,
             count=6,
         )
@@ -1724,7 +1711,7 @@ async def test_arc_id_flows_into_mirror_and_offset_live(
     connected_adapter,
 ) -> None:
     """``add_arc`` ID -> ``sketch_mirror`` AND ``sketch_offset`` from the
-    same arc (the bottom-band shape from the Phase-0 live demo)."""
+    same arc (the bottom-band shape from the live demo)."""
     adapter = connected_adapter
 
     part_result = await adapter.create_part()

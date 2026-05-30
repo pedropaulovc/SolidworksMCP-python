@@ -392,8 +392,18 @@ class SolidWorksIOMixin:
             dimension = adapter.currentModel.Parameter(name)
             if not dimension:
                 raise Exception(f"Dimension '{name}' not found")
-            value = dimension.GetValue3(8, None)
-            return cast(float, value * 1000)
+            # SystemValue is reliable on SW 2025 (in meters, convert to mm)
+            value = adapter._attempt(
+                lambda: dimension.SystemValue, default=None
+            )
+            if value is None:
+                # Fall back to GetValue3 for older SW versions
+                value = adapter._attempt(
+                    lambda: dimension.GetValue3(0, 0), default=None
+                )
+            if value is None:
+                raise Exception(f"Failed to read dimension '{name}'")
+            return cast(float, float(value) * 1000)
 
         return cast(
             AdapterResult[float],
@@ -422,11 +432,24 @@ class SolidWorksIOMixin:
             if not dimension:
                 raise Exception(f"Dimension '{name}' not found")
 
-            success = dimension.SetValue3(value / 1000.0, 8, None)
-            if not success:
-                raise Exception(f"Failed to set dimension '{name}'")
+            # SetValue3 has gen_py parameter mapping issues on SW 2025.
+            # SystemValue (in meters) is reliable.
+            value_m = value / 1000.0
+            adapter._attempt(
+                lambda: setattr(dimension, "SystemValue", value_m),
+                default=None,
+            )
 
-            adapter.currentModel.ForceRebuild3(False)
+            # Rebuild: try EditRebuild3 first, fall back to ForceRebuild3
+            rebuilt = adapter._attempt(
+                lambda: adapter.currentModel.EditRebuild3(), default=None
+            )
+            if rebuilt is None:
+                rebuilt = adapter._attempt(
+                    lambda: adapter.currentModel.ForceRebuild3(True), default=None
+                )
+            if rebuilt is None:
+                raise Exception("Failed to set dimension")
 
         return cast(
             AdapterResult[None],
@@ -536,18 +559,30 @@ class SolidWorksIOMixin:
         def _get_info() -> dict[str, Any]:
             """Get model information."""
             active_config = adapter.currentModel.GetActiveConfiguration()
+            # 'Name' on Configuration is a property, not a method.
+            config_name = getattr(active_config, "Name", "Default") if active_config else "Default"
+            # Try GetSaveFlag (method) first, fallback to property
+            is_dirty_raw = adapter._attempt(
+                lambda: adapter.currentModel.GetSaveFlag(), default=None
+            )
+            is_dirty = bool(is_dirty_raw) if is_dirty_raw is not None else None
+            feature_count = adapter._attempt(
+                lambda: int(adapter.currentModel.FeatureManager.GetFeatureCount(True) or 0),
+                default=0,
+            )
+            rebuild_status_raw = adapter._attempt(
+                lambda: adapter.currentModel.GetRebuildStatus(), default=None
+            )
+            # GetRebuildStatus returns 0=ok, 1=needs rebuild, or None=failed
+            rebuild_status = rebuild_status_raw if rebuild_status_raw is not None else None
             return {
                 "title": adapter.currentModel.GetTitle(),
                 "path": adapter.currentModel.GetPathName(),
                 "type": adapter._get_document_type(),
-                "configuration": active_config.GetName()
-                if active_config
-                else "Default",
-                "is_dirty": adapter.currentModel.GetSaveFlag(),
-                "feature_count": adapter.currentModel.FeatureManager.GetFeatureCount(
-                    True
-                ),
-                "rebuild_status": adapter.currentModel.GetRebuildStatus(),
+                "configuration": config_name,
+                "is_dirty": is_dirty,
+                "feature_count": feature_count,
+                "rebuild_status": rebuild_status,
             }
 
         return cast(
@@ -613,6 +648,8 @@ class SolidWorksIOMixin:
             adapter._attempt(
                 lambda: adapter.currentModel.ForceRebuild3(False), default=None
             )
+
+            # Primary: Extension.CreateMassProperty() object API (most detailed)
             mass_props = adapter._attempt(
                 lambda: adapter.currentModel.Extension.CreateMassProperty(),
                 default=None,
@@ -634,9 +671,15 @@ class SolidWorksIOMixin:
                 if not isinstance(moi, (list, tuple)) or len(moi) < 9:
                     moi = [0.0] * 9
             else:
-                raw = adapter._attempt(
-                    lambda: adapter.currentModel.GetMassProperties, default=None
-                )
+                # Fallback: GetMassProperties as attribute (tuple) or callable (SW 2022)
+                gmp = getattr(adapter.currentModel, "GetMassProperties", None)
+                if callable(gmp):
+                    raw = adapter._attempt(gmp, default=None)
+                elif isinstance(gmp, (list, tuple)):
+                    raw = gmp
+                else:
+                    raw = None
+
                 if not isinstance(raw, (list, tuple)) or len(raw) < 6:
                     raise Exception("Failed to get mass properties")
 

@@ -14,7 +14,6 @@ from src.solidworks_mcp.adapters import (
     AdapterFactory,
     create_adapter,
 )
-from src.solidworks_mcp.adapters.factory import _register_default_adapters
 from src.solidworks_mcp.adapters.base import AdapterResult, AdapterResultStatus
 from src.solidworks_mcp.adapters.circuit_breaker import (
     CircuitBreaker,
@@ -25,6 +24,7 @@ from src.solidworks_mcp.adapters.connection_pool import (
     ConnectionPool,
     ConnectionPoolAdapter,
 )
+from src.solidworks_mcp.adapters.factory import _register_default_adapters
 from src.solidworks_mcp.adapters.mock_adapter import MockSolidWorksAdapter
 from src.solidworks_mcp.adapters.pywin32_adapter import PyWin32Adapter
 from src.solidworks_mcp.config import AdapterType
@@ -678,7 +678,7 @@ class TestPyWin32AdapterBranches:
             await adapter.sketch_linear_pattern(["L1"], 1.0, 0.0, 5.0, 3)
         ).is_success
         assert (
-            await adapter.sketch_circular_pattern(["L1"], 0.0, 0.0, 180.0, 4)
+            await adapter.sketch_circular_pattern(["L1"], 180.0, 4)
         ).is_success
         assert (await adapter.sketch_mirror(["L1"], "Centerline_42")).is_success
         assert (await adapter.sketch_offset(["L1"], 1.0, True)).is_success
@@ -2571,7 +2571,7 @@ class TestPyWin32AdapterBranches:
         assert (await adapter.add_sketch_dimension("L1", None, "linear", 10.0)).is_error
         assert (await adapter.sketch_linear_pattern(["L1"], 1.0, 0.0, 5.0, 3)).is_error
         assert (
-            await adapter.sketch_circular_pattern(["L1"], 0.0, 0.0, 180.0, 4)
+            await adapter.sketch_circular_pattern(["L1"], 180.0, 4)
         ).is_error
         assert (await adapter.sketch_mirror(["L1"], "CL1")).is_error
         assert (await adapter.sketch_offset(["L1"], 1.0, True)).is_error
