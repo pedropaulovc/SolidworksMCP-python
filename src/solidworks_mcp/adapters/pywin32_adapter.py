@@ -21,6 +21,7 @@ from .base import (
     AdapterResultStatus,
     SolidWorksAdapter,
 )
+from .com_variant import null_callout
 from .solidworks import (
     SolidWorksFeaturesMixin,
     SolidWorksIOMixin,
@@ -1002,7 +1003,7 @@ class _FeatureSelectionService:
             for entity_type in entity_types:
                 try:
                     selected = target_doc.Extension.SelectByID2(
-                        candidate, entity_type, 0, 0, 0, False, 0, None, 0
+                        candidate, entity_type, 0, 0, 0, False, 0, null_callout(), 0
                     )
                     if selected:
                         return {

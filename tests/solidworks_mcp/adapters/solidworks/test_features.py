@@ -7,7 +7,12 @@ from types import SimpleNamespace
 from solidworks_mcp.adapters.base import (
     AdapterResult,
     AdapterResultStatus,
+    CircularPatternParameters,
+    DraftParameters,
     ExtrusionParameters,
+    LinearPatternParameters,
+    MirrorFeatureParameters,
+    ShellParameters,
 )
 from solidworks_mcp.adapters.solidworks import features
 
@@ -103,30 +108,66 @@ def test_create_cut_extrude_uses_modern_fallback_when_cut4_returns_none() -> Non
 def test_add_fillet_and_chamfer_selection_and_feature_failures() -> None:
     adapter = _FakeFeatureAdapter()
 
-    feature_manager = SimpleNamespace(
-        FeatureFillet3=lambda *args: None,
-        FeatureChamfer=lambda *args: None,
-    )
-    extension = SimpleNamespace(SelectByID2=lambda edge, *_args: edge != "Edge<bad>")
+    # Edges are now located by a point on each, and fillet/chamfer call the
+    # IModelDoc2-level FeatureFillet3 / FeatureChamfer (not FeatureManager).
+    # Selection failure: SelectByID2 returns False -> "Failed to select edge".
     adapter.currentModel = SimpleNamespace(
-        FeatureManager=feature_manager, Extension=extension
+        Extension=SimpleNamespace(SelectByID2=lambda *a, **k: False),
+        ClearSelection2=lambda *_a: True,
+        FeatureFillet3=lambda *a: None,
+        FeatureChamfer=lambda *a: None,
+        FirstFeature=None,
     )
 
-    fillet_select_error = features._add_fillet_impl(adapter, 2.0, ["Edge<bad>"])
+    fillet_select_error = features._add_fillet_impl(adapter, 2.0, [[1.0, 2.0, 3.0]])
     assert fillet_select_error.status == AdapterResultStatus.ERROR
     assert "Failed to select edge" in (fillet_select_error.error or "")
 
-    fillet_feature_error = features._add_fillet_impl(adapter, 2.0, ["Edge<1>"])
-    assert fillet_feature_error.status == AdapterResultStatus.ERROR
-    assert "Failed to create fillet" in (fillet_feature_error.error or "")
-
-    chamfer_select_error = features._add_chamfer_impl(adapter, 1.0, ["Edge<bad>"])
+    chamfer_select_error = features._add_chamfer_impl(adapter, 1.0, [[1.0, 2.0, 3.0]])
     assert chamfer_select_error.status == AdapterResultStatus.ERROR
     assert "Failed to select edge" in (chamfer_select_error.error or "")
 
-    chamfer_feature_error = features._add_chamfer_impl(adapter, 1.0, ["Edge<2>"])
+    # Feature failure: selection succeeds, the COM call returns None, and the
+    # feature-tree fallback finds nothing -> "Failed to create ...".
+    adapter.currentModel = SimpleNamespace(
+        Extension=SimpleNamespace(SelectByID2=lambda *a, **k: True),
+        ClearSelection2=lambda *_a: True,
+        FeatureFillet3=lambda *a: None,
+        FeatureChamfer=lambda *a: None,
+        FirstFeature=None,
+    )
+
+    fillet_feature_error = features._add_fillet_impl(adapter, 2.0, [[1.0, 2.0, 3.0]])
+    assert fillet_feature_error.status == AdapterResultStatus.ERROR
+    assert "Failed to create fillet" in (fillet_feature_error.error or "")
+
+    chamfer_feature_error = features._add_chamfer_impl(adapter, 1.0, [[1.0, 2.0, 3.0]])
     assert chamfer_feature_error.status == AdapterResultStatus.ERROR
     assert "Failed to create chamfer" in (chamfer_feature_error.error or "")
+
+
+def test_add_fillet_requires_model_and_edge_points() -> None:
+    adapter = _FakeFeatureAdapter()
+    no_model = features._add_fillet_impl(adapter, 2.0, [[0.0, 0.0, 0.0]])
+    assert no_model.status == AdapterResultStatus.ERROR
+    assert no_model.error == "No active model"
+
+    adapter.currentModel = SimpleNamespace()
+    no_edges = features._add_fillet_impl(adapter, 2.0, [])
+    assert no_edges.status == AdapterResultStatus.ERROR
+    assert "at least one edge point" in (no_edges.error or "")
+
+
+def test_add_chamfer_requires_model_and_edge_points() -> None:
+    adapter = _FakeFeatureAdapter()
+    no_model = features._add_chamfer_impl(adapter, 1.0, [[0.0, 0.0, 0.0]])
+    assert no_model.status == AdapterResultStatus.ERROR
+    assert no_model.error == "No active model"
+
+    adapter.currentModel = SimpleNamespace()
+    no_edges = features._add_chamfer_impl(adapter, 1.0, [])
+    assert no_edges.status == AdapterResultStatus.ERROR
+    assert "at least one edge point" in (no_edges.error or "")
 
 
 def test_create_cut_extrude_through_all_both_directions() -> None:
@@ -178,3 +219,160 @@ def test_create_cut_extrude_raises_when_no_feature_and_no_errors() -> None:
     )
     assert result.status == AdapterResultStatus.ERROR
     assert "Failed to create cut extrude feature" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 feature primitives — pywin32 impl success + selection paths
+# ---------------------------------------------------------------------------
+
+
+def _named_feature_model(**extra):
+    """Build a fake currentModel whose FeatureByName/Select2 always succeed
+    and whose Extension.SelectByID2 always selects (returns True)."""
+    base = {
+        "ClearSelection2": lambda *_a: True,
+        "FeatureByName": lambda name: SimpleNamespace(
+            Select2=lambda append, mark: True
+        ),
+        "Extension": SimpleNamespace(SelectByID2=lambda *a, **k: True),
+        "FirstFeature": None,
+    }
+    base.update(extra)
+    return SimpleNamespace(**base)
+
+
+def test_mirror_feature_impl_success() -> None:
+    adapter = _FakeFeatureAdapter()
+    created = SimpleNamespace(Name="Mirror1")
+    adapter.currentModel = _named_feature_model(
+        FeatureManager=SimpleNamespace(InsertMirrorFeature2=lambda *a: created),
+    )
+    result = features._mirror_feature_impl(
+        adapter,
+        MirrorFeatureParameters(plane="Right Plane", features=["Boss-Extrude1"]),
+    )
+    assert result.is_success
+    assert result.data.type == "Mirror"
+    assert result.data.name == "Mirror1"
+
+
+def test_mirror_feature_impl_guards() -> None:
+    adapter = _FakeFeatureAdapter()
+    no_model = features._mirror_feature_impl(
+        adapter, MirrorFeatureParameters(plane="Right Plane", features=["F1"])
+    )
+    assert no_model.error == "No active model"
+
+    adapter.currentModel = SimpleNamespace()
+    no_feats = features._mirror_feature_impl(
+        adapter, MirrorFeatureParameters(plane="Right Plane", features=[])
+    )
+    assert "at least one feature" in (no_feats.error or "")
+
+
+def test_circular_pattern_impl_success() -> None:
+    adapter = _FakeFeatureAdapter()
+    created = SimpleNamespace(Name="CircPattern1")
+    adapter.currentModel = _named_feature_model(
+        FeatureManager=SimpleNamespace(FeatureCircularPattern5=lambda *a: created),
+    )
+    result = features._circular_pattern_impl(
+        adapter,
+        CircularPatternParameters(
+            axis_point=[0.0, 0.0, 10.0], features=["Cut-Extrude1"], count=6
+        ),
+    )
+    assert result.is_success
+    assert result.data.type == "CircularPattern"
+    assert result.data.parameters["count"] == 6
+
+
+def test_circular_pattern_impl_axis_selection_failure() -> None:
+    adapter = _FakeFeatureAdapter()
+    adapter.currentModel = _named_feature_model(
+        Extension=SimpleNamespace(SelectByID2=lambda *a, **k: False),
+        FeatureManager=SimpleNamespace(FeatureCircularPattern5=lambda *a: object()),
+    )
+    result = features._circular_pattern_impl(
+        adapter,
+        CircularPatternParameters(
+            axis_point=[1.0, 2.0, 3.0], features=["Cut-Extrude1"], count=4
+        ),
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "Failed to select rotation axis" in (result.error or "")
+
+
+def test_linear_pattern_impl_success() -> None:
+    adapter = _FakeFeatureAdapter()
+    created = SimpleNamespace(Name="LPattern1")
+    adapter.currentModel = _named_feature_model(
+        FeatureManager=SimpleNamespace(FeatureLinearPattern5=lambda *a: created),
+    )
+    result = features._linear_pattern_impl(
+        adapter,
+        LinearPatternParameters(
+            direction_point=[50.0, 0.0, 0.0],
+            features=["Cut-Extrude1"],
+            count=4,
+            spacing=20.0,
+        ),
+    )
+    assert result.is_success
+    assert result.data.type == "LinearPattern"
+    assert result.data.parameters["spacing"] == 20.0
+
+
+def test_shell_impl_success_uses_tree_fallback() -> None:
+    # InsertFeatureShell returns void, so the feature is recovered from the tree.
+    adapter = _FakeFeatureAdapter()
+    shell_feat = SimpleNamespace(Name="Shell1", GetNextFeature=lambda: None)
+    adapter.currentModel = _named_feature_model(
+        InsertFeatureShell=lambda thickness, outward: None,
+        FirstFeature=shell_feat,
+    )
+    result = features._shell_impl(
+        adapter, ShellParameters(thickness=2.0, face_points=[[0.0, 0.0, 100.0]])
+    )
+    assert result.is_success
+    assert result.data.type == "Shell"
+    assert result.data.name == "Shell1"
+
+
+def test_shell_impl_face_selection_failure() -> None:
+    adapter = _FakeFeatureAdapter()
+    adapter.currentModel = _named_feature_model(
+        Extension=SimpleNamespace(SelectByID2=lambda *a, **k: False),
+        InsertFeatureShell=lambda thickness, outward: None,
+    )
+    result = features._shell_impl(
+        adapter, ShellParameters(thickness=2.0, face_points=[[0.0, 0.0, 100.0]])
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "Failed to select face" in (result.error or "")
+
+
+def test_draft_impl_success() -> None:
+    adapter = _FakeFeatureAdapter()
+    created = SimpleNamespace(Name="Draft1")
+    adapter.currentModel = _named_feature_model(
+        FeatureManager=SimpleNamespace(InsertMultiFaceDraft=lambda *a: created),
+    )
+    result = features._draft_impl(
+        adapter,
+        DraftParameters(
+            angle=3.0, neutral_plane="Top Plane", face_points=[[25.0, 0.0, 50.0]]
+        ),
+    )
+    assert result.is_success
+    assert result.data.type == "Draft"
+    assert result.data.parameters["neutral_plane"] == "Top Plane"
+
+
+def test_draft_impl_requires_model_and_faces() -> None:
+    adapter = _FakeFeatureAdapter()
+    no_model = features._draft_impl(
+        adapter,
+        DraftParameters(angle=3.0, neutral_plane="Top Plane", face_points=[[0, 0, 0]]),
+    )
+    assert no_model.error == "No active model"

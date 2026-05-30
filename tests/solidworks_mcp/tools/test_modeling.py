@@ -30,10 +30,19 @@ class TestModelingTools:
         tool_count = await register_modeling_tools(
             mcp_server, mock_adapter, mock_config
         )
-        assert tool_count == 12
-        # The Phase 1 sweep/loft tools must be registered alongside the rest.
+        assert tool_count == 18
+        # The Phase 1 sweep/loft tools and the Phase 2 feature primitives must
+        # be registered alongside the rest.
         names = {tool.name for tool in await mcp_server.list_tools()}
         assert {"create_sweep", "create_loft"} <= names
+        assert {
+            "add_chamfer",
+            "mirror_feature",
+            "circular_pattern_feature",
+            "linear_pattern_feature",
+            "shell",
+            "draft",
+        } <= names
 
     @pytest.mark.asyncio
     async def test_open_model_success(self, mcp_server, mock_adapter, mock_config):

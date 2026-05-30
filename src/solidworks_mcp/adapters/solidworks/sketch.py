@@ -8,6 +8,7 @@ import time
 from typing import Any, cast
 
 from ..base import AdapterResult, AdapterResultStatus
+from ..com_variant import null_callout
 
 # swConstraintType_e values per the official SolidWorks API enum docs
 # (SolidWorks.Interop.swconst). The legacy IModelDoc2.SketchAddConstraints
@@ -311,7 +312,9 @@ def _create_sketch_impl(adapter: Any, plane: str) -> AdapterResult[str]:
                 break
 
         if not selected:
-            # SW 2022: callout must be None (empty string causes type mismatch)
+            # The Callout arg must be a typed-null VARIANT, not bare ``None``
+            # (bare None marshals as VT_NULL and SolidWorks rejects it with
+            # "Type mismatch"). See com_variant.null_callout.
             selected, selection_error_candidate = adapter._attempt_with_error(
                 lambda: adapter.currentModel.Extension.SelectByID2(
                     actual_plane,
@@ -321,7 +324,7 @@ def _create_sketch_impl(adapter: Any, plane: str) -> AdapterResult[str]:
                     0,
                     False,
                     0,
-                    None,
+                    null_callout(),
                     0,
                 )
             )

@@ -984,6 +984,11 @@ class TestPyWin32AdapterBranches:
             Extension=extension,
             SketchManager=sketch_manager,
             FeatureManager=feature_manager,
+            # Fillet/chamfer now call the IModelDoc2-level methods and select
+            # edges by coordinate, so the model needs these directly.
+            ClearSelection2=Mock(return_value=True),
+            FeatureFillet3=Mock(return_value=feature_obj),
+            FeatureChamfer=Mock(return_value=feature_obj),
         )
 
         created_sketch = await adapter.create_sketch("XY")
@@ -1036,8 +1041,8 @@ class TestPyWin32AdapterBranches:
         cut = await adapter.create_cut_extrude(
             SimpleNamespace(depth=4.0, draft_angle=1.0, reverse_direction=False)
         )
-        fillet = await adapter.add_fillet(2.0, ["Edge1", "Edge2"])
-        chamfer = await adapter.add_chamfer(1.5, ["Edge1"])
+        fillet = await adapter.add_fillet(2.0, [[10.0, 0.0, 5.0], [0.0, 10.0, 5.0]])
+        chamfer = await adapter.add_chamfer(1.5, [[10.0, 0.0, 5.0]])
         mass = await adapter.get_mass_properties()
 
         assert extrude_standard.is_success
@@ -1059,7 +1064,14 @@ class TestPyWin32AdapterBranches:
             and call.args[1] == "PLANE"
         ]
         assert plane_select_calls, "Expected plane selection call for sketch creation"
-        assert any(call_args[7] in ("", None, 0) for call_args in plane_select_calls)
+        # The Callout arg is a typed-null: plain None on platforms without
+        # pywin32 (Linux CI), or a VARIANT(VT_DISPATCH, None) (value is None) on
+        # Windows. Either way it carries no real callout object.
+        assert any(
+            call_args[7] in ("", None, 0)
+            or getattr(call_args[7], "value", "sentinel") is None
+            for call_args in plane_select_calls
+        )
         assert feature_manager.FeatureExtrusion3.called
         assert feature_manager.FeatureExtruThin2.called
         assert feature_manager.FeatureRevolve2.called
@@ -1304,8 +1316,8 @@ class TestPyWin32AdapterBranches:
                 SimpleNamespace(depth=1.0, draft_angle=0.0, reverse_direction=False)
             )
         ).is_error
-        assert (await adapter.add_fillet(1.0, ["E1"])).is_error
-        assert (await adapter.add_chamfer(1.0, ["E1"])).is_error
+        assert (await adapter.add_fillet(1.0, [[1.0, 2.0, 3.0]])).is_error
+        assert (await adapter.add_chamfer(1.0, [[1.0, 2.0, 3.0]])).is_error
         assert (await adapter.rebuild_model()).is_error
 
         class _Feature:
@@ -1360,11 +1372,14 @@ class TestPyWin32AdapterBranches:
         adapter = self._build_adapter(monkeypatch)
         model = SimpleNamespace(
             Extension=SimpleNamespace(SelectByID2=Mock(return_value=False)),
+            ClearSelection2=Mock(return_value=True),
+            FirstFeature=None,
             FeatureManager=SimpleNamespace(
                 FeatureCut3=Mock(return_value=None),
-                FeatureFillet3=Mock(return_value=None),
-                FeatureChamfer=Mock(return_value=None),
             ),
+            # Fillet/chamfer call the IModelDoc2-level methods directly.
+            FeatureFillet3=Mock(return_value=None),
+            FeatureChamfer=Mock(return_value=None),
         )
         adapter.currentModel = model
 
@@ -1374,16 +1389,19 @@ class TestPyWin32AdapterBranches:
         assert cut_fail.is_error
         assert "Failed to create cut extrude feature" in (cut_fail.error or "")
 
-        fillet_select_fail = await adapter.add_fillet(1.0, ["Edge1"])
-        chamfer_select_fail = await adapter.add_chamfer(1.0, ["Edge1"])
+        # SelectByID2 returns False -> the edge point cannot be selected.
+        fillet_select_fail = await adapter.add_fillet(1.0, [[1.0, 2.0, 3.0]])
+        chamfer_select_fail = await adapter.add_chamfer(1.0, [[1.0, 2.0, 3.0]])
         assert fillet_select_fail.is_error
         assert "Failed to select edge" in (fillet_select_fail.error or "")
         assert chamfer_select_fail.is_error
         assert "Failed to select edge" in (chamfer_select_fail.error or "")
 
+        # Selection succeeds but the feature call returns None (and the tree
+        # fallback finds nothing) -> "Failed to create ...".
         model.Extension.SelectByID2 = Mock(return_value=True)
-        fillet_create_fail = await adapter.add_fillet(1.0, ["Edge1"])
-        chamfer_create_fail = await adapter.add_chamfer(1.0, ["Edge1"])
+        fillet_create_fail = await adapter.add_fillet(1.0, [[1.0, 2.0, 3.0]])
+        chamfer_create_fail = await adapter.add_chamfer(1.0, [[1.0, 2.0, 3.0]])
         assert fillet_create_fail.is_error
         assert "Failed to create fillet" in (fillet_create_fail.error or "")
         assert chamfer_create_fail.is_error

@@ -461,6 +461,10 @@ async def test_base_default_optional_methods_return_not_implemented_errors():
     assert cut.is_error
     assert "not implemented" in (cut.error or "").lower()
 
-    fillet = await adapter.add_fillet(radius=1.0, edge_names=["Edge<1>"])
+    fillet = await adapter.add_fillet(radius=1.0, edge_points=[[10.0, 0.0, 5.0]])
     assert fillet.is_error
     assert "not implemented" in (fillet.error or "").lower()
+
+    chamfer = await adapter.add_chamfer(distance=1.0, edge_points=[[10.0, 0.0, 5.0]])
+    assert chamfer.is_error
+    assert "not implemented" in (chamfer.error or "").lower()
