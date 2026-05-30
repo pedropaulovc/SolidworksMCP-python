@@ -20,7 +20,7 @@ from ..base import (
     SolidWorksFeature,
     SweepParameters,
 )
-from ..com_variant import null_callout
+from ..com_variant import empty_double_array, null_callout
 
 
 class SolidWorksFeaturesMixin:
@@ -1210,59 +1210,83 @@ def _create_cut_extrude_impl(
     )
 
 
-def _last_feature(adapter: Any) -> Any:
-    """Return the COM object of the last feature in the tree, or ``None``.
+def _feature_objects(adapter: Any) -> list[tuple[str, Any]]:
+    """Walk the feature tree, returning ``(name, COM object)`` for each feature.
 
-    Several feature-creation COM calls return ``None`` (or a non-feature) even
-    on success (e.g. ``InsertFeatureShell``).  Because SolidWorks appends a new
-    feature at the end of the tree, the just-created feature is the final one,
-    so this walk recovers it.  Robust to pywin32's method-vs-property ambiguity
-    via :func:`_read_member`.
+    Robust to pywin32's method-vs-property ambiguity via :func:`_read_member`.
+    The walk is bounded so a misbehaving ``GetNextFeature`` cannot spin forever.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
 
     Returns:
-        Any: The last ``IFeature`` COM object, or ``None`` when the tree is
-        empty or inaccessible.
+        list[tuple[str, Any]]: ``(name, feature)`` pairs in tree order. Empty
+        when the tree is inaccessible.
     """
-    last = None
+    out: list[tuple[str, Any]] = []
     try:
         _flag_feature_methods(adapter.currentModel, "IModelDoc2")
         feat = _read_member(adapter.currentModel, "FirstFeature")
         for _ in range(5000):
             if not feat:
                 break
-            last = feat
             _flag_feature_methods(feat, "IFeature")
+            try:
+                name = _read_member(feat, "Name")
+            except Exception:
+                name = None
+            out.append((str(name) if name is not None else "", feat))
             try:
                 feat = _read_member(feat, "GetNextFeature")
             except Exception:
                 break
     except Exception:
         pass
-    return last
+    return out
 
 
-def _resolve_feature(adapter: Any, returned: Any) -> Any:
+def _feature_names(adapter: Any) -> set[str]:
+    """Return the set of feature names currently in the tree.
+
+    Captured before a feature-creation call so the new feature can later be
+    identified by diffing (see :func:`_resolve_feature`).
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+
+    Returns:
+        set[str]: Feature names present now.
+    """
+    return {name for name, _ in _feature_objects(adapter) if name}
+
+
+def _resolve_feature(adapter: Any, returned: Any, names_before: set[str]) -> Any:
     """Return a usable ``IFeature`` for a just-created feature.
 
-    Some SolidWorks feature calls return a value that is not a usable feature
-    handle on this build (e.g. ``FeatureFillet3`` returns an ``int``), or return
-    ``None`` on success (e.g. ``InsertFeatureShell``).  When the returned value
-    has no readable ``Name``, the feature is recovered from the tail of the
-    feature tree (the newly created feature is appended last).
+    Prefers the value the COM call returned when it exposes a readable
+    ``Name``.  Some calls instead return a non-feature (``FeatureFillet3``
+    returns an ``int`` on this build) or ``None`` on success
+    (``InsertFeatureShell``); in that case the new feature is found by diffing
+    the current tree against ``names_before``.  Diffing (rather than taking the
+    tree tail) is robust even when a call also appends auxiliary features.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
         returned: Whatever the feature-creation COM call returned.
+        names_before: Feature names captured before the call
+            (:func:`_feature_names`).
 
     Returns:
         Any: A feature object exposing ``Name``, or ``None`` if none is found.
     """
     if returned and _read_member(returned, "Name") is not None:
         return returned
-    return _last_feature(adapter)
+    new = [
+        feat
+        for name, feat in _feature_objects(adapter)
+        if name and name not in names_before
+    ]
+    return new[-1] if new else None
 
 
 def _select_edge_points(adapter: Any, edge_points: list[list[float]]) -> None:
@@ -1317,6 +1341,7 @@ def _add_fillet_impl(
         )
 
     def _fillet_operation() -> SolidWorksFeature:
+        names_before = _feature_names(adapter)
         _select_edge_points(adapter, edge_points)
 
         # IModelDoc2.FeatureFillet3 constant-radius form (9 args) — verified on
@@ -1330,11 +1355,11 @@ def _add_fillet_impl(
             False,  # VarRadTyp
             0,  # OverflowType (default)
             0,  # NRadii
-            null_callout(),  # Radii (unused when NRadii == 0; typed-null)
+            empty_double_array(),  # Radii (empty array; unused when NRadii == 0)
             False,  # UseHelpPoint
             False,  # UseTangentHoldLine
         )
-        feature = _resolve_feature(adapter, feature)
+        feature = _resolve_feature(adapter, feature, names_before)
         if not feature:
             raise Exception("Failed to create fillet")
 
@@ -1388,6 +1413,7 @@ def _add_chamfer_impl(
         )
 
     def _chamfer_operation() -> SolidWorksFeature:
+        names_before = _feature_names(adapter)
         _select_edge_points(adapter, edge_points)
 
         # IModelDoc2.FeatureChamfer(Width, Angle, Flip): distance-angle form.
@@ -1398,7 +1424,7 @@ def _add_chamfer_impl(
             math.radians(45.0),  # Angle (radians)
             False,  # Flip
         )
-        feature = _resolve_feature(adapter, feature)
+        feature = _resolve_feature(adapter, feature, names_before)
         if not feature:
             raise Exception("Failed to create chamfer")
 
@@ -1487,6 +1513,7 @@ def _mirror_feature_impl(
 
         feature_manager = adapter.currentModel.FeatureManager
         _flag_feature_methods(feature_manager, "IFeatureManager")
+        names_before = _feature_names(adapter)
         feature = feature_manager.InsertMirrorFeature2(
             False,  # BMirrorBody (mirror features, not bodies)
             bool(params.geometry_pattern),  # BGeometryPattern
@@ -1494,7 +1521,7 @@ def _mirror_feature_impl(
             False,  # BKnit (surfaces only)
             0,  # ScopeOptions = swFeatureScope_AllBodies
         )
-        feature = _resolve_feature(adapter, feature)
+        feature = _resolve_feature(adapter, feature, names_before)
         if not feature:
             raise Exception("Failed to create mirror feature")
 
@@ -1570,6 +1597,7 @@ def _circular_pattern_impl(
         spacing_rad = math.radians(float(params.angle))
         feature_manager = adapter.currentModel.FeatureManager
         _flag_feature_methods(feature_manager, "IFeatureManager")
+        names_before = _feature_names(adapter)
         feature = feature_manager.FeatureCircularPattern5(
             int(params.count),  # Number (incl. seed)
             spacing_rad,  # Spacing (radians; total angle when EqualSpacing)
@@ -1586,7 +1614,7 @@ def _circular_pattern_impl(
             "NULL",  # DName2
             False,  # EqualSpacing2
         )
-        feature = _resolve_feature(adapter, feature)
+        feature = _resolve_feature(adapter, feature, names_before)
         if not feature:
             raise Exception("Failed to create circular pattern")
 
@@ -1661,6 +1689,7 @@ def _linear_pattern_impl(
 
         feature_manager = adapter.currentModel.FeatureManager
         _flag_feature_methods(feature_manager, "IFeatureManager")
+        names_before = _feature_names(adapter)
         feature = feature_manager.FeatureLinearPattern5(
             int(params.count),  # Num1 (incl. seed)
             float(params.spacing) / 1000.0,  # Spacing1 (metres)
@@ -1685,7 +1714,7 @@ def _linear_pattern_impl(
             False,  # D2PatternSeedOnly
             False,  # SyncSubAssemblies
         )
-        feature = _resolve_feature(adapter, feature)
+        feature = _resolve_feature(adapter, feature, names_before)
         if not feature:
             raise Exception("Failed to create linear pattern")
 
@@ -1745,10 +1774,11 @@ def _shell_impl(
                 raise Exception(f"Failed to select face at point {point} (mm)")
 
         # InsertFeatureShell(Thickness metres, Outward) returns void.
+        names_before = _feature_names(adapter)
         adapter.currentModel.InsertFeatureShell(
             float(params.thickness) / 1000.0, bool(params.outward)
         )
-        feature = _last_feature(adapter)
+        feature = _resolve_feature(adapter, None, names_before)
         if not feature:
             raise Exception("Failed to create shell")
 
@@ -1818,6 +1848,7 @@ def _draft_impl(
 
         feature_manager = adapter.currentModel.FeatureManager
         _flag_feature_methods(feature_manager, "IFeatureManager")
+        names_before = _feature_names(adapter)
         feature = feature_manager.InsertMultiFaceDraft(
             math.radians(float(params.angle)),  # Angle (radians)
             bool(params.flip),  # FlipDir
@@ -1826,7 +1857,7 @@ def _draft_impl(
             False,  # IsStepDraft
             False,  # IsBodyDraft
         )
-        feature = _resolve_feature(adapter, feature)
+        feature = _resolve_feature(adapter, feature, names_before)
         if not feature:
             raise Exception("Failed to create draft")
 

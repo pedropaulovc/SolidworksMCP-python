@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Python-port harmonic-analyzer tool-surface expansion. These phases were shipped
+without changelog entries; recorded here retroactively.
+
+### Added
+- **Phase 2 — part-level feature primitives** (#26): `add_chamfer`,
+  `mirror_feature`, `circular_pattern_feature`, `linear_pattern_feature`,
+  `shell`, `draft`. `rib` and `hole_wizard` deferred to a follow-up.
+- **Phase 1 — sweep & loft** (#25): `create_sweep`
+  (`IFeatureManager::InsertProtrusionSwept4`) and `create_loft`
+  (`InsertProtrusionBlend2`).
+- **Phase 0 — sketch primitives wired to real SolidWorks COM** (#11–#24):
+  `add_spline`, `add_arc`, `add_centerline`, `add_polygon`, `add_ellipse`,
+  `sketch_linear_pattern`, `sketch_circular_pattern`, `sketch_mirror`,
+  `sketch_offset`, plus rectangle and polygon seeds for the sketch patterns.
+
+### Fixed
+- **SelectByID2 optional `Callout` marshalling** (#26) — the pywin32/Python
+  counterpart of the v3.1.0 TypeScript fix below. Late binding marshals a bare
+  Python `None` for the optional `Callout` (`ICallout`) argument as `VT_NULL`,
+  which SolidWorks rejects with `Type mismatch`; pass
+  `VARIANT(VT_DISPATCH, None)` instead (`adapters/com_variant.null_callout`).
+  Applied at every `SelectByID2` call site (fillet, chamfer, cut-extrude and
+  `create_sketch` fallbacks, feature selection). This had left `add_fillet`
+  (and the speculative `add_chamfer`) failing on every live call; both are
+  reworked to locate edges by a point and use the IModelDoc2-level feature
+  calls.
+- **Phase 0 SAFEARRAY / arity marshalling** (#11, #14): `add_spline` passes its
+  points as a single `VARIANT(VT_ARRAY | VT_R8, …)` SAFEARRAY; `add_polygon`
+  passes all 8 arguments to `CreatePolygon`.
+
 ## [3.1.0] - 2026-03-11
 
 ### Fixed

@@ -323,14 +323,20 @@ def test_linear_pattern_impl_success() -> None:
     assert result.data.parameters["spacing"] == 20.0
 
 
-def test_shell_impl_success_uses_tree_fallback() -> None:
-    # InsertFeatureShell returns void, so the feature is recovered from the tree.
+def test_shell_impl_success_recovers_feature_by_diff() -> None:
+    # InsertFeatureShell returns void; the feature is recovered by diffing the
+    # tree against the names captured before the call. The fake appends the
+    # shell feature only when InsertFeatureShell runs, so the diff finds it.
     adapter = _FakeFeatureAdapter()
     shell_feat = SimpleNamespace(Name="Shell1", GetNextFeature=lambda: None)
-    adapter.currentModel = _named_feature_model(
-        InsertFeatureShell=lambda thickness, outward: None,
-        FirstFeature=shell_feat,
-    )
+    model = _named_feature_model(FirstFeature=None)
+
+    def _insert(thickness, outward):
+        model.FirstFeature = shell_feat  # SW appends the new feature
+        return None
+
+    model.InsertFeatureShell = _insert
+    adapter.currentModel = model
     result = features._shell_impl(
         adapter, ShellParameters(thickness=2.0, face_points=[[0.0, 0.0, 100.0]])
     )

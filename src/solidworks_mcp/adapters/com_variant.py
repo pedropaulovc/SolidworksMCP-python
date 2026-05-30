@@ -39,3 +39,26 @@ def null_callout() -> Any:
         return VARIANT(pythoncom.VT_DISPATCH, None)
     except Exception:
         return None
+
+
+def empty_double_array() -> Any:
+    """Return an empty array-of-doubles VARIANT for unused SAFEARRAY params.
+
+    Some SolidWorks methods take an optional ``double[]`` (e.g. the ``Radii``
+    argument of ``IModelDoc2::FeatureFillet3``, unused when the radius count is
+    zero). Under late binding the correct typed-absent value is an empty
+    ``VT_ARRAY | VT_R8`` VARIANT, not a bare ``None`` (which would marshal as
+    ``VT_NULL`` — the same class of failure as :func:`null_callout`).
+
+    Returns:
+        Any: ``VARIANT(VT_ARRAY | VT_R8, [])`` on Windows with pywin32
+        available; plain ``None`` as a fallback otherwise (CI never reaches a
+        real COM boundary).
+    """
+    try:
+        import pythoncom
+        from win32com.client import VARIANT
+
+        return VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [])
+    except Exception:
+        return None
