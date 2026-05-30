@@ -19,10 +19,13 @@ $MainBranch = "main"
 $PersonalBranch = "personal"
 
 function Invoke-Git {
-    param([string[]]$Args)
-    & git @Args
+    # NB: do not name this parameter $Args — that collides with the automatic
+    # $Args variable, so `& git @Args` splats the (empty) automatic one and
+    # runs bare `git`, which exits 1.
+    param([string[]]$GitArgs)
+    & git @GitArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "git $($Args -join ' ') failed (exit $LASTEXITCODE)"
+        throw "git $($GitArgs -join ' ') failed (exit $LASTEXITCODE)"
     }
 }
 
