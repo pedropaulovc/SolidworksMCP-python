@@ -363,7 +363,6 @@ class AddFilletInput(CompatInput):
 
     radius: float = Field(description="Fillet radius in millimeters")
     edge_points: list[list[float]] = Field(
-        default_factory=list,
         description=(
             "Edges to fillet, located by a point [x, y, z] in mm lying on each "
             "edge (SolidWorks edges have no stable name)."
@@ -389,7 +388,6 @@ class AddChamferInput(CompatInput):
 
     distance: float = Field(description="Chamfer distance in millimeters")
     edge_points: list[list[float]] = Field(
-        default_factory=list,
         description=(
             "Edges to chamfer, located by a point [x, y, z] in mm lying on each "
             "edge (SolidWorks edges have no stable name)."
