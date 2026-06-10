@@ -5,6 +5,7 @@ operations fail repeatedly.
 """
 
 import asyncio
+import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -109,6 +110,58 @@ class CircuitBreakerAdapter(SolidWorksAdapter):
         self.failure_count = 0
         self.last_failure_time: float = 0.0
         self.half_open_calls = 0
+        self._install_generic_delegates()
+
+    def _install_generic_delegates(self) -> None:
+        """Route adapter methods without an explicit wrapper through the breaker.
+
+        New adapter methods land on ``SolidWorksAdapter`` as overridable
+        defaults that return a "not implemented" error. Because this wrapper
+        also inherits from the base, attribute lookup resolves to that
+        default instead of the wrapped adapter's implementation for any
+        method not explicitly wrapped above — silently disabling new tools
+        whenever this class lags the adapter surface. Instance-level
+        delegates close the gap generically: every public coroutine on the
+        base that this class (or a subclass) doesn't define is forwarded to
+        ``self.adapter`` through the circuit breaker.
+        """
+        explicit: set[str] = set()
+        for klass in type(self).__mro__:
+            if klass is SolidWorksAdapter:
+                break
+            explicit.update(vars(klass))
+        for name in dir(SolidWorksAdapter):
+            if name.startswith("_") or name in explicit:
+                continue
+            member = inspect.getattr_static(SolidWorksAdapter, name, None)
+            if not inspect.iscoroutinefunction(member):
+                continue
+            setattr(self, name, self._make_generic_delegate(name))
+
+    def _make_generic_delegate(
+        self, name: str
+    ) -> Callable[..., Awaitable[AdapterResult[Any]]]:
+        """Build a circuit-breaker delegate for an adapter method.
+
+        Args:
+            name (str): Adapter method name to forward to ``self.adapter``.
+
+        Returns:
+            Callable[..., Awaitable[AdapterResult[Any]]]: The delegate.
+        """
+
+        async def _delegate(*args: Any, **kwargs: Any) -> AdapterResult[Any]:
+            input_dict: dict[str, Any] = dict(kwargs)
+            if len(args) == 1 and not kwargs:
+                input_dict = _to_input_dict(args[0])
+            return await self._execute_with_circuit_breaker(
+                name,
+                lambda: getattr(self.adapter, name)(*args, **kwargs),
+                input_dict=input_dict,
+            )
+
+        _delegate.__name__ = name
+        return _delegate
 
     async def _invoke_with_optional_args(
         self,
@@ -721,9 +774,7 @@ class CircuitBreakerAdapter(SolidWorksAdapter):
             },
         )
 
-    async def add_spline(
-        self, points: list[dict[str, float]]
-    ) -> AdapterResult[str]:
+    async def add_spline(self, points: list[dict[str, float]]) -> AdapterResult[str]:
         """Add spline through circuit breaker."""
         return await self._execute_with_circuit_breaker(
             "add_spline",
@@ -1056,7 +1107,9 @@ class CircuitBreakerAdapter(SolidWorksAdapter):
                 list_tool_call_records,
             )
 
-            records = list_tool_call_records(self.soc_session_id, db_path=self.soc_db_path)
+            records = list_tool_call_records(
+                self.soc_session_id, db_path=self.soc_db_path
+            )
             last_id = records[-1]["id"] if records else None
 
             snapshot_id: int | None = None
@@ -1086,7 +1139,9 @@ class CircuitBreakerAdapter(SolidWorksAdapter):
                 db_path=self.soc_db_path,
             )
         except Exception as exc:
-            logger.debug(f"[soc_checkpoint] failed to create checkpoint {label!r}: {exc}")
+            logger.debug(
+                f"[soc_checkpoint] failed to create checkpoint {label!r}: {exc}"
+            )
             return None
 
 

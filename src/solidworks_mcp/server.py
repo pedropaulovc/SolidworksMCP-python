@@ -552,12 +552,26 @@ async def list_capabilities() -> dict[str, list[str]]:
             "add_annotation",
             "create_drawing_template",
         ],
+        "reference_geometry": [
+            "create_plane",
+            "create_axis",
+            "create_reference_point",
+            "create_coordinate_system",
+        ],
+        "parametrics": [
+            "create_equation_driven_curve",
+            "set_global_variable",
+            "create_equation",
+            "create_configuration",
+            "set_active_configuration",
+        ],
         "analysis": [
             "get_mass_properties",
             "perform_fea_analysis",
             "check_interference",
             "analyze_geometry",
             "get_material_properties",
+            "measure",
         ],
         "export": [
             "export_step",

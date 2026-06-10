@@ -192,30 +192,34 @@ def _measure_impl(
         )
 
     def _measure_operation() -> dict[str, Any]:
-        _select_measure_entities(adapter, params)
-
-        extension = adapter.currentModel.Extension
-        _flag_feature_methods(extension, "IModelDocExtension")
-        measure = extension.CreateMeasure()
-        if measure is None:
-            raise Exception("Failed to create the measure tool")
-        _flag_feature_methods(measure, "IMeasure")
-
-        measure.ArcOption = arc_option
-        # Calculate(NULL) measures the current selection. Bare None marshals
-        # as VT_NULL which some SolidWorks params reject (the SelectByID2
-        # Callout class of failures) — fall back to a typed null dispatch.
         try:
-            calculated = bool(measure.Calculate(None))
-        except Exception:
-            from ..com_variant import null_dispatch
+            _select_measure_entities(adapter, params)
 
-            calculated = bool(measure.Calculate(null_dispatch()))
-        if not calculated:
-            raise Exception("Measure failed: invalid combination of selected entities")
-        values = _read_measurements(adapter, measure)
-        adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True))
-        return values
+            extension = adapter.currentModel.Extension
+            _flag_feature_methods(extension, "IModelDocExtension")
+            measure = extension.CreateMeasure()
+            if measure is None:
+                raise Exception("Failed to create the measure tool")
+            _flag_feature_methods(measure, "IMeasure")
+
+            measure.ArcOption = arc_option
+            # Calculate(NULL) measures the current selection. Bare None
+            # marshals as VT_NULL which some SolidWorks params reject (the
+            # SelectByID2 Callout class of failures) — fall back to a typed
+            # null dispatch.
+            try:
+                calculated = bool(measure.Calculate(None))
+            except Exception:
+                from ..com_variant import null_dispatch
+
+                calculated = bool(measure.Calculate(null_dispatch()))
+            if not calculated:
+                raise Exception(
+                    "Measure failed: invalid combination of selected entities"
+                )
+            return _read_measurements(adapter, measure)
+        finally:
+            adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True))
 
     return cast(
         AdapterResult[dict[str, Any]],
