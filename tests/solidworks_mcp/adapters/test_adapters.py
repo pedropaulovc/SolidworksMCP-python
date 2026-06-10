@@ -1130,11 +1130,21 @@ class TestPyWin32AdapterBranches:
         assert cut_blind.is_success
         assert feature_manager.FeatureCut3.call_args.args[3] == blind
 
-        # ThroughAll still wins over both_directions for cuts.
+        # ThroughAll wins over both_directions for cuts, combined as
+        # swEndCondThroughAllBoth.
         cut_through = await adapter.create_cut_extrude(
             SimpleNamespace(depth=4.0, both_directions=True, end_condition="ThroughAll")
         )
         assert cut_through.is_success
+        assert (
+            feature_manager.FeatureCut3.call_args.args[3]
+            == adapter.constants["swEndCondThroughAllBoth"]
+        )
+
+        cut_through_single = await adapter.create_cut_extrude(
+            SimpleNamespace(depth=4.0, end_condition="ThroughAll")
+        )
+        assert cut_through_single.is_success
         assert (
             feature_manager.FeatureCut3.call_args.args[3]
             == adapter.constants["swEndCondThroughAll"]
