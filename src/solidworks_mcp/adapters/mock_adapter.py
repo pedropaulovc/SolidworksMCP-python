@@ -1373,17 +1373,6 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 status=AdapterResultStatus.ERROR,
                 error="sketch_circular_pattern requires angle > 0",
             )
-        # Mirror the real adapter — CreateCircularSketchStepAndRepeat
-        # cannot honour a non-origin pattern centre without selecting a
-        # separate sketch point as the rotation axis.
-        if center_x != 0.0 or center_y != 0.0:
-            return AdapterResult(
-                status=AdapterResultStatus.ERROR,
-                error=(
-                    "circular pattern center must be (0, 0) — non-origin "
-                    "centers not yet supported by SW API"
-                ),
-            )
         for ent in entities:
             if ent not in self._sketch_entity_ids:
                 return AdapterResult(
