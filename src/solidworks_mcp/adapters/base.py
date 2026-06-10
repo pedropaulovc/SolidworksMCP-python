@@ -860,12 +860,14 @@ class MateEntityRef(BaseModel):
 
 
 class AddMateParameters(BaseModel):
-    """Parameters for adding a standard mate between selected entities.
+    """Parameters for adding a standard or mechanical mate.
 
     Attributes:
-        mate_type (str): ``"coincident"``, ``"concentric"``,
+        mate_type (str): Standard: ``"coincident"``, ``"concentric"``,
             ``"perpendicular"``, ``"parallel"``, ``"tangent"``,
             ``"distance"``, ``"angle"``, ``"lock"`` or ``"width"``.
+            Mechanical: ``"cam_follower"``, ``"gear"``, ``"rack_pinion"``
+            or ``"screw"``.
         entities (list[MateEntityRef]): Entities to mate (two for standard
             mates; width mates take the two width faces plus the two tab
             faces).
@@ -878,6 +880,16 @@ class AddMateParameters(BaseModel):
         angle_limits (list[float]): ``[min, max]`` in degrees for a
             limit-angle mate; empty for a fixed angle.
         lock_rotation (bool): Lock component rotation (concentric mates).
+        gear_ratio (list[float]): ``[numerator, denominator]`` tooth/ratio
+            values for gear mates; empty derives the ratio from the
+            selected geometry.
+        pinion_pitch_diameter (float): Pinion pitch diameter in millimetres
+            (rack_pinion mates); 0 leaves the SolidWorks default.
+        rack_travel_per_revolution (float): Rack travel in millimetres per
+            pinion revolution (rack_pinion mates, alternative to
+            ``pinion_pitch_diameter``); 0 leaves the SolidWorks default.
+        distance_per_revolution (float): Translation in millimetres per
+            revolution (screw mates); 0 leaves the SolidWorks default.
     """
 
     mate_type: str
@@ -889,6 +901,10 @@ class AddMateParameters(BaseModel):
     angle: float = 0.0
     angle_limits: list[float] = []
     lock_rotation: bool = False
+    gear_ratio: list[float] = []
+    pinion_pitch_diameter: float = 0.0
+    rack_travel_per_revolution: float = 0.0
+    distance_per_revolution: float = 0.0
 
 
 class MateRefParameters(BaseModel):
