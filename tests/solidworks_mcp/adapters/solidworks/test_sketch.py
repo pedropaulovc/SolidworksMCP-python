@@ -884,6 +884,31 @@ def test_check_sketch_fully_defined_prefers_get_constrained_status() -> None:
     assert result.data["source"] == "sketch.IsFullyDefined"
 
 
+def test_check_sketch_fully_defined_property_resolved_status() -> None:
+    """Property-resolved ``GetConstrainedStatus`` still reads correctly.
+
+    Late-bound pywin32 dispatches sometimes resolve ``GetConstrainedStatus``
+    as a property instead of a method (observed live on SW 2026 for
+    ``GetActiveSketch2`` objects fetched after relations exist on the
+    sketch). Attribute access then yields the status int directly and
+    calling it raises ``TypeError`` — the probe must use the value as-is.
+    """
+    adapter = _FakeSketchAdapter()
+    adapter.currentModel = SimpleNamespace()
+
+    for raw, (state, flag) in {
+        2: ("under_defined", False),
+        3: ("fully_defined", True),
+    }.items():
+        adapter.currentSketch = SimpleNamespace(GetConstrainedStatus=raw)
+        result = sketch._check_sketch_fully_defined_impl(adapter, None)
+        assert result.is_success
+        assert result.data["source"] == "sketch.GetConstrainedStatus"
+        assert result.data["raw_status"] == raw
+        assert result.data["definition_state"] == state
+        assert result.data["is_fully_defined"] is flag
+
+
 def test_check_sketch_fully_defined_variants() -> None:
     adapter = _FakeSketchAdapter()
 
