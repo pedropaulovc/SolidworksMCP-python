@@ -383,6 +383,109 @@ class DraftParameters(BaseModel):
     flip: bool = False
 
 
+class CreatePlaneParameters(BaseModel):
+    """Parameters for a constraint-based reference-plane operation.
+
+    Exactly one mode is used per call; the other mode's fields are ignored.
+
+    Attributes:
+        mode (str): One of ``"offset"`` (parallel to ``base_plane`` at
+            ``offset``), ``"angle"`` (rotated ``angle`` about an edge from
+            ``base_plane``), ``"three_point"`` (through three vertices), or
+            ``"parallel_point"`` (parallel to ``base_plane`` through a vertex).
+        base_plane (str): Name of the reference plane or planar face the new
+            plane is built from (``offset``/``angle``/``parallel_point``).
+        offset (float): Offset distance in millimetres (``offset`` mode).
+        angle (float): Rotation in degrees (``angle`` mode).
+        edge_point (list[float]): Point ``[x, y, z]`` in millimetres on the
+            pivot edge (``angle`` mode).
+        points (list[list[float]]): Vertex points ``[x, y, z]`` in
+            millimetres — three for ``three_point``, one for
+            ``parallel_point``.
+        flip (bool): Build to the other side (offset/angle modes).
+    """
+
+    mode: str
+    base_plane: str = ""
+    offset: float = 0.0
+    angle: float = 0.0
+    edge_point: list[float] = []
+    points: list[list[float]] = []
+    flip: bool = False
+
+
+class CreateAxisParameters(BaseModel):
+    """Parameters for a reference-axis operation.
+
+    Exactly one mode is used per call; the other mode's fields are ignored.
+
+    Attributes:
+        mode (str): One of ``"two_planes"`` (intersection of two planes),
+            ``"cylindrical_face"`` (axis of a cylinder/cone located by a point
+            on it), ``"two_points"`` (through two vertices), or ``"edge"``
+            (along a linear edge located by a point on it).
+        planes (list[str]): Two plane names (``two_planes`` mode).
+        face_point (list[float]): Point ``[x, y, z]`` in millimetres on the
+            cylindrical face (``cylindrical_face`` mode).
+        points (list[list[float]]): Two vertex points ``[x, y, z]`` in
+            millimetres (``two_points`` mode).
+        edge_point (list[float]): Point ``[x, y, z]`` in millimetres on the
+            edge (``edge`` mode).
+    """
+
+    mode: str
+    planes: list[str] = []
+    face_point: list[float] = []
+    points: list[list[float]] = []
+    edge_point: list[float] = []
+
+
+class CreateReferencePointParameters(BaseModel):
+    """Parameters for a reference-point operation.
+
+    Exactly one mode is used per call; the other mode's fields are ignored.
+
+    Attributes:
+        mode (str): One of ``"face_center"`` (center of a face located by a
+            point on it), ``"arc_center"`` (center of a circular edge located
+            by a point on it), or ``"along_curve"`` (one or more points along
+            an edge located by a point on it).
+        face_point (list[float]): Point ``[x, y, z]`` in millimetres on the
+            face (``face_center`` mode).
+        edge_point (list[float]): Point ``[x, y, z]`` in millimetres on the
+            edge (``arc_center``/``along_curve`` modes).
+        along (str): Distribution for ``along_curve`` — ``"distance"`` (at
+            ``distance`` mm from the closer end), ``"percentage"`` (at
+            ``percentage`` % of the length), or ``"evenly"`` (``count``
+            evenly distributed points).
+        distance (float): Distance in millimetres (``along == "distance"``).
+        percentage (float): Percentage 0–100 (``along == "percentage"``).
+        count (int): Number of points (``along == "evenly"``); 1 otherwise.
+    """
+
+    mode: str
+    face_point: list[float] = []
+    edge_point: list[float] = []
+    along: str = "distance"
+    distance: float = 0.0
+    percentage: float = 0.0
+    count: int = 1
+
+
+class CreateCoordinateSystemParameters(BaseModel):
+    """Parameters for a numerically positioned coordinate-system feature.
+
+    Attributes:
+        position (list[float]): Origin ``[x, y, z]`` in millimetres relative
+            to the global origin.
+        rotation (list[float]): Rotation ``[rx, ry, rz]`` in degrees about the
+            global axes.
+    """
+
+    position: list[float] = [0.0, 0.0, 0.0]
+    rotation: list[float] = [0.0, 0.0, 0.0]
+
+
 class MassProperties(BaseModel):
     """Mass properties information.
 
@@ -1139,6 +1242,67 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="draft is not implemented by this adapter",
+        )
+
+    async def create_plane(self, params: CreatePlaneParameters) -> AdapterResult[Any]:
+        """Create a constraint-based reference plane.
+
+        Args:
+            params (CreatePlaneParameters): Mode, references, distance/angle.
+
+        Returns:
+            AdapterResult: Feature result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="create_plane is not implemented by this adapter",
+        )
+
+    async def create_axis(self, params: CreateAxisParameters) -> AdapterResult[Any]:
+        """Create a reference axis.
+
+        Args:
+            params (CreateAxisParameters): Mode and references.
+
+        Returns:
+            AdapterResult: Feature result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="create_axis is not implemented by this adapter",
+        )
+
+    async def create_reference_point(
+        self, params: CreateReferencePointParameters
+    ) -> AdapterResult[Any]:
+        """Create one or more reference points.
+
+        Args:
+            params (CreateReferencePointParameters): Mode, references,
+                distribution.
+
+        Returns:
+            AdapterResult: Feature result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="create_reference_point is not implemented by this adapter",
+        )
+
+    async def create_coordinate_system(
+        self, params: CreateCoordinateSystemParameters
+    ) -> AdapterResult[Any]:
+        """Create a coordinate-system feature at a numeric position/rotation.
+
+        Args:
+            params (CreateCoordinateSystemParameters): Position and rotation.
+
+        Returns:
+            AdapterResult: Feature result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="create_coordinate_system is not implemented by this adapter",
         )
 
     @abstractmethod
