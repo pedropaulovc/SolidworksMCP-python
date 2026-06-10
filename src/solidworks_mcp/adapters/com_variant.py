@@ -75,6 +75,32 @@ def byref_long() -> Any:
         return None
 
 
+def bstr_array(values: list[str]) -> Any:
+    """Return an array-of-strings VARIANT for ``string[]`` SAFEARRAY params.
+
+    SolidWorks methods such as ``IEquationMgr::Add3`` take configuration-name
+    lists typed as ``System.object`` holding a string array. Under late
+    binding a bare Python list unpacks into N positional VARIANTs
+    (``DISP_E_BADPARAMCOUNT``), so the list must be wrapped in a
+    ``VT_ARRAY | VT_BSTR`` VARIANT.
+
+    Args:
+        values: The strings to marshal.
+
+    Returns:
+        Any: ``VARIANT(VT_ARRAY | VT_BSTR, values)`` on Windows with pywin32
+        available; the plain list as a fallback otherwise (CI never reaches a
+        real COM boundary).
+    """
+    try:
+        import pythoncom
+        from win32com.client import VARIANT
+
+        return VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_BSTR, values)
+    except Exception:
+        return values
+
+
 def empty_double_array() -> Any:
     """Return an empty array-of-doubles VARIANT for unused SAFEARRAY params.
 

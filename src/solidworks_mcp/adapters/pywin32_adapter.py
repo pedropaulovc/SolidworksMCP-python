@@ -26,6 +26,7 @@ from .com_variant import null_callout
 from .solidworks import (
     SolidWorksFeaturesMixin,
     SolidWorksIOMixin,
+    SolidWorksParametricsMixin,
     SolidWorksReferenceGeometryMixin,
     SolidWorksSelectionMixin,
     SolidWorksSketchMixin,
@@ -1346,6 +1347,7 @@ class PyWin32Adapter(
     SolidWorksSketchMixin,
     SolidWorksFeaturesMixin,
     SolidWorksReferenceGeometryMixin,
+    SolidWorksParametricsMixin,
     SolidWorksIOMixin,
     SolidWorksSelectionMixin,
     SolidWorksAdapter,
