@@ -75,8 +75,16 @@ class _FakeComponent:
 
 
 class _FakeMathUtility:
+    def __init__(self) -> None:
+        self.received: list[object] = []
+
     def CreateTransform(self, array16):  # noqa: N802
-        return SimpleNamespace(array16=list(array16))
+        # The impl wraps the doubles in VARIANT(VT_ARRAY|VT_R8) on Windows
+        # (plain CreateTransform input silently yields an identity transform);
+        # on non-Windows CI the double_array fallback is the bare list.
+        self.received.append(array16)
+        values = getattr(array16, "value", array16)
+        return SimpleNamespace(array16=list(values))
 
 
 class _FakeAssemblyModel:
@@ -500,6 +508,56 @@ def test_move_component_relative_adds_delta() -> None:
     _assert_close(result.data["position"], [15, 0, -2])
 
 
+def test_create_math_transform_marshals_vt_r8_double_array() -> None:
+    """CreateTransform input must be VT_ARRAY|VT_R8 — a plain list marshals
+    as VT_ARRAY|VT_VARIANT, which SolidWorks silently turns into an identity
+    transform (components never move while every call reports success)."""
+    utility = _FakeMathUtility()
+    adapter = _adapter_with(_FakeAssemblyModel())
+    adapter.swApp.GetMathUtility = lambda: utility
+    array16 = assembly_module._transform_array(
+        assembly_module._euler_xyz_matrix([0, 0, 0]), [0.0, 0.08, 0.0]
+    )
+
+    xform = assembly_module._create_math_transform(adapter, array16)
+
+    assert xform.array16 == array16
+    (payload,) = utility.received
+    try:
+        import pythoncom
+        from win32com.client import VARIANT
+    except Exception:
+        assert payload == array16  # non-Windows fallback is the bare list
+        return
+    assert isinstance(payload, VARIANT)
+    assert payload.varianttype == pythoncom.VT_ARRAY | pythoncom.VT_R8
+    assert list(payload.value) == array16
+
+
+def test_move_component_reports_solver_adjusted_position() -> None:
+    """The reported position is read back AFTER the mate solve, not the
+    requested target — the solver may legitimately adjust it."""
+    component = _FakeComponent()
+
+    def _solve_snapping_y(xform, _this_configuration):
+        snapped = list(xform.array16)
+        snapped[10] = 0.0  # a mate holds the component at y = 0
+        component.applied_arrays.append(snapped)
+        component.Transform2 = _FakeTransform(snapped)
+        return True
+
+    component.SetTransformAndSolve3 = _solve_snapping_y
+    model = _FakeAssemblyModel(components={"shaft-1": component})
+    adapter = _adapter_with(model)
+
+    result = assembly_module._move_component_impl(
+        adapter, MoveComponentParameters(name="shaft-1", position=[10, 20, 30])
+    )
+
+    assert result.is_success
+    _assert_close(result.data["position"], [10, 0, 30])
+
+
 def test_move_component_solver_failure_errors() -> None:
     component = _FakeComponent()
     component.solve_result = False
@@ -548,6 +606,28 @@ def test_rotate_component_zero_axis_errors() -> None:
     )
     assert result.is_error
     assert "non-zero" in (result.error or "")
+
+
+def test_rotate_component_unknown_mode_errors() -> None:
+    model = _FakeAssemblyModel(components={"shaft-1": _FakeComponent()})
+    adapter = _adapter_with(model)
+    result = assembly_module._rotate_component_impl(
+        adapter,
+        RotateComponentParameters(name="shaft-1", angle=10, mode="drag"),
+    )
+    assert result.is_error
+    assert "'exact' or 'kinematic'" in (result.error or "")
+
+
+def test_rotate_component_exact_reports_empty_propagated() -> None:
+    model = _FakeAssemblyModel(components={"shaft-1": _FakeComponent()})
+    adapter = _adapter_with(model)
+    result = assembly_module._rotate_component_impl(
+        adapter, RotateComponentParameters(name="shaft-1", angle=10)
+    )
+    assert result.is_success
+    assert result.data["mode"] == "exact"
+    assert result.data["propagated"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1542,3 +1622,245 @@ async def test_mock_mechanical_mates_validations() -> None:
     )
     assert both.is_error
     assert "not both" in (both.error or "")
+
+
+# ---------------------------------------------------------------------------
+# rotate_component mode="kinematic" — gear-mate propagation (Phase 7C)
+# ---------------------------------------------------------------------------
+
+
+def _gear_axis(point_m, vector) -> list[float]:
+    """EntityParams layout: point, direction, radius1, radius2 (metres)."""
+    return list(point_m) + list(vector) + [0.0, 0.0]
+
+
+class _FakeGearMateFeature(_FakeMate):
+    """A mate-group subfeature carrying a gear mate (swMateGEAR = 10)."""
+
+    def __init__(
+        self, name, sides, numerator, denominator, reverse=False, suppressed=False
+    ) -> None:
+        super().__init__(name, type_name="MateGear", suppressed=suppressed)
+        self.definition = SimpleNamespace(
+            GearRatioNumerator=numerator,
+            GearRatioDenominator=denominator,
+            Reverse=reverse,
+        )
+        entities = [
+            SimpleNamespace(
+                ReferenceComponent=SimpleNamespace(Name2=component),
+                EntityParams=list(params),
+            )
+            for component, params in sides
+        ]
+        self._mate = SimpleNamespace(Type=10, MateEntity=lambda i: entities[i])
+
+    def GetSpecificFeature2(self):  # noqa: N802
+        return self._mate
+
+
+def _kinematic_fixture(mates, components) -> _FakeAdapter:
+    model = _MateModel(mates=mates)
+    model._components.update(components)
+    return _adapter_with(model)
+
+
+def test_rotate_component_kinematic_rotates_partner_by_inverse_ratio() -> None:
+    """gear_ratio [30, 15] stores num=15/den=30 (live-verified swap); the
+    side-1 partner must counter-rotate by -den/num = -2x about its own axis."""
+    big = _FakeComponent(name="big-1")
+    small = _FakeComponent(
+        name="small-1",
+        array16=[1, 0, 0, 0, 1, 0, 0, 0, 1, 0.045, 0.0, 0.0, 1, 0, 0, 0],
+    )
+    mate = _FakeGearMateFeature(
+        "GearMate1",
+        sides=[
+            ("big-1", _gear_axis([0.0, 0.0, 0.0], [0.0, 0.0, 1.0])),
+            ("small-1", _gear_axis([0.045, 0.0, 0.0], [0.0, 0.0, 1.0])),
+        ],
+        numerator=15.0,
+        denominator=30.0,
+    )
+    adapter = _kinematic_fixture([mate], {"big-1": big, "small-1": small})
+
+    result = assembly_module._rotate_component_impl(
+        adapter,
+        RotateComponentParameters(name="big-1", angle=45, mode="kinematic"),
+    )
+
+    assert result.is_success
+    assert result.data["propagated"] == [
+        {"component": "small-1", "angle": -90.0, "mate": "GearMate1"}
+    ]
+    applied = small.applied_arrays[0]
+    # -90 deg about z: the component x-axis lands on -Y.
+    _assert_close(applied[0:3], [0, -1, 0])
+    # Rotation about the small gear's own axis keeps it in place.
+    _assert_close(applied[9:12], [0.045, 0.0, 0.0])
+
+
+def test_rotate_component_kinematic_chains_and_respects_side_order() -> None:
+    """BFS reaches a second mate where the carrier sits on side 1, so the
+    factor flips to -num/den; the input never re-rotates."""
+    a = _FakeComponent(name="a-1")
+    b = _FakeComponent(name="b-1")
+    c = _FakeComponent(name="c-1")
+    mate_ab = _FakeGearMateFeature(
+        "GearMate1",
+        sides=[
+            ("a-1", _gear_axis([0.0, 0.0, 0.0], [0.0, 0.0, 1.0])),
+            ("b-1", _gear_axis([0.045, 0.0, 0.0], [0.0, 0.0, 1.0])),
+        ],
+        numerator=15.0,
+        denominator=30.0,
+    )
+    mate_cb = _FakeGearMateFeature(
+        "GearMate2",
+        sides=[
+            ("c-1", _gear_axis([0.09, 0.0, 0.0], [0.0, 0.0, 1.0])),
+            ("b-1", _gear_axis([0.045, 0.0, 0.0], [0.0, 0.0, 1.0])),
+        ],
+        numerator=10.0,
+        denominator=20.0,
+    )
+    adapter = _kinematic_fixture([mate_ab, mate_cb], {"a-1": a, "b-1": b, "c-1": c})
+
+    result = assembly_module._rotate_component_impl(
+        adapter, RotateComponentParameters(name="a-1", angle=45, mode="kinematic")
+    )
+
+    assert result.is_success
+    # a +45 -> b = 45 * (-30/15) = -90 -> c = -90 * (-10/20) = +45.
+    assert result.data["propagated"] == [
+        {"component": "b-1", "angle": -90.0, "mate": "GearMate1"},
+        {"component": "c-1", "angle": 45.0, "mate": "GearMate2"},
+    ]
+    assert len(a.applied_arrays) == 1  # the input is rotated exactly once
+
+
+def test_rotate_component_kinematic_reverse_flag_flips_sign() -> None:
+    big = _FakeComponent(name="big-1")
+    small = _FakeComponent(name="small-1")
+    mate = _FakeGearMateFeature(
+        "GearMate1",
+        sides=[
+            ("big-1", _gear_axis([0.0, 0.0, 0.0], [0.0, 0.0, 1.0])),
+            ("small-1", _gear_axis([0.045, 0.0, 0.0], [0.0, 0.0, 1.0])),
+        ],
+        numerator=15.0,
+        denominator=30.0,
+        reverse=True,
+    )
+    adapter = _kinematic_fixture([mate], {"big-1": big, "small-1": small})
+
+    result = assembly_module._rotate_component_impl(
+        adapter,
+        RotateComponentParameters(name="big-1", angle=45, mode="kinematic"),
+    )
+
+    assert result.is_success
+    assert result.data["propagated"][0]["angle"] == 90.0
+
+
+def test_rotate_component_kinematic_skips_suppressed_gear_mate() -> None:
+    big = _FakeComponent(name="big-1")
+    small = _FakeComponent(name="small-1")
+    mate = _FakeGearMateFeature(
+        "GearMate1",
+        sides=[
+            ("big-1", _gear_axis([0.0, 0.0, 0.0], [0.0, 0.0, 1.0])),
+            ("small-1", _gear_axis([0.045, 0.0, 0.0], [0.0, 0.0, 1.0])),
+        ],
+        numerator=15.0,
+        denominator=30.0,
+        suppressed=True,
+    )
+    adapter = _kinematic_fixture([mate], {"big-1": big, "small-1": small})
+
+    result = assembly_module._rotate_component_impl(
+        adapter,
+        RotateComponentParameters(name="big-1", angle=45, mode="kinematic"),
+    )
+
+    assert result.is_success
+    assert result.data["propagated"] == []
+    assert small.applied_arrays == []
+
+
+def test_rotate_component_kinematic_without_gear_mates_matches_exact() -> None:
+    component = _FakeComponent()
+    model = _FakeAssemblyModel(components={"shaft-1": component})
+    adapter = _adapter_with(model)
+
+    result = assembly_module._rotate_component_impl(
+        adapter,
+        RotateComponentParameters(
+            name="shaft-1",
+            angle=90,
+            axis_vector=[0, 0, 1],
+            axis_point=[100, 0, 0],
+            mode="kinematic",
+        ),
+    )
+
+    assert result.is_success
+    assert result.data["propagated"] == []
+    _assert_close(result.data["position"], [100, -100, 0])
+
+
+def test_rotate_component_kinematic_antiparallel_axes_counter_rotate() -> None:
+    """Entity axis directions are modelling artefacts: when the partner's
+    recorded axis points the other way, the propagated angle flips so the
+    world-frame motion stays counter-rotating (+45 in -> -90 world out)."""
+    big = _FakeComponent(name="big-1")
+    small = _FakeComponent(name="small-1")
+    mate = _FakeGearMateFeature(
+        "GearMate1",
+        sides=[
+            ("big-1", _gear_axis([0.0, 0.0, 0.0], [0.0, 0.0, 1.0])),
+            ("small-1", _gear_axis([0.045, 0.0, 0.0], [0.0, 0.0, -1.0])),
+        ],
+        numerator=15.0,
+        denominator=30.0,
+    )
+    adapter = _kinematic_fixture([mate], {"big-1": big, "small-1": small})
+
+    result = assembly_module._rotate_component_impl(
+        adapter,
+        RotateComponentParameters(name="big-1", angle=45, mode="kinematic"),
+    )
+
+    assert result.is_success
+    # +90 about the small gear's own -z axis == -90 in world space.
+    assert result.data["propagated"][0]["angle"] == 90.0
+    applied = small.applied_arrays[0]
+    _assert_close(applied[0:3], [0, -1, 0])
+
+
+def test_rotate_component_kinematic_input_axis_opposite_entity_axis() -> None:
+    """The user's input axis may oppose the input's own mate-entity axis;
+    the world-frame coupling must still counter-rotate."""
+    big = _FakeComponent(name="big-1")
+    small = _FakeComponent(name="small-1")
+    mate = _FakeGearMateFeature(
+        "GearMate1",
+        sides=[
+            ("big-1", _gear_axis([0.0, 0.0, 0.0], [0.0, 0.0, -1.0])),
+            ("small-1", _gear_axis([0.045, 0.0, 0.0], [0.0, 0.0, -1.0])),
+        ],
+        numerator=15.0,
+        denominator=30.0,
+    )
+    adapter = _kinematic_fixture([mate], {"big-1": big, "small-1": small})
+
+    result = assembly_module._rotate_component_impl(
+        adapter,
+        RotateComponentParameters(name="big-1", angle=45, mode="kinematic"),
+    )
+
+    assert result.is_success
+    # own swing = -45 about -z; coupled swing = +90 about -z = world -90.
+    assert result.data["propagated"][0]["angle"] == 90.0
+    applied = small.applied_arrays[0]
+    _assert_close(applied[0:3], [0, -1, 0])

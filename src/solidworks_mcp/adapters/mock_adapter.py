@@ -1571,6 +1571,13 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             return AdapterResult(
                 status=AdapterResultStatus.ERROR, error="axis_vector must be non-zero"
             )
+        if self._current_model and params.mode not in ("exact", "kinematic"):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=(
+                    f"Unknown rotate mode {params.mode!r}. Use 'exact' or 'kinematic'."
+                ),
+            )
         resolved = self._component_or_error(params.name)
         if isinstance(resolved, AdapterResult):
             return resolved
@@ -1585,7 +1592,9 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 "angle": params.angle,
                 "axis_vector": [float(c) for c in params.axis_vector],
                 "axis_point": [float(c) for c in params.axis_point],
+                "mode": params.mode,
                 "position": list(component["position"]),
+                "propagated": [],
             },
             execution_time=self._delays["model_operation"] / 2,
         )

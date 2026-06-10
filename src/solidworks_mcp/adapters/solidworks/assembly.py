@@ -43,7 +43,7 @@ from ..base import (
     SolidWorksFeature,
     SuppressMateParameters,
 )
-from ..com_variant import null_callout
+from ..com_variant import double_array, null_callout
 from .features import (
     _feature_names,
     _flag_feature_methods,
@@ -195,6 +195,23 @@ def _mat_mul(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:
 def _mat_vec(m: list[list[float]], v: list[float]) -> list[float]:
     """Apply a 3x3 matrix to a column vector (``m @ v``)."""
     return [sum(m[i][k] * v[k] for k in range(3)) for i in range(3)]
+
+
+def _unit_vector(v: list[float]) -> list[float]:
+    """Normalize a 3-vector (raises on a zero vector)."""
+    norm = math.sqrt(sum(float(c) ** 2 for c in v))
+    if norm < 1e-12:
+        raise Exception("Axis vector must be non-zero")
+    return [float(c) / norm for c in v]
+
+
+def _orientation_sign(a: list[float], b: list[float]) -> float:
+    """+-1 depending on whether two axis directions point the same way.
+
+    A non-negative dot product (including the near-perpendicular bevel
+    case) keeps the sign; only a clearly opposed direction flips it.
+    """
+    return -1.0 if sum(x * y for x, y in zip(a, b, strict=True)) < 0.0 else 1.0
 
 
 def _euler_xyz_matrix(rotation_deg: list[float]) -> list[list[float]]:
@@ -417,8 +434,11 @@ def _create_math_transform(adapter: Any, array16: list[float]) -> Any:
     if utility is None:
         raise Exception("Failed to get the SolidWorks math utility")
     _flag_feature_methods(utility, "IMathUtility")
+    # The array MUST be a typed VT_ARRAY|VT_R8 VARIANT: a plain list marshals
+    # as VT_ARRAY|VT_VARIANT, which CreateTransform silently ignores and
+    # returns an identity transform instead of an error.
     xform = adapter._attempt(
-        lambda: utility.CreateTransform([float(v) for v in array16]), default=None
+        lambda: utility.CreateTransform(double_array(array16)), default=None
     )
     if xform is None:
         raise Exception("Failed to create the math transform")
@@ -427,7 +447,7 @@ def _create_math_transform(adapter: Any, array16: list[float]) -> Any:
 
 def _apply_component_transform(
     adapter: Any, component: Any, name: str, array16: list[float]
-) -> None:
+) -> list[float]:
     """Set a component's transform, solving mates, preserving fixed state.
 
     ``SetTransformAndSolve3`` refuses to move a fixed component, so a fixed
@@ -439,6 +459,12 @@ def _apply_component_transform(
         component: ``IComponent2`` dispatch.
         name: Component name (for the fix/float selection).
         array16: Target transform array.
+
+    Returns:
+        list[float]: The component's transform array read back AFTER the
+        solve — the mate solver may legitimately adjust the requested
+        position, and reporting the target instead of the outcome is how the
+        silent ``CreateTransform`` identity bug went unnoticed.
 
     Raises:
         Exception: When the transform cannot be applied.
@@ -466,6 +492,207 @@ def _apply_component_transform(
     if not applied:
         raise Exception(f"Failed to set the transform of component {name!r}")
     adapter._attempt(lambda: model.EditRebuild3())
+    return _component_transform_array(adapter, component)
+
+
+# swMateType_e value identifying gear mates when walking the mate graph.
+_MATE_TYPE_GEAR = 10
+
+
+def _rotate_component_exact(
+    adapter: Any,
+    component: Any,
+    name: str,
+    angle_deg: float,
+    axis_vector: list[float],
+    axis_point_mm: list[float],
+) -> list[float]:
+    """Rotate a component about an assembly-space axis via an exact transform.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        component: ``IComponent2`` dispatch.
+        name: Component name (for the fix/float selection).
+        angle_deg: Rotation angle in degrees (right-hand rule).
+        axis_vector: Rotation-axis direction in assembly space.
+        axis_point_mm: A point the axis passes through, in millimetres.
+
+    Returns:
+        list[float]: The transform array read back after the move.
+    """
+    rotation = _axis_angle_matrix(axis_vector, angle_deg)
+    array = _component_transform_array(adapter, component)
+    rows = [array[0:3], array[3:6], array[6:9]]
+    new_rows = [_mat_vec(rotation, row) for row in rows]
+    center_m = [float(c) / 1000.0 for c in axis_point_mm]
+    offset = [array[9 + i] - center_m[i] for i in range(3)]
+    rotated_offset = _mat_vec(rotation, offset)
+    translation = [rotated_offset[i] + center_m[i] for i in range(3)]
+
+    new_array = (
+        new_rows[0]
+        + new_rows[1]
+        + new_rows[2]
+        + translation
+        + [array[12]]
+        + [0.0, 0.0, 0.0]
+    )
+    return _apply_component_transform(adapter, component, name, new_array)
+
+
+def _gear_mate_links(adapter: Any) -> list[dict[str, Any]]:
+    """Read the assembly's unsuppressed gear mates as kinematic links.
+
+    Each link carries the two component names, each side's rotation axis
+    (``IMateEntity2::EntityParams`` — point + direction in assembly space,
+    metres), the stored gear ratio and the ``Reverse`` flag.
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+
+    Returns:
+        list[dict[str, Any]]: One entry per readable gear mate.
+    """
+    links: list[dict[str, Any]] = []
+    for feature in _mate_group_subfeatures(adapter):
+        if adapter._attempt(lambda f=feature: f.IsSuppressed(), default=False):
+            continue
+        mate = _read_member(feature, "GetSpecificFeature2")
+        if mate is None:
+            continue
+        if int(adapter._attempt(lambda m=mate: m.Type, default=-1)) != _MATE_TYPE_GEAR:
+            continue
+        definition = _read_member(feature, "GetDefinition")
+        numerator = float(_read_member(definition, "GearRatioNumerator") or 0.0)
+        denominator = float(_read_member(definition, "GearRatioDenominator") or 0.0)
+        reverse = bool(_read_member(definition, "Reverse"))
+        sides: list[dict[str, Any]] = []
+        for index in range(2):
+            entity = adapter._attempt(lambda m=mate, i=index: m.MateEntity(i))
+            if entity is None:
+                break
+            owner = _read_member(entity, "ReferenceComponent")
+            owner_name = str(_read_member(owner, "Name2") or "") if owner else ""
+            entity_params = _read_member(entity, "EntityParams")
+            if not owner_name or not entity_params or len(entity_params) < 6:
+                break
+            sides.append(
+                {
+                    "component": owner_name,
+                    "axis_point_mm": [float(v) * 1000.0 for v in entity_params[0:3]],
+                    "axis_vector": [float(v) for v in entity_params[3:6]],
+                }
+            )
+        if len(sides) != 2 or numerator <= 0.0 or denominator <= 0.0:
+            continue
+        if any(sum(c * c for c in side["axis_vector"]) < 1e-18 for side in sides):
+            continue
+        links.append(
+            {
+                "name": str(_read_member(feature, "Name")),
+                "sides": sides,
+                "numerator": numerator,
+                "denominator": denominator,
+                "reverse": reverse,
+            }
+        )
+    return links
+
+
+def _kinematic_rotate_component(
+    adapter: Any, component: Any, name: str, params: RotateComponentParameters
+) -> tuple[list[float], list[dict[str, Any]]]:
+    """Rotate a component and propagate the motion through gear mates.
+
+    SolidWorks gear mates do not transmit programmatic motion: the mate
+    solver re-anchors the gear phase after any ``SetTransformAndSolve3``,
+    and ``IDragOperator`` honours gear mates only erratically (live-tested
+    on SW 2026: coupling depends chaotically on drag step size). Driving a
+    mated gear train deterministically therefore takes explicit kinematics:
+    rotate the input exactly, then walk the gear-mate graph breadth-first
+    and rotate every coupled component about its own mate axis by the
+    stored inverse ratio (external gears counter-rotate in world space;
+    ``Reverse`` flips the sign). SolidWorks accepts the new phases without
+    mate errors.
+
+    Sign convention: every swing is tracked about the component's own
+    mate-entity axis (``EntityParams`` direction). The entity directions
+    are modelling artefacts — two meshing gears may record opposite axis
+    vectors — so the coupling multiplies in the sign of the dot product
+    between the two sides' directions: parallel-axis pairs then always
+    counter-rotate in world space (live demo verified +45 in -> -90 out),
+    and near-perpendicular (bevel) pairs keep the raw factor sign, where
+    ``Reverse`` is the knob if the mesh runs the other way.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        component: ``IComponent2`` dispatch of the input component.
+        name: Input component name.
+        params: Axis (point in mm, direction), angle (deg).
+
+    Returns:
+        tuple[list[float], list[dict[str, Any]]]: The input component's
+        read-back transform array and the propagated rotations
+        (``[{"component", "angle", "mate"}, ...]`` — each angle is about
+        that component's own mate axis).
+    """
+    applied = _rotate_component_exact(
+        adapter, component, name, params.angle, params.axis_vector, params.axis_point
+    )
+
+    links = _gear_mate_links(adapter)
+    # Per component: (swing in degrees, unit world axis the swing is about).
+    swings: dict[str, tuple[float, list[float]]] = {
+        name: (float(params.angle), _unit_vector(params.axis_vector))
+    }
+    queue = [name]
+    propagated: list[dict[str, Any]] = []
+    while queue:
+        current = queue.pop(0)
+        current_swing, current_axis = swings[current]
+        for link in links:
+            owners = [side["component"] for side in link["sides"]]
+            if current not in owners:
+                continue
+            this_index = owners.index(current)
+            other_index = 1 - this_index
+            other = owners[other_index]
+            if other in swings:
+                continue
+            # Stored num:den relates side 0 to side 1: live-verified on SW
+            # 2026, omega_1 = -omega_0 * den/num (Reverse flips the sign).
+            if this_index == 0:
+                factor = -link["denominator"] / link["numerator"]
+            else:
+                factor = -link["numerator"] / link["denominator"]
+            if link["reverse"]:
+                factor = -factor
+            this_axis = _unit_vector(link["sides"][this_index]["axis_vector"])
+            other_axis = _unit_vector(link["sides"][other_index]["axis_vector"])
+            # current_axis and this_axis are the same physical line; the
+            # dot only carries the +-1 orientation between them.
+            own_swing = current_swing * _orientation_sign(current_axis, this_axis)
+            swing = own_swing * factor * _orientation_sign(this_axis, other_axis)
+            partner = _get_component(adapter, other)
+            if partner is None:
+                raise Exception(
+                    f"Gear mate {link['name']!r} references unknown component {other!r}"
+                )
+            side = link["sides"][other_index]
+            _rotate_component_exact(
+                adapter,
+                partner,
+                other,
+                swing,
+                side["axis_vector"],
+                side["axis_point_mm"],
+            )
+            swings[other] = (swing, other_axis)
+            propagated.append(
+                {"component": other, "angle": swing, "mate": link["name"]}
+            )
+            queue.append(other)
+    return applied, propagated
 
 
 def _preload_component_file(adapter: Any, resolved_path: str) -> None:
@@ -577,7 +804,7 @@ def _insert_component_impl(
 
         rotation = _euler_xyz_matrix(params.rotation)
         translation_m = [float(c) / 1000.0 for c in params.position]
-        _apply_component_transform(
+        applied = _apply_component_transform(
             adapter, component, name, _transform_array(rotation, translation_m)
         )
         _activate_assembly(adapter)
@@ -588,7 +815,7 @@ def _insert_component_impl(
             "configuration": str(
                 _read_member(component, "ReferencedConfiguration") or ""
             ),
-            "position": [float(c) for c in params.position],
+            "position": [v * 1000.0 for v in applied[9:12]],
             "rotation": [float(c) for c in params.rotation],
             "fixed": bool(_read_member(component, "IsFixed")),
         }
@@ -745,10 +972,10 @@ def _move_component_impl(
             array[9:12] = [array[9 + i] + position_m[i] for i in range(3)]
         else:
             array[9:12] = position_m
-        _apply_component_transform(adapter, component, name, array)
+        applied = _apply_component_transform(adapter, component, name, array)
         return {
             "name": name,
-            "position": [v * 1000.0 for v in array[9:12]],
+            "position": [v * 1000.0 for v in applied[9:12]],
             "relative": bool(params.relative),
         }
 
@@ -783,6 +1010,11 @@ def _rotate_component_impl(
             status=AdapterResultStatus.ERROR,
             error="axis_vector and axis_point must each be [x, y, z]",
         )
+    if params.mode not in ("exact", "kinematic"):
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown rotate mode {params.mode!r}. Use 'exact' or 'kinematic'.",
+        )
 
     def _rotate_operation() -> dict[str, Any]:
         component = _get_component(adapter, params.name)
@@ -790,30 +1022,28 @@ def _rotate_component_impl(
             raise Exception(f"Component not found: {params.name!r}")
         name = _component_name(adapter, component, params.name)
 
-        array = _component_transform_array(adapter, component)
-        rotation = _axis_angle_matrix(params.axis_vector, params.angle)
-        rows = [array[0:3], array[3:6], array[6:9]]
-        new_rows = [_mat_vec(rotation, row) for row in rows]
-        center_m = [float(c) / 1000.0 for c in params.axis_point]
-        offset = [array[9 + i] - center_m[i] for i in range(3)]
-        rotated_offset = _mat_vec(rotation, offset)
-        translation = [rotated_offset[i] + center_m[i] for i in range(3)]
-
-        new_array = (
-            new_rows[0]
-            + new_rows[1]
-            + new_rows[2]
-            + translation
-            + [array[12]]
-            + [0.0, 0.0, 0.0]
-        )
-        _apply_component_transform(adapter, component, name, new_array)
+        propagated: list[dict[str, Any]] = []
+        if params.mode == "kinematic":
+            applied, propagated = _kinematic_rotate_component(
+                adapter, component, name, params
+            )
+        else:
+            applied = _rotate_component_exact(
+                adapter,
+                component,
+                name,
+                params.angle,
+                params.axis_vector,
+                params.axis_point,
+            )
         return {
             "name": name,
             "angle": float(params.angle),
             "axis_vector": [float(c) for c in params.axis_vector],
             "axis_point": [float(c) for c in params.axis_point],
-            "position": [v * 1000.0 for v in translation],
+            "mode": params.mode,
+            "position": [v * 1000.0 for v in applied[9:12]],
+            "propagated": propagated,
         }
 
     return cast(
