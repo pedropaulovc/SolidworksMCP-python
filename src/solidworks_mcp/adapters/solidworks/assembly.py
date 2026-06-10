@@ -1454,6 +1454,34 @@ def _mate_names(adapter: Any) -> set[str]:
     }
 
 
+def _mate_feature_name(adapter: Any, mate: Any) -> str:
+    """Name of a just-created mate, read straight off the ``AddMate5`` return.
+
+    The returned mate dispatch also implements ``IFeature`` (one IDispatch
+    serves both interfaces), so flagging it as a feature exposes ``Name``
+    in ~20 ms. The before/after ``_mate_names`` diff this replaces walked
+    the full feature tree twice at ~20 s per walk on a 30-mate assembly
+    (measured live), making every mate O(existing mates). The MateGroup
+    walk remains only as a fallback for a successful ``AddMate5`` that
+    returns no dispatch (not observed live; newest mate is last in tree
+    order).
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        mate: The ``AddMate5`` return value (may be ``None``).
+
+    Returns:
+        str: The mate feature name, or ``""`` when it cannot be resolved.
+    """
+    if mate is not None:
+        _flag_feature_methods(mate, "IFeature")
+        name = adapter._attempt(lambda: mate.Name, default=None)
+        if name:
+            return str(name)
+    mates = _mate_group_subfeatures(adapter)
+    return str(_read_member(mates[-1], "Name")) if mates else ""
+
+
 def _validate_mechanical_values(params: AddMateParameters) -> str:
     """Validate the Phase 7C mechanical value options of ``params``.
 
@@ -1648,7 +1676,6 @@ def _add_mate_impl(
             else (1.0, 1.0)
         )
 
-        names_before = _mate_names(adapter)
         _flag_feature_methods(model, "IAssemblyDoc")
         error_status = _byref_i4()
         mate = model.AddMate5(
@@ -1675,8 +1702,7 @@ def _add_mate_impl(
             reason = _MATE_ERRORS.get(status or 0, f"error status {status}")
             raise Exception(f"AddMate5 failed: {reason}")
 
-        new_names = sorted(_mate_names(adapter) - names_before)
-        name = new_names[-1] if new_names else ""
+        name = _mate_feature_name(adapter, mate)
         _apply_mechanical_values(adapter, name, params)
         adapter._attempt(lambda: model.EditRebuild3())
         payload = {
@@ -1767,7 +1793,14 @@ def _delete_mate_impl(
         )
         if not deleted:
             adapter._attempt(lambda: model.EditDelete(), default=None)
-        if params.name in _mate_names(adapter):
+        # Verify absence via FeatureByName only: it resolves mates on this
+        # build (the pre-delete lookup above uses it as the fast path), and
+        # the MateGroup-walk alternative costs ~20 s at 30 mates — an
+        # O(mates) tax on every successful delete just to prove absence.
+        still_there = adapter._attempt(
+            lambda: model.FeatureByName(params.name), default=None
+        )
+        if still_there is not None:
             raise Exception(f"Mate {params.name!r} is still present after delete")
         return {"name": params.name, "removed": True}
 
