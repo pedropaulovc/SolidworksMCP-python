@@ -8,6 +8,8 @@ import pytest
 from solidworks_mcp.tools.analysis import (
     InterferenceCheckInput,
     MassPropertiesInput,
+    MeasureEntityInput,
+    MeasureInput,
     register_analysis_tools,
 )
 
@@ -21,7 +23,7 @@ class TestAnalysisTools:
         tool_count = await register_analysis_tools(
             mcp_server, mock_adapter, mock_config
         )
-        assert tool_count == 4
+        assert tool_count == 5
 
     @pytest.mark.asyncio
     async def test_calculate_mass_properties_success(
@@ -179,6 +181,93 @@ class TestAnalysisTools:
         # Test optional parameters
         minimal_input = InterferenceCheckInput(assembly_path="test.sldasm")
         assert minimal_input.check_all_components is False  # Default value
+
+    @pytest.mark.asyncio
+    async def test_measure_success(self, mcp_server, mock_adapter, mock_config):
+        """Test successful measurement via the adapter."""
+        await register_analysis_tools(mcp_server, mock_adapter, mock_config)
+
+        mock_adapter.measure = AsyncMock(
+            return_value=Mock(
+                is_success=True,
+                data={"distance": 50.0, "is_parallel": True},
+                execution_time=0.1,
+            )
+        )
+
+        tool_func = None
+        for tool in await mcp_server.list_tools():
+            if tool.name == "measure":
+                tool_func = tool.fn
+                break
+
+        assert tool_func is not None
+        result = await tool_func(
+            input_data=MeasureInput(
+                entities=[
+                    MeasureEntityInput(entity_type="FACE", point=[0.0, 25.0, 50.0]),
+                    MeasureEntityInput(entity_type="FACE", point=[0.0, -25.0, 50.0]),
+                ]
+            )
+        )
+
+        assert result["status"] == "success"
+        assert result["data"]["distance"] == 50.0
+        params = mock_adapter.measure.call_args.args[0]
+        assert [e.entity_type for e in params.entities] == ["FACE", "FACE"]
+        assert params.arc_option == "center"
+
+    @pytest.mark.asyncio
+    async def test_measure_adapter_error(self, mcp_server, mock_adapter, mock_config):
+        """Test handling of adapter errors in measure."""
+        await register_analysis_tools(mcp_server, mock_adapter, mock_config)
+
+        mock_adapter.measure = AsyncMock(
+            return_value=Mock(
+                is_success=False, error="Failed to select FACE", execution_time=0.1
+            )
+        )
+
+        tool_func = None
+        for tool in await mcp_server.list_tools():
+            if tool.name == "measure":
+                tool_func = tool.fn
+                break
+
+        result = await tool_func(
+            input_data=MeasureInput(
+                entities=[MeasureEntityInput(entity_type="FACE", point=[9.0, 9.0, 9.0])]
+            )
+        )
+        assert result["status"] == "error"
+        assert "Failed to select FACE" in result["message"]
+
+    @pytest.mark.unit
+    def test_measure_input_validation(self):
+        """Test input validation for the measure tool."""
+        valid = MeasureInput(
+            entities=[MeasureEntityInput(entity_type="PLANE", name="Front Plane")],
+            arc_option="minimum",
+        )
+        assert valid.entities[0].name == "Front Plane"
+
+        with pytest.raises(ValueError):  # no entities
+            MeasureInput(entities=[])
+
+        with pytest.raises(ValueError):  # bad arc option
+            MeasureInput(
+                entities=[MeasureEntityInput(entity_type="EDGE", point=[0, 0, 0])],
+                arc_option="closest",
+            )
+
+        with pytest.raises(ValueError):  # neither name nor 3D point
+            MeasureEntityInput(entity_type="EDGE")
+
+        with pytest.raises(ValueError):  # short point
+            MeasureEntityInput(entity_type="EDGE", point=[1.0, 2.0])
+
+        with pytest.raises(ValueError):  # blank type
+            MeasureEntityInput(entity_type="  ", name="Front Plane")
 
     @pytest.mark.asyncio
     async def test_mass_properties_fallback_and_alias_inputs(

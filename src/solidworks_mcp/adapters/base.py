@@ -564,6 +564,42 @@ class CreateConfigurationParameters(BaseModel):
     description: str = ""
 
 
+class MeasureEntityRef(BaseModel):
+    """One entity to include in a measurement selection.
+
+    Entities with caller-stable names (reference planes, axes, sketches)
+    are located by ``name``; faces, edges and vertices have no stable name
+    and are located by a ``point`` lying on them.
+
+    Attributes:
+        entity_type (str): ``SelectByID2`` entity-type string, e.g.
+            ``"FACE"``, ``"EDGE"``, ``"VERTEX"``, ``"PLANE"``, ``"AXIS"``.
+        name (str): Entity name for named entities; empty when locating by
+            point.
+        point (list[float]): ``[x, y, z]`` in millimetres on the entity;
+            empty when locating by name.
+    """
+
+    entity_type: str
+    name: str = ""
+    point: list[float] = []
+
+
+class MeasureParameters(BaseModel):
+    """Parameters for a measurement over one or more selected entities.
+
+    Attributes:
+        entities (list[MeasureEntityRef]): Entities to measure — one for
+            intrinsic properties (edge length, face area, circle diameter),
+            two or more for relational ones (distance, angle).
+        arc_option (str): Distance anchor for arcs/circles — ``"center"``
+            (center to center), ``"minimum"`` or ``"maximum"``.
+    """
+
+    entities: list[MeasureEntityRef]
+    arc_option: str = "center"
+
+
 class MassProperties(BaseModel):
     """Mass properties information.
 
@@ -1461,6 +1497,21 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="set_active_configuration is not implemented by this adapter",
+        )
+
+    async def measure(self, params: MeasureParameters) -> AdapterResult[dict[str, Any]]:
+        """Measure the given entities (distances, lengths, areas, angles).
+
+        Args:
+            params (MeasureParameters): Entities and arc-distance option.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Measured values (millimetres,
+            mm², degrees) or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="measure is not implemented by this adapter",
         )
 
     @abstractmethod

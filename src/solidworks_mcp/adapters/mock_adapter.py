@@ -32,6 +32,7 @@ from .base import (
     LinearPatternParameters,
     LoftParameters,
     MassProperties,
+    MeasureParameters,
     MirrorFeatureParameters,
     RevolveParameters,
     SetGlobalVariableParameters,
@@ -863,9 +864,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             },
         )
 
-    async def shell(
-        self, params: ShellParameters
-    ) -> AdapterResult[SolidWorksFeature]:
+    async def shell(self, params: ShellParameters) -> AdapterResult[SolidWorksFeature]:
         """Mock hollowing out the solid body.
 
         Args:
@@ -883,9 +882,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             },
         )
 
-    async def draft(
-        self, params: DraftParameters
-    ) -> AdapterResult[SolidWorksFeature]:
+    async def draft(self, params: DraftParameters) -> AdapterResult[SolidWorksFeature]:
         """Mock applying a neutral-plane draft.
 
         Args:
@@ -1060,9 +1057,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
 
         await asyncio.sleep(self._delays["model_operation"] / 2)
         self._operation_count += 1
-        payload = self._mock_upsert_equation(
-            f'"{params.name}" = {params.expression}'
-        )
+        payload = self._mock_upsert_equation(f'"{params.name}" = {params.expression}')
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
             data=payload,
@@ -1147,6 +1142,46 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
             data={"name": name, "rebuilt": True},
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def measure(self, params: MeasureParameters) -> AdapterResult[dict[str, Any]]:
+        """Mock measuring entities.
+
+        Args:
+            params (MeasureParameters): Entities and arc-distance option.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Deterministic measurement payload.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if not params.entities:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No entities to measure"
+            )
+        if params.arc_option not in {"center", "minimum", "maximum"}:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown arc_option: {params.arc_option!r}",
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        values: dict[str, Any] = {
+            "is_parallel": False,
+            "is_intersect": False,
+            "is_perpendicular": False,
+        }
+        if len(params.entities) == 1:
+            values.update({"length": 100.0, "total_length": 100.0})
+        else:
+            values.update({"distance": 50.0, "delta_x": 50.0})
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=values,
             execution_time=self._delays["model_operation"] / 2,
         )
 
@@ -1570,9 +1605,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         if math.hypot(direction_x, direction_y) < 1e-9:
             return AdapterResult(
                 status=AdapterResultStatus.ERROR,
-                error=(
-                    "sketch_linear_pattern requires a non-zero direction vector"
-                ),
+                error=("sketch_linear_pattern requires a non-zero direction vector"),
             )
         for ent in entities:
             if ent not in self._sketch_entity_ids:
@@ -1642,9 +1675,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         await asyncio.sleep(self._delays["sketch_operation"] / 2)
         self._operation_count += 1
 
-        pattern_id = (
-            f"CircularPattern_{count}x{angle}deg_{random.randint(1000, 9999)}"
-        )
+        pattern_id = f"CircularPattern_{count}x{angle}deg_{random.randint(1000, 9999)}"
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
             data=pattern_id,
@@ -1676,8 +1707,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             return AdapterResult(
                 status=AdapterResultStatus.ERROR,
                 error=(
-                    "sketch_mirror requires a mirror_line entity ID "
-                    "(add_centerline)"
+                    "sketch_mirror requires a mirror_line entity ID (add_centerline)"
                 ),
             )
         if mirror_line not in self._sketch_entity_ids:
@@ -1765,9 +1795,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         self._operation_count += 1
 
         direction = "inward" if reverse_direction else "outward"
-        offset_id = (
-            f"Offset_{offset_distance}_{direction}_{random.randint(1000, 9999)}"
-        )
+        offset_id = f"Offset_{offset_distance}_{direction}_{random.randint(1000, 9999)}"
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
             data=offset_id,
