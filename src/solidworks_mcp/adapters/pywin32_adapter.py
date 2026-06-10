@@ -1234,7 +1234,8 @@ class _FeatureSelectionService:
             # Flag each new feature dispatch
             if feature is not None:
                 self._adapter._attempt(
-                    lambda f=feature: sw_type_info.flag_methods(f, "IFeature"), default=0
+                    lambda f=feature: sw_type_info.flag_methods(f, "IFeature"),
+                    default=0,
                 )
 
         if features:
@@ -2011,9 +2012,17 @@ class PyWin32Adapter(
     ) -> bool:
         """Attempt STL export using Extension.SaveAs2 with optional ISTLExportData.
 
+        ``IModelDocExtension::SaveAs2`` takes 8 required parameters:
+        ``(Name, Version, Options, ExportData: IDispatch,
+        ReferencePrefixOrSuffixText: str, AddTextAsPrefix: bool,
+        byref Errors, byref Warnings)``. Under late binding the optional-object
+        and by-reference parameters need typed VARIANTs — bare ``None`` (or a
+        wrong-typed placeholder) marshals as ``VT_NULL`` and SolidWorks rejects
+        the call with ``Type mismatch`` (issue #28, same class as the
+        ``SelectByID2`` Callout fix).
+
         Tries SaveAs2 with stl_data first (enables body merging); falls back to
-        SaveAs2(None) if type mismatch occurs (late-bound IDispatch can't marshal
-        ISTLExportData* through IDispatch::Invoke).
+        a typed-null ExportData if marshalling the ISTLExportData pointer fails.
 
         Args:
             ext: Extension object from target document
@@ -2023,15 +2032,32 @@ class PyWin32Adapter(
         Returns:
             True if file was created, False otherwise.
         """
+        from .com_variant import byref_long, null_dispatch
+
+        def _save(export_data: Any) -> Any:
+            errors = byref_long()
+            warnings = byref_long()
+            # swSaveAsVersion_e.swSaveAsCurrentVersion = 0
+            # swSaveAsOptions_e.swSaveAsOptions_Silent = 2
+            ok = ext.SaveAs2(
+                resolved_path, 0, 2, export_data, "", False, errors, warnings
+            )
+            if not ok:
+                logger.warning(
+                    "[pywin32.export_file] Extension.SaveAs2 returned False "
+                    "(errors={}, warnings={})",
+                    getattr(errors, "value", None),
+                    getattr(warnings, "value", None),
+                )
+            return ok
+
         try:
-            # Try with stl_data first
             try:
-                # swSaveAsVersion_e.swSaveAsCurrentVersion = 0
-                # swSaveAsOptions_e.swSaveAsOptions_Silent = 2
-                ext.SaveAs2(resolved_path, 0, 2, stl_data, None, "")
+                _save(stl_data if stl_data is not None else null_dispatch())
             except Exception:
-                # Fallback: try without stl_data (type mismatch on IDispatch)
-                ext.SaveAs2(resolved_path, 0, 2, None, None, "")
+                # Fallback: typed-null ExportData (ISTLExportData* may not
+                # marshal through IDispatch::Invoke on some builds).
+                _save(null_dispatch())
 
             return os.path.exists(resolved_path)
         except Exception as exc:

@@ -15,17 +15,14 @@ from __future__ import annotations
 from typing import Any
 
 
-def null_callout() -> Any:
-    """Return a typed-null ``Callout`` argument for ``SelectByID2``.
+def null_dispatch() -> Any:
+    """Return a typed-null object pointer for optional ``IDispatch`` params.
 
-    ``IModelDocExtension::SelectByID2`` (and the ``IModelDoc2`` variant) take an
-    optional ``Callout`` parameter typed as an ``ICallout`` object pointer.
     Under pywin32 late binding a bare Python ``None`` marshals as ``VT_NULL``,
-    which SolidWorks rejects with ``com_error (-2147352571, 'Type mismatch')``
-    — the failure long misattributed to "``SelectByID2`` is broken on this
-    build". Passing a ``VT_DISPATCH`` null VARIANT instead supplies the
-    null-object-pointer type SolidWorks expects, and the call succeeds for
-    faces/edges by coordinate and named entities by name, with selection marks.
+    which SolidWorks rejects with ``com_error (-2147352571, 'Type mismatch')``.
+    A ``VT_DISPATCH`` null VARIANT supplies the null-object-pointer type the
+    API expects. Used for ``SelectByID2``'s ``Callout`` (see
+    :func:`null_callout`) and ``IModelDocExtension::SaveAs2``'s ``ExportData``.
 
     Returns:
         Any: ``VARIANT(VT_DISPATCH, None)`` on Windows with pywin32 available;
@@ -37,6 +34,43 @@ def null_callout() -> Any:
         from win32com.client import VARIANT
 
         return VARIANT(pythoncom.VT_DISPATCH, None)
+    except Exception:
+        return None
+
+
+def null_callout() -> Any:
+    """Return a typed-null ``Callout`` argument for ``SelectByID2``.
+
+    ``IModelDocExtension::SelectByID2`` (and the ``IModelDoc2`` variant) take an
+    optional ``Callout`` parameter typed as an ``ICallout`` object pointer.
+    The failure mode of passing a bare ``None`` was long misattributed to
+    "``SelectByID2`` is broken on this build" — see :func:`null_dispatch`.
+
+    Returns:
+        Any: See :func:`null_dispatch`.
+    """
+    return null_dispatch()
+
+
+def byref_long() -> Any:
+    """Return an in/out ``long`` VARIANT for required by-reference params.
+
+    SolidWorks methods such as ``IModelDocExtension::SaveAs2``/``SaveAs3``
+    take required ``VT_BYREF | VT_I4`` ``Errors``/``Warnings`` parameters.
+    Under late binding these cannot be omitted (``DISP_E_BADPARAMCOUNT``) nor
+    passed as bare ``None`` (``VT_NULL`` type mismatch). After the call the
+    out-value is readable via ``.value``.
+
+    Returns:
+        Any: ``VARIANT(VT_BYREF | VT_I4, 0)`` on Windows with pywin32
+        available; plain ``None`` as a fallback otherwise (CI never reaches a
+        real COM boundary).
+    """
+    try:
+        import pythoncom
+        from win32com.client import VARIANT
+
+        return VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
     except Exception:
         return None
 
