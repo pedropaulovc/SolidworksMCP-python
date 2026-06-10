@@ -21,7 +21,10 @@ from .base import (
     AdapterResultStatus,
     CircularPatternParameters,
     CreateAxisParameters,
+    CreateConfigurationParameters,
     CreateCoordinateSystemParameters,
+    CreateEquationCurveParameters,
+    CreateEquationParameters,
     CreatePlaneParameters,
     CreateReferencePointParameters,
     DraftParameters,
@@ -31,6 +34,7 @@ from .base import (
     MassProperties,
     MirrorFeatureParameters,
     RevolveParameters,
+    SetGlobalVariableParameters,
     ShellParameters,
     SolidWorksAdapter,
     SolidWorksFeature,
@@ -115,6 +119,8 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         # its sketch-entity registry.
         self._sketch_entity_ids: set[str] = set()
         self._dimensions: dict[str, float] = {}
+        self._equations: list[str] = []
+        self._configurations: list[str] = ["Default"]
         self._operation_count = 0
 
         # Configurable simulation delays (in seconds)
@@ -981,6 +987,167 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 "position": params.position,
                 "rotation": params.rotation,
             },
+        )
+
+    async def create_equation_driven_curve(
+        self, params: CreateEquationCurveParameters
+    ) -> AdapterResult[str]:
+        """Mock creating an equation-driven sketch curve.
+
+        Args:
+            params (CreateEquationCurveParameters): The params value.
+
+        Returns:
+            AdapterResult[str]: The result produced by the operation.
+        """
+        if not self._current_sketch:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active sketch"
+            )
+
+        await asyncio.sleep(self._delays["sketch_operation"] / 2)
+        self._operation_count += 1
+        entity_id = f"EquationCurve_{self._operation_count}"
+        self._sketch_entity_ids.add(entity_id)
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=entity_id,
+            execution_time=self._delays["sketch_operation"] / 2,
+        )
+
+    def _mock_upsert_equation(self, equation: str) -> dict[str, Any]:
+        """Insert or replace an equation row by its left-hand side.
+
+        Args:
+            equation (str): The full equation text.
+
+        Returns:
+            dict[str, Any]: The same payload shape as the real adapter.
+        """
+        lhs = equation.partition("=")[0].strip()
+        for index, existing in enumerate(self._equations):
+            if existing.partition("=")[0].strip() == lhs:
+                self._equations[index] = equation
+                return {
+                    "index": index,
+                    "equation": equation,
+                    "updated": True,
+                    "value": None,
+                }
+        self._equations.append(equation)
+        return {
+            "index": len(self._equations) - 1,
+            "equation": equation,
+            "updated": False,
+            "value": None,
+        }
+
+    async def set_global_variable(
+        self, params: SetGlobalVariableParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock adding or updating a global variable.
+
+        Args:
+            params (SetGlobalVariableParameters): The params value.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: The result produced by the operation.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        payload = self._mock_upsert_equation(
+            f'"{params.name}" = {params.expression}'
+        )
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=payload,
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def create_equation(
+        self, params: CreateEquationParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock adding or updating a driving equation.
+
+        Args:
+            params (CreateEquationParameters): The params value.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: The result produced by the operation.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=self._mock_upsert_equation(params.equation),
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def create_configuration(
+        self, params: CreateConfigurationParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock creating a configuration (activates it, like SolidWorks).
+
+        Args:
+            params (CreateConfigurationParameters): The params value.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: The result produced by the operation.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        if params.name not in self._configurations:
+            self._configurations.append(params.name)
+        self._current_model.configuration = params.name
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": params.name, "parent": params.parent},
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def set_active_configuration(
+        self, name: str
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock activating a configuration by name.
+
+        Args:
+            name (str): The name value.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: The result produced by the operation.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        if name not in self._configurations:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Failed to activate configuration: {name}",
+            )
+        self._current_model.configuration = name
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": name, "rebuilt": True},
+            execution_time=self._delays["model_operation"] / 2,
         )
 
     async def create_sketch(self, plane: str) -> AdapterResult[dict[str, Any]]:  # type: ignore[override]

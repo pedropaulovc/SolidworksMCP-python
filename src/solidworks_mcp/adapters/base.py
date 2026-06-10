@@ -486,6 +486,84 @@ class CreateCoordinateSystemParameters(BaseModel):
     rotation: list[float] = [0.0, 0.0, 0.0]
 
 
+class CreateEquationCurveParameters(BaseModel):
+    """Parameters for an equation-driven sketch curve.
+
+    Expressions are passed verbatim to SolidWorks (same syntax as the
+    Equation Driven Curve sketch tool); lengths evaluate in **metres**.
+
+    Attributes:
+        x_expression (str): ``x(t)`` for a parametric curve; empty string for
+            an explicit ``y = f(x)`` curve.
+        y_expression (str): ``y(t)`` (parametric) or ``f(x)`` (explicit).
+        z_expression (str): ``z(t)`` for a 3D parametric curve; empty for 2D.
+        range_start (str): Start of the ``t`` (or ``x``) range — a string so
+            expressions like ``"-pi/2"`` or dimension names work.
+        range_end (str): End of the range.
+        is_angle_range (bool): ``True`` when the range represents an angle in
+            radians.
+        lock_start (bool): Lock the curve's start point.
+        lock_end (bool): Lock the curve's end point.
+    """
+
+    x_expression: str = ""
+    y_expression: str
+    z_expression: str = ""
+    range_start: str
+    range_end: str
+    is_angle_range: bool = False
+    lock_start: bool = True
+    lock_end: bool = True
+
+
+class SetGlobalVariableParameters(BaseModel):
+    """Parameters for adding or updating an equation-manager global variable.
+
+    Attributes:
+        name (str): Global variable name without quotes (e.g. ``ToothCount``).
+        expression (str): Right-hand side, e.g. ``"24"`` or
+            ``'"PitchDiameter" / "Module"'`` (referenced names in embedded
+            double quotes).
+        configuration (str): Configuration the assignment applies to; empty
+            string applies it to all configurations.
+    """
+
+    name: str
+    expression: str
+    configuration: str = ""
+
+
+class CreateEquationParameters(BaseModel):
+    """Parameters for adding or updating a full driving equation.
+
+    Attributes:
+        equation (str): Complete equation with quoted names, e.g.
+            ``'"D1@Boss-Extrude1" = "ToothCount" / "DiametralPitch"'``.
+        configuration (str): Configuration the equation applies to; empty
+            string applies it to all configurations.
+    """
+
+    equation: str
+    configuration: str = ""
+
+
+class CreateConfigurationParameters(BaseModel):
+    """Parameters for creating a configuration.
+
+    Attributes:
+        name (str): New configuration name.
+        comment (str): Comment shown in Configuration Properties.
+        parent (str): Parent configuration name (derived configuration);
+            empty for a top-level configuration.
+        description (str): Configuration description text.
+    """
+
+    name: str
+    comment: str = ""
+    parent: str = ""
+    description: str = ""
+
+
 class MassProperties(BaseModel):
     """Mass properties information.
 
@@ -1303,6 +1381,86 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="create_coordinate_system is not implemented by this adapter",
+        )
+
+    async def create_equation_driven_curve(
+        self, params: CreateEquationCurveParameters
+    ) -> AdapterResult[str]:
+        """Create an equation-driven curve in the active sketch.
+
+        Args:
+            params (CreateEquationCurveParameters): Expressions and range.
+
+        Returns:
+            AdapterResult[str]: Registered sketch-entity ID or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="create_equation_driven_curve is not implemented by this adapter",
+        )
+
+    async def set_global_variable(
+        self, params: SetGlobalVariableParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Add or update a global variable in the equation manager.
+
+        Args:
+            params (SetGlobalVariableParameters): Name, expression, scope.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Equation index/text or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="set_global_variable is not implemented by this adapter",
+        )
+
+    async def create_equation(
+        self, params: CreateEquationParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Add or update a driving equation in the equation manager.
+
+        Args:
+            params (CreateEquationParameters): Equation text and scope.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Equation index/text or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="create_equation is not implemented by this adapter",
+        )
+
+    async def create_configuration(
+        self, params: CreateConfigurationParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Create a configuration on the active model.
+
+        Args:
+            params (CreateConfigurationParameters): Name and metadata.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Configuration name or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="create_configuration is not implemented by this adapter",
+        )
+
+    async def set_active_configuration(
+        self, name: str
+    ) -> AdapterResult[dict[str, Any]]:
+        """Activate a configuration by name and rebuild.
+
+        Args:
+            name (str): Configuration name to activate.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Activation details or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="set_active_configuration is not implemented by this adapter",
         )
 
     @abstractmethod
