@@ -762,6 +762,16 @@ class _FakeMate:
         self.select_result = True
         self.suppression_calls: list[tuple[int, int]] = []
         self.suppression_applies = True
+        self.definition = SimpleNamespace()
+        self.modify_calls: list[object] = []
+        self.modify_result = True
+
+    def GetDefinition(self):  # noqa: N802
+        return self.definition
+
+    def ModifyDefinition(self, data, _model, _callout):  # noqa: N802
+        self.modify_calls.append(data)
+        return self.modify_result
 
     def GetTypeName2(self):  # noqa: N802
         return self._type_name
@@ -810,6 +820,7 @@ class _MateModel(_FakeAssemblyModel):
         self.point_selections: list[tuple] = []
         self.add_mate_name = "Coincident1"
         self.add_mate_status = 1
+        self.add_mate_modify_result = True
         self._last_feature = None
 
     def FeatureByName(self, name):  # noqa: N802
@@ -873,6 +884,7 @@ class _MateModel(_FakeAssemblyModel):
         if self.add_mate_status != 1:
             return None
         mate = _FakeMate(self.add_mate_name)
+        mate.modify_result = self.add_mate_modify_result
         self.mate_group.mates.append(mate)
         return mate
 
@@ -904,7 +916,7 @@ def test_add_mate_no_model_errors() -> None:
 def test_add_mate_unknown_type_errors() -> None:
     adapter = _adapter_with(_MateModel())
     result = assembly_module._add_mate_impl(
-        adapter, AddMateParameters(mate_type="gear", entities=_two_entities())
+        adapter, AddMateParameters(mate_type="magnetic", entities=_two_entities())
     )
     assert result.is_error
     assert "Unknown mate_type" in (result.error or "")
@@ -1224,7 +1236,7 @@ async def test_mock_add_mate_mirrors_impl_validations() -> None:
     adapter = await _connected_mock()
 
     bad_type = await adapter.add_mate(
-        AddMateParameters(mate_type="gear", entities=_two_entities())
+        AddMateParameters(mate_type="magnetic", entities=_two_entities())
     )
     assert bad_type.is_error
     assert "Unknown mate_type" in (bad_type.error or "")
@@ -1273,3 +1285,260 @@ async def test_mock_delete_and_suppress_mate_round_trip() -> None:
     missing = await adapter.delete_mate(MateRefParameters(name="Tangent1"))
     assert missing.is_error
     assert "Mate not found" in (missing.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Mechanical mates (Phase 7C)
+# ---------------------------------------------------------------------------
+
+
+def test_add_mate_gear_passes_ratio_through_addmate5() -> None:
+    model = _MateModel()
+    model.add_mate_name = "GearMate1"
+    adapter = _adapter_with(model)
+
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="gear", entities=_two_entities(), gear_ratio=[24, 12]
+        ),
+    )
+
+    assert result.is_success
+    call = model.mate_calls[0]
+    assert call[0] == 10  # swMateGEAR
+    assert call[6] == 24.0  # GearRatioNumerator
+    assert call[7] == 12.0  # GearRatioDenominator
+    assert result.data["gear_ratio"] == [24.0, 12.0]
+    # Gear entities use the standard mark 1
+    assert all(mark == 1 for (_, _, mark) in model.selections)
+
+
+def test_add_mate_gear_ratio_validations() -> None:
+    adapter = _adapter_with(_MateModel())
+
+    wrong_length = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="gear", entities=_two_entities(), gear_ratio=[24.0]
+        ),
+    )
+    assert wrong_length.is_error
+    assert "gear_ratio must be [numerator, denominator]" in (wrong_length.error or "")
+
+    wrong_type = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="coincident", entities=_two_entities(), gear_ratio=[24, 12]
+        ),
+    )
+    assert wrong_type.is_error
+    assert "only valid for gear mates" in (wrong_type.error or "")
+
+    non_positive = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="gear", entities=_two_entities(), gear_ratio=[24, 0]
+        ),
+    )
+    assert non_positive.is_error
+    assert "must be positive" in (non_positive.error or "")
+
+
+def test_add_mate_cam_follower_uses_mark_8() -> None:
+    model = _MateModel()
+    model.add_mate_name = "CamMate1"
+    adapter = _adapter_with(model)
+
+    result = assembly_module._add_mate_impl(
+        adapter, AddMateParameters(mate_type="cam_follower", entities=_two_entities())
+    )
+
+    assert result.is_success
+    assert model.mate_calls[0][0] == 9  # swMateCAMFOLLOWER
+    assert all(mark == 8 for (_, _, mark) in model.selections)
+
+
+def test_add_mate_rack_pinion_sets_pitch_diameter() -> None:
+    model = _MateModel()
+    model.add_mate_name = "RackPinionMate1"
+    adapter = _adapter_with(model)
+
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="rack_pinion",
+            entities=_two_entities(),
+            pinion_pitch_diameter=30.0,
+        ),
+    )
+
+    assert result.is_success
+    assert model.mate_calls[0][0] == 13  # swMateRACKPINION
+    mate = model.mate_group.mates[-1]
+    assert mate.definition.DiameterType == 0  # swPinionPitchDiameter
+    assert abs(mate.definition.DiameterVal - 0.030) < 1e-12  # metres
+    assert mate.modify_calls == [mate.definition]
+    assert result.data["pinion_pitch_diameter"] == 30.0
+
+
+def test_add_mate_rack_pinion_travel_per_revolution() -> None:
+    model = _MateModel()
+    model.add_mate_name = "RackPinionMate1"
+    adapter = _adapter_with(model)
+
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="rack_pinion",
+            entities=_two_entities(),
+            rack_travel_per_revolution=25.4,
+        ),
+    )
+
+    assert result.is_success
+    mate = model.mate_group.mates[-1]
+    assert mate.definition.DiameterType == 1  # swRackTravelPerRevolution
+    assert abs(mate.definition.DiameterVal - 0.0254) < 1e-12
+
+
+def test_add_mate_rack_pinion_both_values_errors() -> None:
+    adapter = _adapter_with(_MateModel())
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="rack_pinion",
+            entities=_two_entities(),
+            pinion_pitch_diameter=30.0,
+            rack_travel_per_revolution=25.4,
+        ),
+    )
+    assert result.is_error
+    assert "not both" in (result.error or "")
+
+
+def test_add_mate_screw_sets_distance_per_revolution() -> None:
+    model = _MateModel()
+    model.add_mate_name = "ScrewMate1"
+    adapter = _adapter_with(model)
+
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="screw",
+            entities=_two_entities(),
+            distance_per_revolution=2.0,
+        ),
+    )
+
+    assert result.is_success
+    assert model.mate_calls[0][0] == 17  # swMateSCREW
+    mate = model.mate_group.mates[-1]
+    assert mate.definition.RevolutionType == 1  # swDistancePerRevolution
+    assert abs(mate.definition.RevolutionVal - 0.002) < 1e-12
+    assert result.data["distance_per_revolution"] == 2.0
+
+
+def test_add_mate_mechanical_value_on_wrong_type_errors() -> None:
+    adapter = _adapter_with(_MateModel())
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="coincident",
+            entities=_two_entities(),
+            distance_per_revolution=2.0,
+        ),
+    )
+    assert result.is_error
+    assert "only valid for screw mates" in (result.error or "")
+
+
+def test_add_mate_modify_definition_failure_errors() -> None:
+    model = _MateModel()
+    model.add_mate_name = "ScrewMate1"
+    model.add_mate_modify_result = False
+    adapter = _adapter_with(model)
+
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="screw",
+            entities=_two_entities(),
+            distance_per_revolution=2.0,
+        ),
+    )
+    assert result.is_error
+    assert "ModifyDefinition failed" in (result.error or "")
+
+
+def test_add_mate_without_mechanical_values_skips_definition_edit() -> None:
+    model = _MateModel()
+    model.add_mate_name = "RackPinionMate1"
+    adapter = _adapter_with(model)
+
+    result = assembly_module._add_mate_impl(
+        adapter, AddMateParameters(mate_type="rack_pinion", entities=_two_entities())
+    )
+
+    assert result.is_success
+    assert model.mate_group.mates[-1].modify_calls == []
+
+
+@pytest.mark.asyncio
+async def test_mock_mechanical_mates_parity() -> None:
+    adapter = await _connected_mock()
+
+    gear = await adapter.add_mate(
+        AddMateParameters(
+            mate_type="gear", entities=_two_entities(), gear_ratio=[24, 12]
+        )
+    )
+    assert gear.data["name"] == "Gear1"
+    assert gear.data["gear_ratio"] == [24.0, 12.0]
+
+    rack = await adapter.add_mate(
+        AddMateParameters(
+            mate_type="rack_pinion",
+            entities=_two_entities(),
+            pinion_pitch_diameter=30.0,
+        )
+    )
+    assert rack.data["name"] == "RackPinion1"
+    assert rack.data["pinion_pitch_diameter"] == 30.0
+
+    cam = await adapter.add_mate(
+        AddMateParameters(mate_type="cam_follower", entities=_two_entities())
+    )
+    assert cam.data["name"] == "CamFollower1"
+
+    screw = await adapter.add_mate(
+        AddMateParameters(
+            mate_type="screw", entities=_two_entities(), distance_per_revolution=2.0
+        )
+    )
+    assert screw.data["name"] == "Screw1"
+    assert screw.data["distance_per_revolution"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_mock_mechanical_mates_validations() -> None:
+    adapter = await _connected_mock()
+
+    wrong_type = await adapter.add_mate(
+        AddMateParameters(
+            mate_type="coincident", entities=_two_entities(), gear_ratio=[2, 1]
+        )
+    )
+    assert wrong_type.is_error
+    assert "only valid for gear mates" in (wrong_type.error or "")
+
+    both = await adapter.add_mate(
+        AddMateParameters(
+            mate_type="rack_pinion",
+            entities=_two_entities(),
+            pinion_pitch_diameter=30.0,
+            rack_travel_per_revolution=25.4,
+        )
+    )
+    assert both.is_error
+    assert "not both" in (both.error or "")

@@ -55,6 +55,7 @@ from .base import (
     SuppressMateParameters,
     SweepParameters,
 )
+from .solidworks.assembly import _validate_mechanical_values
 from .solidworks.sketch import RELATION_NAME_MAP
 
 
@@ -1735,15 +1736,19 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         "tangent",
         "distance",
         "angle",
+        "cam_follower",
+        "gear",
         "width",
+        "rack_pinion",
         "lock",
+        "screw",
     )
     _MATE_ALIGNMENTS = ("aligned", "anti_aligned", "closest")
 
     async def add_mate(
         self, params: AddMateParameters
     ) -> AdapterResult[dict[str, Any]]:
-        """Mock adding a standard mate between entities.
+        """Mock adding a standard or mechanical mate between entities.
 
         Args:
             params (AddMateParameters): Mate type, entities and options.
@@ -1783,10 +1788,15 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                     status=AdapterResultStatus.ERROR,
                     error=f"{label} must be [min, max]",
                 )
+        mechanical_error = _validate_mechanical_values(params)
+        if mechanical_error:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error=mechanical_error
+            )
 
         await asyncio.sleep(self._delays["model_operation"] / 2)
         self._operation_count += 1
-        stem = params.mate_type.title()
+        stem = "".join(part.title() for part in params.mate_type.split("_"))
         instance = (
             sum(1 for m in self._mates.values() if m["mate_type"] == params.mate_type)
             + 1
@@ -1798,14 +1808,25 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             "entities": len(params.entities),
             "suppressed": False,
         }
+        payload = {
+            "name": name,
+            "mate_type": params.mate_type,
+            "alignment": params.alignment,
+            "entities": len(params.entities),
+        }
+        if params.gear_ratio:
+            payload["gear_ratio"] = [float(value) for value in params.gear_ratio]
+        if params.pinion_pitch_diameter:
+            payload["pinion_pitch_diameter"] = float(params.pinion_pitch_diameter)
+        if params.rack_travel_per_revolution:
+            payload["rack_travel_per_revolution"] = float(
+                params.rack_travel_per_revolution
+            )
+        if params.distance_per_revolution:
+            payload["distance_per_revolution"] = float(params.distance_per_revolution)
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
-            data={
-                "name": name,
-                "mate_type": params.mate_type,
-                "alignment": params.alignment,
-                "entities": len(params.entities),
-            },
+            data=payload,
             execution_time=self._delays["model_operation"] / 2,
         )
 

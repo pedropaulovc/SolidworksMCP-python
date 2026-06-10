@@ -66,7 +66,7 @@ _REPLACE_CONFIG_MANUALLY_SELECT = 1
 
 _MODEL_EXTENSION_DOC_TYPES = {".sldprt": 1, ".sldasm": 2}  # swDocumentTypes_e
 
-# swMateType_e — the standard (Phase 7B) subset
+# swMateType_e — the standard (Phase 7B) and mechanical (Phase 7C) subsets
 _MATE_TYPES = {
     "coincident": 0,
     "concentric": 1,
@@ -75,16 +75,26 @@ _MATE_TYPES = {
     "tangent": 4,
     "distance": 5,
     "angle": 6,
+    "cam_follower": 9,
+    "gear": 10,
     "width": 11,
+    "rack_pinion": 13,
     "lock": 16,
+    "screw": 17,
 }
 
 # swMateAlign_e
 _MATE_ALIGNMENTS = {"aligned": 0, "anti_aligned": 1, "closest": 2}
 
-# AddMate5 selection marks: width tab faces use 16, everything else 1
-# (cam-follower's mark 8 arrives with the Phase 7C mechanical mates).
-_MATE_DEFAULT_MARKS = {"width": 16}
+# AddMate5 selection marks: width tab faces 16, cam-follower 8, others 1
+_MATE_DEFAULT_MARKS = {"width": 16, "cam_follower": 8}
+
+# swRackPinionMateDistanceOptions_e
+_RACK_PINION_PITCH_DIAMETER = 0
+_RACK_PINION_TRAVEL_PER_REVOLUTION = 1
+
+# swScrewMateDistanceOptions_e
+_SCREW_DISTANCE_PER_REVOLUTION = 1
 
 # swAddMateError_e
 _MATE_ERRORS = {
@@ -1214,6 +1224,112 @@ def _mate_names(adapter: Any) -> set[str]:
     }
 
 
+def _validate_mechanical_values(params: AddMateParameters) -> str:
+    """Validate the Phase 7C mechanical value options of ``params``.
+
+    Args:
+        params: Mate parameters to validate.
+
+    Returns:
+        str: Error message, or empty when valid.
+    """
+    if params.gear_ratio:
+        if params.mate_type != "gear":
+            return "gear_ratio is only valid for gear mates"
+        if len(params.gear_ratio) != 2:
+            return "gear_ratio must be [numerator, denominator]"
+        if any(float(value) <= 0 for value in params.gear_ratio):
+            return "gear_ratio values must be positive"
+    rack_values = (params.pinion_pitch_diameter, params.rack_travel_per_revolution)
+    if any(rack_values) and params.mate_type != "rack_pinion":
+        return (
+            "pinion_pitch_diameter/rack_travel_per_revolution are only "
+            "valid for rack_pinion mates"
+        )
+    if all(rack_values):
+        return (
+            "set either pinion_pitch_diameter or rack_travel_per_revolution, not both"
+        )
+    if any(float(value) < 0 for value in rack_values):
+        return "rack_pinion values must be positive"
+    if params.distance_per_revolution and params.mate_type != "screw":
+        return "distance_per_revolution is only valid for screw mates"
+    if float(params.distance_per_revolution) < 0:
+        return "distance_per_revolution must be positive"
+    return ""
+
+
+def _apply_mechanical_values(
+    adapter: Any, name: str, params: AddMateParameters
+) -> None:
+    """Write rack-pinion/screw values into a created mate's definition.
+
+    ``AddMate5`` has no parameters for the rack-pinion diameter or the
+    screw pitch — SolidWorks derives defaults from the selected geometry.
+    When the caller provided a value, edit the mate's feature data
+    (``IFeature::GetDefinition`` → set ``DiameterType``/``DiameterVal``
+    or ``RevolutionType``/``RevolutionVal`` → ``IFeature::ModifyDefinition``).
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        name: Name of the created mate feature.
+        params: Mate parameters carrying the optional mechanical values.
+
+    Raises:
+        Exception: When a value was requested but could not be applied.
+    """
+    if params.mate_type == "rack_pinion" and (
+        params.pinion_pitch_diameter or params.rack_travel_per_revolution
+    ):
+        if params.pinion_pitch_diameter:
+            members = {
+                "DiameterType": _RACK_PINION_PITCH_DIAMETER,
+                "DiameterVal": float(params.pinion_pitch_diameter) / 1000.0,
+            }
+        else:
+            members = {
+                "DiameterType": _RACK_PINION_TRAVEL_PER_REVOLUTION,
+                "DiameterVal": float(params.rack_travel_per_revolution) / 1000.0,
+            }
+        _modify_mate_definition(adapter, name, members)
+    if params.mate_type == "screw" and params.distance_per_revolution:
+        _modify_mate_definition(
+            adapter,
+            name,
+            {
+                "RevolutionType": _SCREW_DISTANCE_PER_REVOLUTION,
+                "RevolutionVal": float(params.distance_per_revolution) / 1000.0,
+            },
+        )
+
+
+def _modify_mate_definition(adapter: Any, name: str, members: dict[str, Any]) -> None:
+    """Set feature-data members on a mate and commit the edit.
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        name: Mate feature name.
+        members: Feature-data member names and values to set.
+
+    Raises:
+        Exception: When the mate cannot be resolved or the edit fails.
+    """
+    feature = _mate_feature_by_name(adapter, name)
+    if feature is None:
+        raise Exception(f"Created mate not found for definition edit: {name!r}")
+    data = _read_member(feature, "GetDefinition")
+    if data is None:
+        raise Exception(f"GetDefinition failed for mate {name!r}")
+    for member, value in members.items():
+        setattr(data, member, value)
+    modified = adapter._attempt(
+        lambda: feature.ModifyDefinition(data, adapter.currentModel, null_callout()),
+        default=False,
+    )
+    if not modified:
+        raise Exception(f"ModifyDefinition failed for mate {name!r}")
+
+
 def _add_mate_impl(
     adapter: Any, params: AddMateParameters
 ) -> AdapterResult[dict[str, Any]]:
@@ -1266,6 +1382,9 @@ def _add_mate_impl(
                 status=AdapterResultStatus.ERROR,
                 error=f"{label} must be [min, max]",
             )
+    mechanical_error = _validate_mechanical_values(params)
+    if mechanical_error:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error=mechanical_error)
 
     def _mate_operation() -> dict[str, Any]:
         model = adapter.currentModel
@@ -1293,6 +1412,12 @@ def _add_mate_impl(
         else:
             angle_lower = angle_upper = angle
 
+        gear_numerator, gear_denominator = (
+            [float(value) for value in params.gear_ratio]
+            if params.gear_ratio
+            else (1.0, 1.0)
+        )
+
         names_before = _mate_names(adapter)
         _flag_feature_methods(model, "IAssemblyDoc")
         error_status = _byref_i4()
@@ -1303,8 +1428,8 @@ def _add_mate_impl(
             distance,
             distance_upper,
             distance_lower,
-            1.0,  # GearRatioNumerator (gear mates are Phase 7C)
-            1.0,  # GearRatioDenominator
+            gear_numerator,
+            gear_denominator,
             angle,
             angle_upper,
             angle_lower,
@@ -1322,13 +1447,25 @@ def _add_mate_impl(
 
         new_names = sorted(_mate_names(adapter) - names_before)
         name = new_names[-1] if new_names else ""
+        _apply_mechanical_values(adapter, name, params)
         adapter._attempt(lambda: model.EditRebuild3())
-        return {
+        payload = {
             "name": name,
             "mate_type": params.mate_type,
             "alignment": params.alignment,
             "entities": len(params.entities),
         }
+        if params.gear_ratio:
+            payload["gear_ratio"] = [gear_numerator, gear_denominator]
+        if params.pinion_pitch_diameter:
+            payload["pinion_pitch_diameter"] = float(params.pinion_pitch_diameter)
+        if params.rack_travel_per_revolution:
+            payload["rack_travel_per_revolution"] = float(
+                params.rack_travel_per_revolution
+            )
+        if params.distance_per_revolution:
+            payload["distance_per_revolution"] = float(params.distance_per_revolution)
+        return payload
 
     return cast(
         AdapterResult[dict[str, Any]],

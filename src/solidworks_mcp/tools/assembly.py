@@ -385,7 +385,7 @@ class MateEntityInput(BaseModel):
         default=0,
         description=(
             "Explicit selection mark; 0 selects with the mate type's "
-            "default (1 standard, 16 width tab faces)"
+            "default (1 standard, 16 width tab faces, 8 cam-follower)"
         ),
     )
 
@@ -410,10 +410,10 @@ class MateEntityInput(BaseModel):
 
 
 class AddMateInput(BaseModel):
-    """Input schema for adding a standard mate.
+    """Input schema for adding a standard or mechanical mate.
 
     Attributes:
-        mate_type (str): Standard mate type name.
+        mate_type (str): Standard or mechanical mate type name.
         entities (list[MateEntityInput]): Entities to mate.
         alignment (str): Mate alignment.
         flip (bool): Flip to the other valid position.
@@ -422,12 +422,18 @@ class AddMateInput(BaseModel):
         angle (float): Angle value in degrees.
         angle_limits (list[float]): [min, max] degrees for a limit mate.
         lock_rotation (bool): Lock rotation (concentric mates).
+        gear_ratio (list[float]): [numerator, denominator] for gear mates.
+        pinion_pitch_diameter (float): Pinion pitch diameter in mm.
+        rack_travel_per_revolution (float): Rack travel in mm per rev.
+        distance_per_revolution (float): Screw travel in mm per rev.
     """
 
     mate_type: str = Field(
         description=(
-            "'coincident', 'concentric', 'perpendicular', 'parallel', "
-            "'tangent', 'distance', 'angle', 'width' or 'lock'"
+            "Standard: 'coincident', 'concentric', 'perpendicular', "
+            "'parallel', 'tangent', 'distance', 'angle', 'width' or "
+            "'lock'. Mechanical: 'cam_follower', 'gear', 'rack_pinion' "
+            "or 'screw'"
         )
     )
     entities: list[MateEntityInput] = Field(
@@ -469,6 +475,35 @@ class AddMateInput(BaseModel):
         default=False,
         description="Lock component rotation (concentric mates)",
     )
+    gear_ratio: list[float] = Field(
+        default=[],
+        description=(
+            "[numerator, denominator] ratio for gear mates (e.g. tooth "
+            "counts [24, 12]); empty derives the ratio from the selected "
+            "geometry"
+        ),
+    )
+    pinion_pitch_diameter: float = Field(
+        default=0.0,
+        description=(
+            "Pinion pitch diameter in millimetres (rack_pinion mates); "
+            "0 keeps the SolidWorks default from the selection"
+        ),
+    )
+    rack_travel_per_revolution: float = Field(
+        default=0.0,
+        description=(
+            "Rack travel in millimetres per pinion revolution "
+            "(rack_pinion mates, alternative to pinion_pitch_diameter)"
+        ),
+    )
+    distance_per_revolution: float = Field(
+        default=0.0,
+        description=(
+            "Translation in millimetres per revolution (screw mates); "
+            "0 keeps the SolidWorks default"
+        ),
+    )
 
     def model_post_init(self, __context: Any) -> None:
         """Validate the mate definition.
@@ -493,6 +528,13 @@ class AddMateInput(BaseModel):
             raise ValueError("distance_limits must be [min, max]")
         if self.angle_limits and len(self.angle_limits) != 2:
             raise ValueError("angle_limits must be [min, max]")
+        if self.gear_ratio and len(self.gear_ratio) != 2:
+            raise ValueError("gear_ratio must be [numerator, denominator]")
+        if self.pinion_pitch_diameter and self.rack_travel_per_revolution:
+            raise ValueError(
+                "set either pinion_pitch_diameter or "
+                "rack_travel_per_revolution, not both"
+            )
 
 
 class MateRefInput(BaseModel):
@@ -970,12 +1012,15 @@ async def register_assembly_tools(
 
     @mcp.tool()
     async def add_mate(input_data: AddMateInput) -> dict[str, Any]:
-        """Add a standard mate between entities of the active assembly.
+        """Add a standard or mechanical mate between assembly entities.
 
         Selects the entities (by name or pick point), then creates the mate
         with the requested alignment and value. Distance/angle without
         limits are fixed at the given value; with limits they become limit
         mates. Width mates take the two width faces plus the two tab faces.
+        Gear mates take two cylindrical faces/axes plus a [numerator,
+        denominator] ratio; rack_pinion and screw mates accept their
+        travel-per-revolution values in millimetres.
 
         Args:
             input_data (AddMateInput): Mate type, entities and options.
@@ -986,11 +1031,12 @@ async def register_assembly_tools(
         Example:
             ```python
             result = await add_mate({
-                "mate_type": "concentric",
+                "mate_type": "gear",
                 "entities": [
-                    {"entity_type": "FACE", "point": [0, 0, 10]},
-                    {"entity_type": "AXIS", "name": "Axis1@shaft-1"},
+                    {"entity_type": "FACE", "point": [0, 40, 10]},
+                    {"entity_type": "FACE", "point": [80, 40, 10]},
                 ],
+                "gear_ratio": [24, 12],
             })
             ```
         """
@@ -1015,6 +1061,10 @@ async def register_assembly_tools(
                     angle=input_data.angle,
                     angle_limits=input_data.angle_limits,
                     lock_rotation=input_data.lock_rotation,
+                    gear_ratio=input_data.gear_ratio,
+                    pinion_pitch_diameter=input_data.pinion_pitch_diameter,
+                    rack_travel_per_revolution=input_data.rack_travel_per_revolution,
+                    distance_per_revolution=input_data.distance_per_revolution,
                 )
             )
             if result.is_success:
