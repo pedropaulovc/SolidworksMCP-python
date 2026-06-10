@@ -43,7 +43,10 @@ import pytest
 from solidworks_mcp.adapters.base import (
     CircularPatternParameters,
     CreateAxisParameters,
+    CreateConfigurationParameters,
     CreateCoordinateSystemParameters,
+    CreateEquationCurveParameters,
+    CreateEquationParameters,
     CreatePlaneParameters,
     CreateReferencePointParameters,
     DraftParameters,
@@ -51,6 +54,7 @@ from solidworks_mcp.adapters.base import (
     LinearPatternParameters,
     LoftParameters,
     MirrorFeatureParameters,
+    SetGlobalVariableParameters,
     ShellParameters,
     SweepParameters,
 )
@@ -2626,6 +2630,213 @@ async def test_create_plane_no_model_returns_error(connected_adapter) -> None:
     adapter = connected_adapter
     result = await adapter.create_plane(
         CreatePlaneParameters(mode="offset", base_plane="Front Plane", offset=10.0)
+    )
+    assert result.is_error
+    assert "No active model" in (result.error or "")
+
+
+# ---- Phase 4 parametrics live regression ----
+#
+# Fork issue #5. Equation-driven curves (ISketchManager::CreateEquationSpline2),
+# equation-manager globals/equations (IEquationMgr::Add3 /
+# SetEquationAndConfigurationOption) and configurations
+# (IConfigurationManager::AddConfiguration2 / IModelDoc2::ShowConfiguration2).
+
+
+async def test_create_equation_driven_curve_sine_live(connected_adapter) -> None:
+    """An explicit y = f(x) equation curve builds in an open sketch."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+    try:
+        assert (await adapter.create_sketch("Front")).is_success
+        curve = await adapter.create_equation_driven_curve(
+            CreateEquationCurveParameters(
+                y_expression="0.01*sin(x/0.01)",
+                range_start="0",
+                range_end="0.06",
+            )
+        )
+        assert curve.is_success, f"equation curve failed: {curve.error}"
+        assert curve.data, "equation curve returned no entity id"
+        assert (await adapter.exit_sketch()).is_success
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_equation_driven_curve_parametric_live(
+    connected_adapter,
+) -> None:
+    """A parametric x(t), y(t) curve (involute-style) builds in a sketch."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+    try:
+        assert (await adapter.create_sketch("Front")).is_success
+        curve = await adapter.create_equation_driven_curve(
+            CreateEquationCurveParameters(
+                x_expression="0.024*(cos(t)+t*sin(t))",
+                y_expression="0.024*(sin(t)-t*cos(t))",
+                range_start="0",
+                range_end="0.6",
+            )
+        )
+        assert curve.is_success, f"parametric curve failed: {curve.error}"
+        assert (await adapter.exit_sketch()).is_success
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_global_variable_equation_drives_geometry_live(
+    connected_adapter,
+) -> None:
+    """A global + dimension equation actually drive a rebuilt feature.
+
+    Builds a 25 mm-radius cylinder extruded 10 mm, adds the global
+    ``"Depth" = 30`` and the equation ``"D1@<extrude>" = "Depth"``
+    (equations evaluate in the document's units — mm on the default
+    template), reactivates the configuration (which rebuilds) and asserts
+    the volume tripled. This is the end-to-end proof that Add3 equations
+    drive geometry rather than just appearing in the equation list.
+    """
+    adapter = connected_adapter
+
+    await _build_cylinder(adapter, radius=25.0, depth=10.0)
+    try:
+        base = await adapter.get_mass_properties()
+        assert base.is_success, f"mass properties failed: {base.error}"
+        base_volume = base.data.volume
+
+        global_result = await adapter.set_global_variable(
+            SetGlobalVariableParameters(name="Depth", expression="30")
+        )
+        assert global_result.is_success, (
+            f"set_global_variable failed: {global_result.error}"
+        )
+        assert global_result.data["updated"] is False
+
+        # The extrude feature name comes from the feature tree (English UI:
+        # "Boss-Extrude1"); D1 is its depth dimension. Globals evaluate in
+        # the document's equation units (mm on the default template).
+        extrude_name = _feature_name_by_type(adapter, "Extrusion") or "Boss-Extrude1"
+        equation_result = await adapter.create_equation(
+            CreateEquationParameters(
+                equation=f'"D1@{extrude_name}" = "Depth"'
+            )
+        )
+        assert equation_result.is_success, (
+            f"create_equation failed: {equation_result.error}"
+        )
+
+        configs = await adapter.list_configurations()
+        assert configs.is_success and configs.data, (
+            f"list_configurations failed: {configs.error}"
+        )
+        rebuilt = await adapter.set_active_configuration(configs.data[0])
+        assert rebuilt.is_success, f"reactivate/rebuild failed: {rebuilt.error}"
+
+        grown = await adapter.get_mass_properties()
+        assert grown.is_success, f"mass properties failed: {grown.error}"
+        assert grown.data.volume > base_volume * 2.5, (
+            f"equation did not drive the depth: volume went {base_volume:.1f} "
+            f"-> {grown.data.volume:.1f} (expected ~3x)"
+        )
+
+        # Upsert path: setting the same global again must update in place.
+        update_result = await adapter.set_global_variable(
+            SetGlobalVariableParameters(name="Depth", expression="20")
+        )
+        assert update_result.is_success, (
+            f"global update failed: {update_result.error}"
+        )
+        assert update_result.data["updated"] is True
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_twenty_configurations_monotonic_volumes_live(
+    connected_adapter,
+) -> None:
+    """Issue-#5 acceptance: 20 configurations with per-config global values
+    rebuild to 20 monotonically increasing volumes.
+
+    A 25 mm-radius cylinder's extrude depth is driven by the global
+    ``"Depth"``; configurations T1..T20 each scope ``Depth`` to ``10*i``.
+    Looping set_active_configuration + get_mass_properties must return a
+    strictly increasing volume sequence — the same harness the M4 cone-gear
+    part (ToothCount global, 20 configurations) will use.
+    """
+    adapter = connected_adapter
+
+    await _build_cylinder(adapter, radius=25.0, depth=10.0)
+    try:
+        assert (
+            await adapter.set_global_variable(
+                SetGlobalVariableParameters(name="Depth", expression="10")
+            )
+        ).is_success
+        extrude_name = _feature_name_by_type(adapter, "Extrusion") or "Boss-Extrude1"
+        assert (
+            await adapter.create_equation(
+                CreateEquationParameters(equation=f'"D1@{extrude_name}" = "Depth"')
+            )
+        ).is_success
+
+        for i in range(1, 21):
+            config = await adapter.create_configuration(
+                CreateConfigurationParameters(name=f"T{i}")
+            )
+            assert config.is_success, (
+                f"create_configuration T{i} failed: {config.error}"
+            )
+            scoped = await adapter.set_global_variable(
+                SetGlobalVariableParameters(
+                    name="Depth", expression=str(10 * i), configuration=f"T{i}"
+                )
+            )
+            assert scoped.is_success, (
+                f"per-config global T{i} failed: {scoped.error}"
+            )
+
+        volumes: list[float] = []
+        for i in range(1, 21):
+            active = await adapter.set_active_configuration(f"T{i}")
+            assert active.is_success, f"activate T{i} failed: {active.error}"
+            mass = await adapter.get_mass_properties()
+            assert mass.is_success, f"mass properties T{i} failed: {mass.error}"
+            volumes.append(mass.data.volume)
+
+        increasing = all(b > a for a, b in zip(volumes, volumes[1:], strict=False))
+        assert increasing, f"volumes not strictly increasing: {volumes}"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_set_active_configuration_missing_errors_live(
+    connected_adapter,
+) -> None:
+    """Activating a configuration that does not exist errors clearly."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+    try:
+        missing = await adapter.set_active_configuration("NoSuchConfig")
+        assert missing.is_error
+        assert "Failed to activate configuration" in (missing.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_set_global_variable_no_model_returns_error(
+    connected_adapter,
+) -> None:
+    """set_global_variable without an open model errors without touching SW."""
+    adapter = connected_adapter
+    result = await adapter.set_global_variable(
+        SetGlobalVariableParameters(name="X", expression="1")
     )
     assert result.is_error
     assert "No active model" in (result.error or "")
