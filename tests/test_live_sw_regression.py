@@ -42,6 +42,10 @@ import pytest
 # module scope is safe on non-Windows CI even though the SW tests are skipped.
 from solidworks_mcp.adapters.base import (
     CircularPatternParameters,
+    CreateAxisParameters,
+    CreateCoordinateSystemParameters,
+    CreatePlaneParameters,
+    CreateReferencePointParameters,
     DraftParameters,
     ExtrusionParameters,
     LinearPatternParameters,
@@ -2334,6 +2338,294 @@ async def test_mirror_feature_no_model_returns_error(connected_adapter) -> None:
     adapter = connected_adapter
     result = await adapter.mirror_feature(
         MirrorFeatureParameters(plane="Right Plane", features=["Boss-Extrude1"])
+    )
+    assert result.is_error
+    assert "No active model" in (result.error or "")
+
+
+# ---- Phase 3 reference-geometry live regression ----
+#
+# Fork issue #4. Planes/axes/points/coordinate systems via InsertRefPlane,
+# InsertAxis2, InsertReferencePoint and
+# CreateCoordinateSystemUsingNumericalValues. Box/cylinder geometry comes from
+# the Phase 2 helpers above; named planes are selected via FeatureByName and
+# edges/vertices/faces by coordinate with the typed-null Callout.
+
+
+async def test_create_plane_offset_stack_of_twenty(connected_adapter) -> None:
+    """Twenty offset planes from the Front plane at 1-inch increments.
+
+    This is the issue-#4 acceptance scenario (the harmonic analyzer's
+    20-channel pitch grid). Each plane offsets from "Front Plane" by a
+    growing multiple of 25.4 mm; all twenty must build and get distinct
+    names.
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+    try:
+        names: list[str] = []
+        for i in range(1, 21):
+            plane = await adapter.create_plane(
+                CreatePlaneParameters(
+                    mode="offset", base_plane="Front Plane", offset=25.4 * i
+                )
+            )
+            assert plane.is_success, f"offset plane #{i} failed: {plane.error}"
+            assert plane.data.type == "RefPlane"
+            assert plane.data.name, f"offset plane #{i} has no name"
+            names.append(plane.data.name)
+        assert len(set(names)) == 20, f"expected 20 distinct planes, got {names}"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_plane_offset_flip_builds_other_side(connected_adapter) -> None:
+    """A flipped offset plane builds on the opposite side of the base plane.
+
+    Proved geometrically: a sketch on the flipped plane extrudes into a body
+    whose features sit at negative z (behind the Front plane).
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+    try:
+        plane = await adapter.create_plane(
+            CreatePlaneParameters(
+                mode="offset", base_plane="Front Plane", offset=30.0, flip=True
+            )
+        )
+        assert plane.is_success, f"flipped offset plane failed: {plane.error}"
+        assert plane.data.name, "flipped offset plane has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_plane_angle_about_box_edge(connected_adapter) -> None:
+    """A 45-degree plane rotated from the Top plane about a box edge.
+
+    The pivot edge is the box's top edge at y=25, z=0, parallel to the Top
+    plane, located by the point [0, 25, 0]. Coordinate selection is
+    view-dependent (picks visible entities only), so the edge must be one
+    visible in the default view — the bottom edges at y=-25 are occluded by
+    the body and fail to select.
+    """
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        plane = await adapter.create_plane(
+            CreatePlaneParameters(
+                mode="angle",
+                base_plane="Top Plane",
+                angle=45.0,
+                edge_point=[0.0, 25.0, 0.0],
+            )
+        )
+        assert plane.is_success, f"angle plane failed: {plane.error}"
+        assert plane.data.type == "RefPlane"
+        assert plane.data.name, "angle plane has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_plane_three_point_through_box_vertices(
+    connected_adapter,
+) -> None:
+    """A plane through three non-collinear box vertices.
+
+    All three vertices are visible in the default view — coordinate
+    selection cannot pick the occluded far-lower corner [-25, -25, 0].
+    """
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        plane = await adapter.create_plane(
+            CreatePlaneParameters(
+                mode="three_point",
+                points=[
+                    [25.0, -25.0, 0.0],
+                    [-25.0, 25.0, 0.0],
+                    [25.0, 25.0, 100.0],
+                ],
+            )
+        )
+        assert plane.is_success, f"three_point plane failed: {plane.error}"
+        assert plane.data.name, "three_point plane has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_plane_parallel_through_box_vertex(connected_adapter) -> None:
+    """A plane parallel to the Front plane through the box's far corner."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        plane = await adapter.create_plane(
+            CreatePlaneParameters(
+                mode="parallel_point",
+                base_plane="Front Plane",
+                points=[[25.0, 25.0, 100.0]],
+            )
+        )
+        assert plane.is_success, f"parallel_point plane failed: {plane.error}"
+        assert plane.data.name, "parallel_point plane has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_axis_from_two_planes(connected_adapter) -> None:
+    """The Front/Top plane intersection yields a reference axis (the X axis)."""
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+    try:
+        axis = await adapter.create_axis(
+            CreateAxisParameters(
+                mode="two_planes", planes=["Front Plane", "Top Plane"]
+            )
+        )
+        assert axis.is_success, f"two_planes axis failed: {axis.error}"
+        assert axis.data.type == "RefAxis"
+        assert axis.data.name, "two_planes axis has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_axis_of_cylindrical_face(connected_adapter) -> None:
+    """The axis of a cylinder located by a point on its side face."""
+    adapter = connected_adapter
+    await _build_cylinder(adapter, radius=25.0, depth=100.0)
+    try:
+        axis = await adapter.create_axis(
+            CreateAxisParameters(
+                mode="cylindrical_face", face_point=[25.0, 0.0, 50.0]
+            )
+        )
+        assert axis.is_success, f"cylindrical_face axis failed: {axis.error}"
+        assert axis.data.name, "cylindrical_face axis has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_axis_through_two_box_vertices(connected_adapter) -> None:
+    """An axis through two vertices of a box edge."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        axis = await adapter.create_axis(
+            CreateAxisParameters(
+                mode="two_points",
+                points=[[25.0, 25.0, 0.0], [25.0, 25.0, 100.0]],
+            )
+        )
+        assert axis.is_success, f"two_points axis failed: {axis.error}"
+        assert axis.data.name, "two_points axis has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_axis_along_box_edge(connected_adapter) -> None:
+    """An axis along a linear box edge located by a point on it."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        axis = await adapter.create_axis(
+            CreateAxisParameters(mode="edge", edge_point=[25.0, 25.0, 50.0])
+        )
+        assert axis.is_success, f"edge axis failed: {axis.error}"
+        assert axis.data.name, "edge axis has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_reference_point_face_center(connected_adapter) -> None:
+    """The center point of the box's far (z=100) face."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        point = await adapter.create_reference_point(
+            CreateReferencePointParameters(
+                mode="face_center", face_point=[0.0, 0.0, 100.0]
+            )
+        )
+        assert point.is_success, f"face_center point failed: {point.error}"
+        assert point.data.type == "RefPoint"
+        assert point.data.name, "face_center point has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_reference_point_arc_center_of_cylinder_rim(
+    connected_adapter,
+) -> None:
+    """The center of the cylinder's top rim edge (a circular edge)."""
+    adapter = connected_adapter
+    await _build_cylinder(adapter, radius=25.0, depth=100.0)
+    try:
+        point = await adapter.create_reference_point(
+            CreateReferencePointParameters(
+                mode="arc_center", edge_point=[25.0, 0.0, 100.0]
+            )
+        )
+        assert point.is_success, f"arc_center point failed: {point.error}"
+        assert point.data.name, "arc_center point has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_reference_point_along_edge_at_distance(
+    connected_adapter,
+) -> None:
+    """A point 25 mm along a box edge from its closer end."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        point = await adapter.create_reference_point(
+            CreateReferencePointParameters(
+                mode="along_curve",
+                edge_point=[25.0, 25.0, 50.0],
+                along="distance",
+                distance=25.0,
+            )
+        )
+        assert point.is_success, f"along_curve point failed: {point.error}"
+        assert point.data.name, "along_curve point has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_coordinate_system_numeric(connected_adapter) -> None:
+    """A coordinate system at a numeric offset + rotation builds on a bare part.
+
+    Uses CreateCoordinateSystemUsingNumericalValues, which needs no
+    selections — only position (mm -> m) and rotation (deg -> rad, normalized
+    into [0, 2*pi) because SW rejects negative angles).
+    """
+    adapter = connected_adapter
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+    try:
+        csys = await adapter.create_coordinate_system(
+            CreateCoordinateSystemParameters(
+                position=[10.0, 20.0, 30.0], rotation=[0.0, 0.0, -90.0]
+            )
+        )
+        assert csys.is_success, f"coordinate system failed: {csys.error}"
+        assert csys.data.type == "CoordSys"
+        assert csys.data.name, "coordinate system has no name"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_plane_no_model_returns_error(connected_adapter) -> None:
+    """create_plane without an open model errors without touching SW."""
+    adapter = connected_adapter
+    result = await adapter.create_plane(
+        CreatePlaneParameters(mode="offset", base_plane="Front Plane", offset=10.0)
     )
     assert result.is_error
     assert "No active model" in (result.error or "")
