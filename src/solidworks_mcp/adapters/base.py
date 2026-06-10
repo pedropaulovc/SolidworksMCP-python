@@ -600,6 +600,71 @@ class MeasureParameters(BaseModel):
     arc_option: str = "center"
 
 
+class ApplyMaterialParameters(BaseModel):
+    """Parameters for assigning a material to a part.
+
+    Attributes:
+        material (str): Material name exactly as it appears in the database,
+            e.g. ``"Plain Carbon Steel"``, ``"Brass"``, ``"Gray Cast Iron"``.
+        database (str): Material database; empty for the default SolidWorks
+            materials database, otherwise a ``.sldmat`` file name or path.
+        configuration (str): Configuration to assign the material in; empty
+            for the active configuration.
+    """
+
+    material: str
+    database: str = ""
+    configuration: str = ""
+
+
+class AddThreadParameters(BaseModel):
+    """Parameters for a cosmetic thread on a circular edge.
+
+    Attributes:
+        edge_point (list[float]): ``[x, y, z]`` in millimetres on the
+            circular edge of the cylindrical face to thread.
+        standard (str): Thread standard — one of ``"none"``, ``"ansi_inch"``,
+            ``"ansi_metric"``, ``"iso"``, ``"din"``, ``"jis"``, ``"bsi"``,
+            ``"helicoil_inch"``, ``"helicoil_metric"``.
+        standard_type (str): Thread type within the standard, e.g.
+            ``"Machine Threads"``.
+        size (str): Thread size designation, e.g. ``"1/4-20"`` or ``"M6x1.0"``.
+        diameter (float): Thread (minor/drill) diameter in millimetres.
+        end_type (str): ``"blind"``, ``"blind_upto_next"``, ``"through"`` or
+            ``"blind_2dia"``.
+        depth (float): Thread depth in millimetres (blind end types only).
+        note (str): Callout text shown in drawings.
+    """
+
+    edge_point: list[float]
+    standard: str = "ansi_inch"
+    standard_type: str = ""
+    size: str = ""
+    diameter: float = 0.0
+    end_type: str = "blind"
+    depth: float = 0.0
+    note: str = ""
+
+
+class CreateBomParameters(BaseModel):
+    """Parameters for inserting a BOM table into the active document.
+
+    Attributes:
+        bom_type (str): ``"parts_only"``, ``"top_level"``, ``"indented"`` or
+            ``"flattened"``.
+        configuration (str): Configuration the BOM reflects; empty for the
+            active configuration (SolidWorks has no implicit default).
+        template (str): Path to a ``.sldbomtbt`` BOM template; empty to use
+            the installed ``bom-standard`` template.
+        file_path (str): CSV output path (``export_bom_csv`` only).
+    """
+
+    bom_type: str = "parts_only"
+    configuration: str = ""
+    template: str = ""
+    file_path: str = ""
+
+
 class MassProperties(BaseModel):
     """Mass properties information.
 
@@ -1512,6 +1577,70 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="measure is not implemented by this adapter",
+        )
+
+    async def apply_material(
+        self, params: ApplyMaterialParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Assign a material to the active part.
+
+        Args:
+            params (ApplyMaterialParameters): Material, database, scope.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Applied material details or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="apply_material is not implemented by this adapter",
+        )
+
+    async def add_thread(
+        self, params: AddThreadParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Add a cosmetic thread to a circular edge.
+
+        Args:
+            params (AddThreadParameters): Edge location and thread spec.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Thread feature details or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="add_thread is not implemented by this adapter",
+        )
+
+    async def create_bom(
+        self, params: CreateBomParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Insert a BOM table and return its contents.
+
+        Args:
+            params (CreateBomParameters): BOM type, configuration, template.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Table contents or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="create_bom is not implemented by this adapter",
+        )
+
+    async def export_bom_csv(
+        self, params: CreateBomParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Insert a BOM table and write its contents to a CSV file.
+
+        Args:
+            params (CreateBomParameters): BOM options plus ``file_path``.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Export summary or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="export_bom_csv is not implemented by this adapter",
         )
 
     @abstractmethod

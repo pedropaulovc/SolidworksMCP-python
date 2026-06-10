@@ -443,6 +443,7 @@ async def _run_structured_agent(
         "  create_plane, create_axis, create_reference_point, create_coordinate_system,\n"
         "  create_equation_driven_curve, set_global_variable, create_equation,\n"
         "  create_configuration, set_active_configuration,\n"
+        "  apply_material, add_thread, create_bom, export_bom_csv,\n"
         "  generate_vba_code, execute_macro\n"
         "Prefer tools in the order listed above (inspect → classify → plan → execute → verify).\n"
         "Do not invent tools not in this list."

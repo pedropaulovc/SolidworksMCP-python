@@ -573,6 +573,12 @@ async def list_capabilities() -> dict[str, list[str]]:
             "get_material_properties",
             "measure",
         ],
+        "manufacturing": [
+            "apply_material",
+            "add_thread",
+            "create_bom",
+            "export_bom_csv",
+        ],
         "export": [
             "export_step",
             "export_iges",
