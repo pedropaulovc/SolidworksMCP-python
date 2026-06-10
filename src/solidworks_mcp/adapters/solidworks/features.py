@@ -76,14 +76,10 @@ class SolidWorksFeaturesMixin:
     ) -> AdapterResult[SolidWorksFeature]:
         return _linear_pattern_impl(self, params)
 
-    async def shell(
-        self, params: ShellParameters
-    ) -> AdapterResult[SolidWorksFeature]:
+    async def shell(self, params: ShellParameters) -> AdapterResult[SolidWorksFeature]:
         return _shell_impl(self, params)
 
-    async def draft(
-        self, params: DraftParameters
-    ) -> AdapterResult[SolidWorksFeature]:
+    async def draft(self, params: DraftParameters) -> AdapterResult[SolidWorksFeature]:
         return _draft_impl(self, params)
 
 
@@ -492,9 +488,7 @@ def _select_named_feature(
     )
     if not feature:
         return False
-    return bool(
-        adapter._attempt(lambda: feature.Select2(append, mark), default=False)
-    )
+    return bool(adapter._attempt(lambda: feature.Select2(append, mark), default=False))
 
 
 def _select_by_point(
@@ -987,16 +981,19 @@ def _create_cut_extrude_impl(
         feature_manager = adapter.currentModel.FeatureManager
 
         end_condition = (normalized.end_condition or "Blind").strip().lower()
-        # Mid-plane cut: T1 carries the end condition; depth stays the TOTAL
-        # depth (SolidWorks splits it across both sides of the sketch plane).
-        t1 = (
-            adapter.constants["swEndCondMidPlane"]
-            if normalized.both_directions
-            else adapter.constants["swEndCondBlind"]
-        )
         depth_m = normalized.depth / 1000.0
+        # T1 carries the end condition. ThroughAll wins over both_directions
+        # (combined as ThroughAllBoth where the install defines it); a blind
+        # cut with both_directions becomes mid-plane, where depth stays the
+        # TOTAL depth (SolidWorks splits it across both sides).
         if end_condition in {"throughall", "through all", "through_all"}:
             t1 = adapter.constants["swEndCondThroughAll"]
+            if normalized.both_directions:
+                t1 = adapter.constants.get("swEndCondThroughAllBoth", t1)
+        elif normalized.both_directions:
+            t1 = adapter.constants["swEndCondMidPlane"]
+        else:
+            t1 = adapter.constants["swEndCondBlind"]
 
         t0 = adapter.constants.get("swStartSketchPlane", 0)
         adapter._attempt(
@@ -1853,9 +1850,7 @@ def _draft_impl(
             lambda: adapter.currentModel.ClearSelection2(True), default=None
         )
         if not _select_named_feature(adapter, params.neutral_plane, 1, True):
-            raise Exception(
-                f"Failed to select neutral plane: {params.neutral_plane}"
-            )
+            raise Exception(f"Failed to select neutral plane: {params.neutral_plane}")
         for point in params.face_points:
             if not _select_by_point(adapter, "FACE", point, 2, True):
                 raise Exception(f"Failed to select face at point {point} (mm)")

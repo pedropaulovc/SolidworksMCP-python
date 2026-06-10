@@ -1810,10 +1810,14 @@ class PyWin32Adapter(
             The activated document COM object, or ``target_doc`` unchanged
             when activation is not possible (e.g. identity unknown).
         """
+        import ntpath
+
         from .com_variant import byref_long
 
         path, title = self._document_identity(target_doc)
-        name = os.path.basename(path) if path else title
+        # SolidWorks paths are always Windows-style; ntpath keeps the
+        # basename split correct when the mock suite runs on Linux CI.
+        name = ntpath.basename(path) if path else title
         if not name:
             return target_doc
         activated = self._attempt(
