@@ -62,6 +62,20 @@ gh api "repos/$REPO" -X PATCH --silent \
   -f merge_commit_message=PR_BODY \
   -F delete_branch_on_merge=true
 
+# ── Disable upstream's GitHub Pages deploy on the fork ──────────────────────
+# upstream's `deploy-docs.yml` triggers on push/PR to `main`. The fork has
+# no GitHub Pages site configured, so its `Setup Pages`
+# (actions/configure-pages) step fails with "Get Pages site failed ...
+# HttpError: Not Found" — a perpetual red X on every `main` sync push and on
+# any PR that targets `main`. Docs deployment is upstream's concern, not the
+# fork's (pedro-ci covers fork testing), so disable the workflow here rather
+# than editing the upstream-tracked `deploy-docs.yml` (which must mirror
+# upstream exactly). Idempotent: disabling an already-disabled workflow is a
+# no-op. Referenced by file name so it survives a fresh clone (no hardcoded id).
+echo "  Disabling upstream deploy-docs.yml workflow on the fork ..."
+gh api "repos/$REPO/actions/workflows/deploy-docs.yml/disable" -X PUT --silent 2>/dev/null \
+  || echo "    (deploy-docs.yml not present or already disabled — skipping)"
+
 # ── Branch ruleset: Protect main ───────────────────────────────────────────
 # Adaptations vs typescript-project:
 #  - No required_status_checks (upstream's ci.yml is conda-based and we
