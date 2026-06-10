@@ -20,6 +20,9 @@ tool that the toy geometry can carry:
   seed about an assembly-level reference axis (the 20-cone-gear acceptance
   shape), seated on a fixed base plate the shafts also butt against, on a
   ring wide enough that the instances clear each other.
+* The saved state is fully defined: the gears' remaining spin DOF is
+  grounded with 0-degree angle mates and every component must report
+  fixed or fully constrained (``IComponent2::GetConstrainedStatus``).
 
 Cam-follower, rack-pinion and screw mates share the same AddMate5 +
 ModifyDefinition plumbing and are covered by unit tests; their live
@@ -58,6 +61,9 @@ from solidworks_mcp.adapters.base import (  # noqa: E402
     SuppressMateParameters,
 )
 from solidworks_mcp.adapters.pywin32_adapter import PyWin32Adapter  # noqa: E402
+from solidworks_mcp.adapters.solidworks.features import (  # noqa: E402
+    _flag_feature_methods,
+)
 
 SHAFT_RADIUS = 5.0
 SHAFT_LENGTH = 40.0
@@ -109,6 +115,39 @@ def _component_z_rotation_deg(adapter, name: str) -> float:
     array = list(_read_member(_read_member(component, "Transform2"), "ArrayData"))
     # Row 0 is the image of the component x-axis in assembly space.
     return math.degrees(math.atan2(float(array[1]), float(array[0])))
+
+
+# swConstrainedStatus_e
+_UNDER_CONSTRAINED = 2
+_FULLY_CONSTRAINED = 3
+
+
+def _assert_components_fully_defined(adapter) -> None:
+    """Raise when any top-level component is not fixed or fully defined.
+
+    ``IComponent2::GetConstrainedStatus`` returns swConstrainedStatus_e:
+    2 = under, 3 = fully, 4 = over constrained.
+    """
+    asm = adapter.currentModel
+    components = adapter._attempt(lambda: asm.GetComponents(True), default=None) or []
+    problems = []
+    for component in components:
+        # GetComponents returns unflagged dispatches: without the
+        # IComponent2 method flagging, GetConstrainedStatus resolves as a
+        # property and the call raises.
+        _flag_feature_methods(component, "IComponent2")
+        comp_name = str(_read_member(component, "Name2"))
+        if bool(_read_member(component, "IsFixed")):
+            continue
+        status = int(
+            adapter._attempt(lambda c=component: c.GetConstrainedStatus(), default=-1)
+        )
+        if status != _FULLY_CONSTRAINED:
+            kind = "under" if status == _UNDER_CONSTRAINED else f"status={status}"
+            problems.append(f"{comp_name} ({kind})")
+    print(f"  checked {len(components)} components for free DOF")
+    if problems:
+        raise RuntimeError("components not fully defined: " + ", ".join(problems))
 
 
 async def _build_disc(adapter, radius: float, thickness: float, path: Path) -> None:
@@ -410,6 +449,14 @@ async def build_demo_assembly(out_dir: Path) -> dict[str, str]:
             )
         )
         _check("insert_component pattern ring seed", ring_seed)
+        # The seed is a jig post, not a mated mechanism part — fix it so
+        # it (and the pattern it seeds) leaves no free degrees of freedom.
+        _check(
+            "fix_component pattern ring seed",
+            await adapter.fix_component(
+                ComponentRefParameters(name=ring_seed.data["name"])
+            ),
+        )
         pattern = await adapter.pattern_components_circular(
             ComponentCircularPatternParameters(
                 components=[ring_seed.data["name"]], count=20, axis_name="Axis1"
@@ -429,6 +476,37 @@ async def build_demo_assembly(out_dir: Path) -> dict[str, str]:
         if len(listed.data) != 4:
             raise RuntimeError(f"expected 4 mates after delete: {listed.data}")
         print("  OK  delete_mate removed the gear mate")
+
+        # ------------------------------------------------------------------
+        # Fully define the saved state. The gear mate was exercised and
+        # deleted above, which leaves both gears with a free spin DOF —
+        # ground each with a 0-degree angle mate to its shaft instead of
+        # re-adding the gear mate, so nothing is redundant.
+        # ------------------------------------------------------------------
+        print("Assembly: fully define final state")
+        for gear, shaft in (
+            (big_name, "mate_demo_shaft-1"),
+            (small_name, shaft2_name),
+        ):
+            _check(
+                f"add_mate angle 0 deg {gear} <-> {shaft} (right planes)",
+                await adapter.add_mate(
+                    AddMateParameters(
+                        mate_type="angle",
+                        entities=[
+                            MateEntityRef(
+                                entity_type="PLANE", name=f"Right Plane@{gear}"
+                            ),
+                            MateEntityRef(
+                                entity_type="PLANE", name=f"Right Plane@{shaft}"
+                            ),
+                        ],
+                        angle=0.0,
+                    )
+                ),
+            )
+        _assert_components_fully_defined(adapter)
+        print("  OK  every component is fixed or fully defined")
 
         asm_path = (out_dir / "mate_demo_assembly.SLDASM").resolve()
         _check(f"save_file -> {asm_path.name}", await adapter.save_file(str(asm_path)))
