@@ -5,6 +5,7 @@ SolidWorks automation capabilities on Windows platforms.
 """
 
 import asyncio
+import contextlib
 import os
 import platform
 import time
@@ -62,6 +63,21 @@ def _dynamic_dispatch(arg: Any) -> Any:
 from loguru import logger  # noqa: E402
 
 T = TypeVar("T")
+
+
+def _load_pillow_image() -> Any:
+    """Return ``PIL.Image`` when Pillow is installed, else ``None``.
+
+    Pillow ships in the optional ``vision`` extra; screenshot capture uses it
+    to convert ``SaveBMP`` output to the requested format. Module-level so
+    tests can monkeypatch the import seam.
+    """
+    try:
+        from PIL import Image
+
+        return Image
+    except ImportError:
+        return None
 
 
 def _parse_vb_module_name(macro_path: str) -> str:
@@ -1778,37 +1794,45 @@ class PyWin32Adapter(
                     exc,
                 )
 
-    def _save_screenshot_with_modelview(
-        self, model_view: Any, resolved_path: str, width: int, height: int
-    ) -> bool:
-        """Try IModelView2.SaveBitmapWithVariableSize for screenshot.
+    def _activate_target_doc(self, target_doc: Any) -> Any:
+        """Bring ``target_doc``'s window to the foreground before capture.
+
+        Both viewport capture paths (``SaveBMP`` and the ``SaveAs3`` image
+        fallback) render the *active* window. With several documents open,
+        exporting a background document silently yields the foreground
+        document's pixels — including whatever stale view its hidden window
+        last rendered.
 
         Args:
-            model_view: Active model view object
-            resolved_path: Full path where to save image
-            width: Image width in pixels
-            height: Image height in pixels
+            target_doc: SolidWorks model document to activate.
 
         Returns:
-            True if file was created, False otherwise.
+            The activated document COM object, or ``target_doc`` unchanged
+            when activation is not possible (e.g. identity unknown).
         """
-        try:
-            success = model_view.SaveBitmapWithVariableSize(
-                resolved_path, width, height
-            )
-            return bool(success) and os.path.exists(resolved_path)
-        except Exception as exc:
-            logger.debug(
-                "[pywin32.export_image] IModelView.SaveBitmapWithVariableSize failed ({}), "
-                "trying IModelDoc2 path",
-                exc,
-            )
-            return False
+        from .com_variant import byref_long
 
-    def _save_screenshot_with_targetdoc(
+        path, title = self._document_identity(target_doc)
+        name = os.path.basename(path) if path else title
+        if not name:
+            return target_doc
+        activated = self._attempt(
+            # swRebuildOnActivation_e.swDontRebuildActiveDoc = 1
+            lambda: self.swApp.ActivateDoc3(name, False, 1, byref_long()),
+            default=None,
+        )
+        return activated if activated is not None else target_doc
+
+    def _save_screenshot_with_savebmp(
         self, target_doc: Any, resolved_path: str, width: int, height: int
     ) -> bool:
-        """Try IModelDoc2.SaveBitmapWithVariableSize for screenshot.
+        """Capture the current view via ``IModelDoc2::SaveBMP``.
+
+        ``SaveBMP`` is the only screenshot API that honours an explicit pixel
+        size, but it always writes BMP. Non-BMP targets are captured to a
+        temporary ``.bmp`` and converted with Pillow (optional ``vision``
+        extra); without Pillow this returns ``False`` so the caller falls
+        back to ``SaveAs3`` (window-sized render).
 
         Args:
             target_doc: SolidWorks model document
@@ -1819,18 +1843,45 @@ class PyWin32Adapter(
         Returns:
             True if file was created, False otherwise.
         """
-        try:
-            success = target_doc.SaveBitmapWithVariableSize(
-                resolved_path, width, height
+        ext = os.path.splitext(resolved_path)[1].lower()
+        if ext == ".bmp":
+            try:
+                success = target_doc.SaveBMP(resolved_path, width, height)
+                return bool(success) and os.path.exists(resolved_path)
+            except Exception as exc:
+                logger.debug(
+                    "[pywin32.export_image] SaveBMP failed ({}), "
+                    "trying SaveAs3 image export",
+                    exc,
+                )
+                return False
+
+        image_module = _load_pillow_image()
+        if image_module is None:
+            logger.debug(
+                "[pywin32.export_image] Pillow unavailable; falling back to "
+                "SaveAs3 (window-sized render, requested dimensions ignored)"
             )
-            return bool(success) and os.path.exists(resolved_path)
+            return False
+
+        tmp_path = resolved_path + ".capture.bmp"
+        try:
+            success = target_doc.SaveBMP(tmp_path, width, height)
+            if not bool(success) or not os.path.exists(tmp_path):
+                return False
+            with image_module.open(tmp_path) as img:
+                img.save(resolved_path)
+            return os.path.exists(resolved_path)
         except Exception as exc:
             logger.debug(
-                "[pywin32.export_image] IModelDoc2.SaveBitmapWithVariableSize failed ({}), "
+                "[pywin32.export_image] SaveBMP capture/convert failed ({}), "
                 "trying SaveAs3 image export",
                 exc,
             )
             return False
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(tmp_path)
 
     def _save_screenshot_with_saveas3(
         self, target_doc: Any, resolved_path: str
@@ -1940,7 +1991,10 @@ class PyWin32Adapter(
             resolved = _os.path.abspath(file_path)
             _os.makedirs(_os.path.dirname(resolved), exist_ok=True)
 
-            target_doc = self._resolve_export_target_doc()
+            # Capture renders the ACTIVE window's viewport, so the target doc
+            # must be in the foreground or another open document's (stale)
+            # view gets exported instead.
+            target_doc = self._activate_target_doc(self._resolve_export_target_doc())
 
             # Ensure SolidWorks window is focused so the viewport is rendered.
             # Required for both view changes and bitmap capture.
@@ -1954,14 +2008,10 @@ class PyWin32Adapter(
             # Zoom to fit so the model fills the viewport before capture
             self._zoom_to_fit(target_doc)
 
-            # Try screenshot methods in order: ModelView → TargetDoc → SaveAs3
-            saved = self._save_screenshot_with_modelview(
+            # Try screenshot methods in order: SaveBMP (sized) → SaveAs3
+            saved = self._save_screenshot_with_savebmp(
                 target_doc, resolved, width, height
             )
-            if not saved:
-                saved = self._save_screenshot_with_targetdoc(
-                    target_doc, resolved, width, height
-                )
             if not saved:
                 self._save_screenshot_with_saveas3(target_doc, resolved)
                 saved = _os.path.exists(resolved)

@@ -6,6 +6,7 @@ mock adapter, circuit breaker, and connection pooling functionality.
 """
 
 import math
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -1676,87 +1677,122 @@ class TestPyWin32AdapterBranches:
         assert target_doc.ViewZoomToFit2.called
         assert active_view.ZoomToFit.called
 
-    @pytest.mark.asyncio
-    async def test_save_screenshot_with_modelview_success(
+    def test_save_screenshot_with_savebmp_bmp_direct(
         self, monkeypatch, tmp_path
     ) -> None:
-        """_save_screenshot_with_modelview should return True when file created."""
+        """A .bmp target should be written by SaveBMP directly, no conversion."""
         adapter = self._build_adapter(monkeypatch)
-        test_file = tmp_path / "test.png"
-        test_file.touch()
-        model_view = SimpleNamespace(SaveBitmapWithVariableSize=Mock(return_value=True))
-        result = adapter._save_screenshot_with_modelview(
-            model_view, str(test_file), 1280, 720
-        )
-        assert result is True
-        model_view.SaveBitmapWithVariableSize.assert_called_once_with(
-            str(test_file), 1280, 720
-        )
+        test_file = tmp_path / "test.bmp"
 
-    @pytest.mark.asyncio
-    async def test_save_screenshot_with_modelview_file_not_exists(
-        self, monkeypatch
-    ) -> None:
-        """_save_screenshot_with_modelview should return False if file doesn't exist."""
-        adapter = self._build_adapter(monkeypatch)
-        model_view = SimpleNamespace(SaveBitmapWithVariableSize=Mock(return_value=True))
-        result = adapter._save_screenshot_with_modelview(
-            model_view, "/nonexistent/file.png", 1280, 720
-        )
-        assert result is False
+        def _save_bmp(path, *_args):
+            Path(path).write_bytes(b"BM")
+            return True
 
-    @pytest.mark.asyncio
-    async def test_save_screenshot_with_modelview_exception(self, monkeypatch) -> None:
-        """_save_screenshot_with_modelview should return False on exception."""
-        adapter = self._build_adapter(monkeypatch)
-        model_view = SimpleNamespace(
-            SaveBitmapWithVariableSize=Mock(side_effect=RuntimeError("COM error"))
-        )
-        result = adapter._save_screenshot_with_modelview(
-            model_view, "/path/file.png", 1280, 720
-        )
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_save_screenshot_with_targetdoc_success(
-        self, monkeypatch, tmp_path
-    ) -> None:
-        """_save_screenshot_with_targetdoc should return True when file created."""
-        adapter = self._build_adapter(monkeypatch)
-        test_file = tmp_path / "test.png"
-        test_file.touch()
-        target_doc = SimpleNamespace(SaveBitmapWithVariableSize=Mock(return_value=True))
-        result = adapter._save_screenshot_with_targetdoc(
+        target_doc = SimpleNamespace(SaveBMP=Mock(side_effect=_save_bmp))
+        result = adapter._save_screenshot_with_savebmp(
             target_doc, str(test_file), 1280, 720
         )
         assert result is True
-        target_doc.SaveBitmapWithVariableSize.assert_called_once_with(
-            str(test_file), 1280, 720
-        )
+        target_doc.SaveBMP.assert_called_once_with(str(test_file), 1280, 720)
 
-    @pytest.mark.asyncio
-    async def test_save_screenshot_with_targetdoc_file_not_exists(
-        self, monkeypatch
-    ) -> None:
-        """_save_screenshot_with_targetdoc should return False if file doesn't exist."""
+    def test_save_screenshot_with_savebmp_exception(self, monkeypatch) -> None:
+        """SaveBMP COM errors should fall through to the SaveAs3 fallback."""
         adapter = self._build_adapter(monkeypatch)
-        target_doc = SimpleNamespace(SaveBitmapWithVariableSize=Mock(return_value=True))
-        result = adapter._save_screenshot_with_targetdoc(
-            target_doc, "/nonexistent/file.png", 1280, 720
+        target_doc = SimpleNamespace(
+            SaveBMP=Mock(side_effect=RuntimeError("COM error"))
+        )
+        result = adapter._save_screenshot_with_savebmp(
+            target_doc, "/path/file.bmp", 1280, 720
         )
         assert result is False
 
-    @pytest.mark.asyncio
-    async def test_save_screenshot_with_targetdoc_exception(self, monkeypatch) -> None:
-        """_save_screenshot_with_targetdoc should return False on exception."""
+    def test_save_screenshot_with_savebmp_no_pillow(self, monkeypatch) -> None:
+        """Non-BMP targets without Pillow should skip capture entirely."""
         adapter = self._build_adapter(monkeypatch)
-        target_doc = SimpleNamespace(
-            SaveBitmapWithVariableSize=Mock(side_effect=RuntimeError("COM error"))
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter._load_pillow_image",
+            lambda: None,
         )
-        result = adapter._save_screenshot_with_targetdoc(
+        target_doc = SimpleNamespace(SaveBMP=Mock(return_value=True))
+        result = adapter._save_screenshot_with_savebmp(
             target_doc, "/path/file.png", 1280, 720
         )
         assert result is False
+        target_doc.SaveBMP.assert_not_called()
+
+    def test_save_screenshot_with_savebmp_converts_and_cleans_up(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Non-BMP targets should convert the temporary BMP and remove it."""
+        adapter = self._build_adapter(monkeypatch)
+        test_file = tmp_path / "test.png"
+        tmp_bmp = str(test_file) + ".capture.bmp"
+
+        def _save_bmp(path, *_args):
+            Path(path).write_bytes(b"BM")
+            return True
+
+        class _FakeHandle:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def save(self, path):
+                Path(path).write_bytes(b"PNG")
+
+        fake_image = SimpleNamespace(open=Mock(return_value=_FakeHandle()))
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter._load_pillow_image",
+            lambda: fake_image,
+        )
+        target_doc = SimpleNamespace(SaveBMP=Mock(side_effect=_save_bmp))
+        result = adapter._save_screenshot_with_savebmp(
+            target_doc, str(test_file), 1280, 720
+        )
+        assert result is True
+        target_doc.SaveBMP.assert_called_once_with(tmp_bmp, 1280, 720)
+        fake_image.open.assert_called_once_with(tmp_bmp)
+        assert test_file.exists()
+        assert not Path(tmp_bmp).exists()
+
+    def test_activate_target_doc_activates_by_filename(self, monkeypatch) -> None:
+        """_activate_target_doc should activate by basename and return the doc."""
+        adapter = self._build_adapter(monkeypatch)
+        activated_doc = SimpleNamespace(GetTitle=lambda: "wheel.SLDPRT")
+        adapter.swApp = SimpleNamespace(ActivateDoc3=Mock(return_value=activated_doc))
+        target_doc = SimpleNamespace(
+            GetPathName=r"C:\parts\wheel.SLDPRT",
+            GetTitle=lambda: "wheel.SLDPRT",
+        )
+        result = adapter._activate_target_doc(target_doc)
+        assert result is activated_doc
+        args = adapter.swApp.ActivateDoc3.call_args.args
+        assert args[0] == "wheel.SLDPRT"
+        assert args[1] is False
+        assert args[2] == 1  # swDontRebuildActiveDoc
+
+    def test_activate_target_doc_keeps_doc_when_identity_unknown(
+        self, monkeypatch
+    ) -> None:
+        """Documents with no path/title cannot be activated; keep the original."""
+        adapter = self._build_adapter(monkeypatch)
+        adapter.swApp = SimpleNamespace(ActivateDoc3=Mock())
+        target_doc = SimpleNamespace()
+        assert adapter._activate_target_doc(target_doc) is target_doc
+        adapter.swApp.ActivateDoc3.assert_not_called()
+
+    def test_activate_target_doc_keeps_doc_when_activation_fails(
+        self, monkeypatch
+    ) -> None:
+        """A failing ActivateDoc3 call should not break the export."""
+        adapter = self._build_adapter(monkeypatch)
+        adapter.swApp = SimpleNamespace(
+            ActivateDoc3=Mock(side_effect=RuntimeError("COM error"))
+        )
+        target_doc = SimpleNamespace(GetTitle=lambda: "Part1")
+        assert adapter._activate_target_doc(target_doc) is target_doc
 
     @pytest.mark.asyncio
     async def test_save_screenshot_with_saveas3_success(
@@ -2023,20 +2059,21 @@ class TestPyWin32AdapterBranches:
     ) -> None:
         """export_image should set orientation and persist an image on success."""
         adapter = self._build_adapter(monkeypatch)
-        output_file = tmp_path / "shot.png"
+        output_file = tmp_path / "shot.bmp"
 
-        def _save_bitmap(path, *_args):
+        def _save_bmp(path, *_args):
             output_file.write_text("image", encoding="utf-8")
             return True
 
         target_doc = SimpleNamespace(
-            SaveBitmapWithVariableSize=Mock(side_effect=_save_bitmap),
+            SaveBMP=Mock(side_effect=_save_bmp),
             ShowNamedView2=Mock(),
             ViewZoomToFit2=Mock(),
         )
         adapter.currentModel = target_doc
         adapter.swApp = SimpleNamespace(
             ActiveDoc=target_doc,
+            ActivateDoc3=Mock(return_value=target_doc),
             Frame=SimpleNamespace(SetFocus=Mock()),
         )
 
@@ -2051,7 +2088,7 @@ class TestPyWin32AdapterBranches:
 
         assert result.is_success
         assert result.data["file_path"] == str(output_file)
-        assert result.data["format"] == "PNG"
+        assert result.data["format"] == "BMP"
         assert result.data["dimensions"] == "640x480"
         assert result.data["view"] == "front"
         target_doc.ShowNamedView2.assert_called_once_with("", 1)
@@ -3008,12 +3045,7 @@ class TestPyWin32AdapterBranches:
 
         monkeypatch.setattr(
             adapter,
-            "_save_screenshot_with_modelview",
-            lambda *_args, **_kwargs: False,
-        )
-        monkeypatch.setattr(
-            adapter,
-            "_save_screenshot_with_targetdoc",
+            "_save_screenshot_with_savebmp",
             lambda *_args, **_kwargs: False,
         )
         monkeypatch.setattr(
