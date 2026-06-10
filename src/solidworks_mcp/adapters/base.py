@@ -780,12 +780,20 @@ class RotateComponentParameters(BaseModel):
             assembly space (need not be unit length).
         axis_point (list[float]): ``[x, y, z]`` in millimetres — a point the
             rotation axis passes through.
+        mode (str): ``"exact"`` sets the final transform directly
+            (``SetTransformAndSolve3``) — mates re-solve but motion does NOT
+            propagate through gear/rack-pinion/screw mates (the solver just
+            accepts the new phase). ``"kinematic"`` additionally walks the
+            assembly's gear mates breadth-first and rotates every coupled
+            component about its own mate axis by the stored inverse ratio —
+            use it to exercise gear trains deterministically.
     """
 
     name: str
     angle: float
     axis_vector: list[float] = [0.0, 0.0, 1.0]
     axis_point: list[float] = [0.0, 0.0, 0.0]
+    mode: str = "exact"
 
 
 class ComponentLinearPatternParameters(BaseModel):

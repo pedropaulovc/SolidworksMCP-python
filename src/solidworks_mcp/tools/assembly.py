@@ -6,7 +6,7 @@ component patterns) and standard mates (add/list/delete/suppress).
 Mechanical mates are Phase 7C.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from fastmcp import FastMCP
 from loguru import logger
@@ -205,6 +205,7 @@ class RotateComponentInput(ComponentRefInput):
         angle (float): Rotation angle in degrees.
         axis_vector (list[float]): Rotation-axis direction.
         axis_point (list[float]): Point on the rotation axis in mm.
+        mode (Literal["exact", "kinematic"]): Placement vs gear-train rotation.
     """
 
     angle: float = Field(description="Rotation angle in degrees (right-hand rule)")
@@ -215,6 +216,16 @@ class RotateComponentInput(ComponentRefInput):
     axis_point: list[float] = Field(
         default=[0.0, 0.0, 0.0],
         description="[x, y, z] in millimetres — a point the axis passes through",
+    )
+    mode: Literal["exact", "kinematic"] = Field(
+        default="exact",
+        description=(
+            "'exact' sets the final transform directly (placement; motion "
+            "does NOT propagate through gear/rack-pinion/screw mates). "
+            "'kinematic' also walks the assembly's gear mates and rotates "
+            "every coupled component by the stored inverse ratio about its "
+            "own mate axis — use it to run a mated gear train."
+        ),
     )
 
     def model_post_init(self, __context: Any) -> None:
@@ -785,12 +796,18 @@ async def register_assembly_tools(
     async def rotate_component(input_data: RotateComponentInput) -> dict[str, Any]:
         """Rotate a component about an axis in assembly space.
 
-        Composes the rotation onto the component's current transform and
-        re-solves mates — the primary way to drive a mated gear train
-        (rotate the input crank, mates propagate the motion).
+        mode='exact' (default) composes the rotation onto the component's
+        current transform and re-solves mates — use it for placement. It
+        does NOT drive gear/rack-pinion/screw mates: the solver simply
+        accepts the new phase. To run a mated gear train (rotate the input
+        crank and have the motion reach every coupled gear), use
+        mode='kinematic', which also walks the assembly's gear mates and
+        rotates each coupled component by the stored inverse ratio about
+        its own mate axis; the propagated rotations are reported in the
+        payload's 'propagated' list.
 
         Args:
-            input_data (RotateComponentInput): Component, axis and angle.
+            input_data (RotateComponentInput): Component, axis, angle, mode.
 
         Returns:
             dict[str, Any]: Status and rotation summary.
@@ -802,6 +819,7 @@ async def register_assembly_tools(
                 "angle": 90,
                 "axis_vector": [1, 0, 0],
                 "axis_point": [0, 40, 0],
+                "mode": "kinematic",
             })
             ```
         """
@@ -813,6 +831,7 @@ async def register_assembly_tools(
                     angle=input_data.angle,
                     axis_vector=input_data.axis_vector,
                     axis_point=input_data.axis_point,
+                    mode=input_data.mode,
                 )
             )
             if result.is_success:

@@ -101,6 +101,35 @@ def bstr_array(values: list[str]) -> Any:
         return values
 
 
+def double_array(values: list[float]) -> Any:
+    """Return an array-of-doubles VARIANT for ``double[]`` SAFEARRAY params.
+
+    SolidWorks methods such as ``IMathUtility::CreateTransform`` take numeric
+    arrays typed as ``System.object`` holding a double array. Under late
+    binding a bare Python list marshals as ``VT_ARRAY | VT_VARIANT``, which
+    ``CreateTransform`` silently ignores — it returns a valid **identity**
+    transform instead of failing, so every downstream
+    ``IComponent2::SetTransformAndSolve3`` "succeeds" without moving the
+    component. The list must be wrapped as ``VT_ARRAY | VT_R8``.
+
+    Args:
+        values: The doubles to marshal.
+
+    Returns:
+        Any: ``VARIANT(VT_ARRAY | VT_R8, values)`` on Windows with pywin32
+        available; the plain list as a fallback otherwise (CI never reaches a
+        real COM boundary).
+    """
+    coerced = [float(v) for v in values]
+    try:
+        import pythoncom
+        from win32com.client import VARIANT
+
+        return VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, coerced)
+    except Exception:
+        return coerced
+
+
 def empty_double_array() -> Any:
     """Return an empty array-of-doubles VARIANT for unused SAFEARRAY params.
 
