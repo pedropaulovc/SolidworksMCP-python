@@ -12,7 +12,11 @@ from fastmcp import FastMCP
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from ..adapters.base import SolidWorksAdapter
+from ..adapters.base import (
+    MeasureEntityRef,
+    MeasureParameters,
+    SolidWorksAdapter,
+)
 from .input_compat import CompatInput
 
 # Input schemas using Python 3.14 built-in types
@@ -75,6 +79,83 @@ class InterferenceCheckInput(CompatInput):
     tolerance: float = Field(
         default=0.001, description="Interference detection tolerance in mm"
     )
+
+
+class MeasureEntityInput(BaseModel):
+    """One entity to include in a measurement selection.
+
+    Attributes:
+        entity_type (str): ``SelectByID2`` entity-type string.
+        name (str): Entity name (named entities).
+        point (list[float]): ``[x, y, z]`` mm on the entity (unnamed ones).
+    """
+
+    entity_type: str = Field(
+        description='SelectByID2 entity type: "FACE", "EDGE", "VERTEX", '
+        '"PLANE", "AXIS", "DATUMPOINT", "SKETCHSEGMENT", ...'
+    )
+    name: str = Field(
+        default="",
+        description="Entity name for named entities (planes, axes, sketches)",
+    )
+    point: list[float] = Field(
+        default_factory=list,
+        description="Point [x, y, z] in mm lying on the entity, for faces/"
+        "edges/vertices that have no stable name. Selection picks at the "
+        "point's screen projection, so the point must be visible (not "
+        "occluded by the body) in the current view orientation.",
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        """Validate that the entity is located by name or by a 3D point.
+
+        Args:
+            __context (Any): The context value.
+
+        Raises:
+            ValueError: If the operation cannot be completed.
+        """
+        if not self.entity_type.strip():
+            raise ValueError("entity_type is required")
+        if not self.name and len(self.point) != 3:
+            raise ValueError(
+                "each entity needs either a name or a point [x, y, z] in mm"
+            )
+
+
+class MeasureInput(CompatInput):
+    """Input schema for the measure tool.
+
+    Attributes:
+        entities (list[MeasureEntityInput]): Entities to measure.
+        arc_option (str): Distance anchor for arcs/circles.
+    """
+
+    entities: list[MeasureEntityInput] = Field(
+        description="Entities to measure: one for intrinsic properties "
+        "(edge length, face area, circle diameter), two or more for "
+        "relational ones (distance, angle)."
+    )
+    arc_option: str = Field(
+        default="center",
+        description='Arc/circle distance anchor: "center" (center to '
+        'center), "minimum" or "maximum"',
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        """Validate the measurement request.
+
+        Args:
+            __context (Any): The context value.
+
+        Raises:
+            ValueError: If the operation cannot be completed.
+        """
+        if not self.entities:
+            raise ValueError("at least one entity is required")
+        valid_arc_options = {"center", "minimum", "maximum"}
+        if self.arc_option not in valid_arc_options:
+            raise ValueError(f"arc_option must be one of {sorted(valid_arc_options)}")
 
 
 class GeometryAnalysisInput(BaseModel):
@@ -313,6 +394,82 @@ async def register_analysis_tools(
             }
 
     @mcp.tool()
+    async def measure(input_data: MeasureInput) -> dict[str, Any]:
+        """Measure distances, lengths, areas and angles on the active model.
+
+        Selects the requested entities and runs the SolidWorks measure tool
+        over them. Returns every value the selection supports — e.g. one
+        edge yields its length (and diameter/radius for circular edges);
+        one face yields its area and perimeter; two entities yield distance,
+        per-axis deltas, angle and parallel/perpendicular flags. Values not
+        applicable to the selection are omitted from the result.
+
+        Args:
+            input_data (MeasureInput): Entities and arc-distance option.
+
+        Returns:
+            dict[str, Any]: Measurements in mm, mm² and degrees.
+
+        Example:
+                            ```python
+                            # Distance between two faces
+                            result = await measure({
+                                "entities": [
+                                    {"entity_type": "FACE", "point": [0, 25, 50]},
+                                    {"entity_type": "FACE", "point": [0, -25, 50]},
+                                ]
+                            })
+                            print(result["data"]["distance"])  # mm
+
+                            # Length of an edge located by a point on it
+                            result = await measure({
+                                "entities": [
+                                    {"entity_type": "EDGE", "point": [25, 25, 50]}
+                                ]
+                            })
+                            print(result["data"]["length"])  # mm
+                            ```
+
+                        Note:
+                            - Point-located selection is view-dependent: the
+                              point must be visible (not occluded by the body)
+                              in the current view orientation.
+                            - Named entities (reference planes, axes) select
+                              by name regardless of view.
+        """
+        try:
+            result = await adapter.measure(
+                MeasureParameters(
+                    entities=[
+                        MeasureEntityRef(
+                            entity_type=entity.entity_type,
+                            name=entity.name,
+                            point=entity.point,
+                        )
+                        for entity in input_data.entities
+                    ],
+                    arc_option=input_data.arc_option,
+                )
+            )
+            if result.is_success:
+                return {
+                    "status": "success",
+                    "message": "Measurement completed",
+                    "data": result.data,
+                    "execution_time": result.execution_time,
+                }
+            return {
+                "status": "error",
+                "message": result.error or "Measurement failed",
+            }
+        except Exception as e:
+            logger.error(f"Error in measure tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
     async def analyze_geometry(input_data: GeometryAnalysisInput) -> dict[str, Any]:
         """Handle analyze geometry.
 
@@ -377,5 +534,5 @@ async def register_analysis_tools(
     # - vibration_analysis
     # - stress_concentration_analysis
 
-    tool_count = 4  # Keep legacy reported count expected by tests
+    tool_count = 5
     return tool_count

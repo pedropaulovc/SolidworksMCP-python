@@ -53,6 +53,8 @@ from solidworks_mcp.adapters.base import (
     ExtrusionParameters,
     LinearPatternParameters,
     LoftParameters,
+    MeasureEntityRef,
+    MeasureParameters,
     MirrorFeatureParameters,
     SetGlobalVariableParameters,
     ShellParameters,
@@ -2487,9 +2489,7 @@ async def test_create_axis_from_two_planes(connected_adapter) -> None:
     assert part_result.is_success, f"create_part failed: {part_result.error}"
     try:
         axis = await adapter.create_axis(
-            CreateAxisParameters(
-                mode="two_planes", planes=["Front Plane", "Top Plane"]
-            )
+            CreateAxisParameters(mode="two_planes", planes=["Front Plane", "Top Plane"])
         )
         assert axis.is_success, f"two_planes axis failed: {axis.error}"
         assert axis.data.type == "RefAxis"
@@ -2504,9 +2504,7 @@ async def test_create_axis_of_cylindrical_face(connected_adapter) -> None:
     await _build_cylinder(adapter, radius=25.0, depth=100.0)
     try:
         axis = await adapter.create_axis(
-            CreateAxisParameters(
-                mode="cylindrical_face", face_point=[25.0, 0.0, 50.0]
-            )
+            CreateAxisParameters(mode="cylindrical_face", face_point=[25.0, 0.0, 50.0])
         )
         assert axis.is_success, f"cylindrical_face axis failed: {axis.error}"
         assert axis.data.name, "cylindrical_face axis has no name"
@@ -2722,9 +2720,7 @@ async def test_global_variable_equation_drives_geometry_live(
         # the document's equation units (mm on the default template).
         extrude_name = _feature_name_by_type(adapter, "Extrusion") or "Boss-Extrude1"
         equation_result = await adapter.create_equation(
-            CreateEquationParameters(
-                equation=f'"D1@{extrude_name}" = "Depth"'
-            )
+            CreateEquationParameters(equation=f'"D1@{extrude_name}" = "Depth"')
         )
         assert equation_result.is_success, (
             f"create_equation failed: {equation_result.error}"
@@ -2748,9 +2744,7 @@ async def test_global_variable_equation_drives_geometry_live(
         update_result = await adapter.set_global_variable(
             SetGlobalVariableParameters(name="Depth", expression="20")
         )
-        assert update_result.is_success, (
-            f"global update failed: {update_result.error}"
-        )
+        assert update_result.is_success, f"global update failed: {update_result.error}"
         assert update_result.data["updated"] is True
     finally:
         await adapter.close_model(save=False)
@@ -2796,9 +2790,7 @@ async def test_twenty_configurations_monotonic_volumes_live(
                     name="Depth", expression=str(10 * i), configuration=f"T{i}"
                 )
             )
-            assert scoped.is_success, (
-                f"per-config global T{i} failed: {scoped.error}"
-            )
+            assert scoped.is_success, f"per-config global T{i} failed: {scoped.error}"
 
         volumes: list[float] = []
         for i in range(1, 21):
@@ -2837,6 +2829,185 @@ async def test_set_global_variable_no_model_returns_error(
     adapter = connected_adapter
     result = await adapter.set_global_variable(
         SetGlobalVariableParameters(name="X", expression="1")
+    )
+    assert result.is_error
+    assert "No active model" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: measure
+# ---------------------------------------------------------------------------
+
+# Issue #7 acceptance tolerance: < 1e-6 m = 1e-3 mm.
+_MEASURE_TOL_MM = 1e-3
+
+
+def _edge_ref(point: list[float]) -> MeasureEntityRef:
+    return MeasureEntityRef(entity_type="EDGE", point=point)
+
+
+async def test_measure_box_edges_live(connected_adapter) -> None:
+    """Issue #7 acceptance: measure known box edges to < 1e-6 m.
+
+    The box spans x,y in [-25, 25] mm, z in [0, 100] mm. Edges are located
+    by their midpoints; only view-visible edges are used (coordinate
+    selection picks at the screen projection — see ``_select_by_point``).
+    """
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        # (edge midpoint, expected length mm): the 9 of 12 box edges that are
+        # selectable in the default view (probed live: the x-/y- vertical
+        # edge and the z=0 bottom/left edges are occluded and fail to pick —
+        # see the view-dependence warning on ``_select_by_point``).
+        cases = [
+            ([25.0, 25.0, 50.0], 100.0),
+            ([-25.0, 25.0, 50.0], 100.0),
+            ([25.0, -25.0, 50.0], 100.0),
+            ([0.0, 25.0, 0.0], 50.0),
+            ([25.0, 0.0, 0.0], 50.0),
+            ([0.0, 25.0, 100.0], 50.0),
+            ([0.0, -25.0, 100.0], 50.0),
+            ([25.0, 0.0, 100.0], 50.0),
+            ([-25.0, 0.0, 100.0], 50.0),
+        ]
+        for point, expected in cases:
+            result = await adapter.measure(
+                MeasureParameters(entities=[_edge_ref(point)])
+            )
+            assert result.is_success, f"measure edge {point} failed: {result.error}"
+            length = result.data.get("length")
+            assert length is not None, f"edge {point}: no length in {result.data}"
+            assert abs(length - expected) < _MEASURE_TOL_MM, (
+                f"edge {point}: length {length} != {expected}"
+            )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_measure_face_distance_and_area_live(connected_adapter) -> None:
+    """Two opposite box faces: normal distance 50 mm, parallel, area 5000 mm²."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        faces = await adapter.measure(
+            MeasureParameters(
+                entities=[
+                    MeasureEntityRef(entity_type="FACE", point=[0.0, 25.0, 50.0]),
+                    MeasureEntityRef(entity_type="FACE", point=[0.0, -25.0, 50.0]),
+                ]
+            )
+        )
+        assert faces.is_success, f"measure faces failed: {faces.error}"
+        distance = faces.data.get("normal_distance") or faces.data.get("distance")
+        assert distance is not None, f"no distance in {faces.data}"
+        assert abs(distance - 50.0) < _MEASURE_TOL_MM, faces.data
+        assert faces.data.get("is_parallel") is True, faces.data
+
+        # One face alone: 50 x 100 mm side -> 5000 mm², perimeter 300 mm.
+        single = await adapter.measure(
+            MeasureParameters(
+                entities=[MeasureEntityRef(entity_type="FACE", point=[0.0, 25.0, 50.0])]
+            )
+        )
+        assert single.is_success, f"measure face failed: {single.error}"
+        area = single.data.get("area") or single.data.get("total_area")
+        assert area is not None, f"no area in {single.data}"
+        assert abs(area - 5000.0) < 1.0, single.data
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_measure_perpendicular_edges_angle_live(connected_adapter) -> None:
+    """Two adjacent front-face box edges meet at 90 degrees."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        result = await adapter.measure(
+            MeasureParameters(
+                entities=[
+                    _edge_ref([0.0, 25.0, 0.0]),
+                    _edge_ref([25.0, 0.0, 0.0]),
+                ]
+            )
+        )
+        assert result.is_success, f"measure angle failed: {result.error}"
+        angle = result.data.get("angle")
+        assert angle is not None, f"no angle in {result.data}"
+        assert abs(angle - 90.0) < 1e-6, result.data
+        assert result.data.get("is_perpendicular") is True, result.data
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_measure_cylinder_diameter_live(connected_adapter) -> None:
+    """The cylinder's circular edge reports diameter 50 mm.
+
+    Live behaviour: a full circular edge populates ``Diameter`` but leaves
+    ``Radius`` at the -1 not-applicable sentinel (radius is only reported
+    for partial arcs), so only the diameter is asserted.
+    """
+    adapter = connected_adapter
+    await _build_cylinder(adapter)
+    try:
+        result = await adapter.measure(
+            MeasureParameters(entities=[_edge_ref([25.0, 0.0, 0.0])])
+        )
+        assert result.is_success, f"measure circle failed: {result.error}"
+        diameter = result.data.get("diameter")
+        assert diameter is not None and abs(diameter - 50.0) < _MEASURE_TOL_MM, (
+            result.data
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_measure_named_planes_distance_live(connected_adapter) -> None:
+    """An offset reference plane measures its offset from the base plane."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        plane = await adapter.create_plane(
+            CreatePlaneParameters(mode="offset", base_plane="Front Plane", offset=30.0)
+        )
+        assert plane.is_success, f"create_plane failed: {plane.error}"
+
+        result = await adapter.measure(
+            MeasureParameters(
+                entities=[
+                    MeasureEntityRef(entity_type="PLANE", name="Front Plane"),
+                    MeasureEntityRef(entity_type="PLANE", name=plane.data.name),
+                ]
+            )
+        )
+        assert result.is_success, f"measure planes failed: {result.error}"
+        distance = result.data.get("normal_distance") or result.data.get("distance")
+        assert distance is not None, f"no distance in {result.data}"
+        assert abs(distance - 30.0) < _MEASURE_TOL_MM, result.data
+        assert result.data.get("is_parallel") is True, result.data
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_measure_invalid_selection_errors_live(connected_adapter) -> None:
+    """A point in empty space selects nothing and errors with the entity index."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        result = await adapter.measure(
+            MeasureParameters(entities=[_edge_ref([999.0, 999.0, 999.0])])
+        )
+        assert result.is_error
+        assert "Failed to select EDGE" in (result.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_measure_no_model_returns_error(connected_adapter) -> None:
+    """measure without an open model errors without touching SW."""
+    adapter = connected_adapter
+    result = await adapter.measure(
+        MeasureParameters(entities=[_edge_ref([0.0, 0.0, 0.0])])
     )
     assert result.is_error
     assert "No active model" in (result.error or "")
