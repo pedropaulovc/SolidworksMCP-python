@@ -33,6 +33,19 @@ RELATION_NAME_MAP: dict[str, int] = {
 # All other relations reject a non-null ``entity3``.
 _THREE_ENTITY_RELATIONS: frozenset[str] = frozenset({"symmetric"})
 
+# swConstrainedStatus_e values (SolidWorks.Interop.swconst) returned by
+# ``ISketch::GetConstrainedStatus`` — the authoritative sketch definition
+# probe. Maps raw value -> (definition_state, is_fully_defined).
+CONSTRAINED_STATUS_MAP: dict[int, tuple[str, bool | None]] = {
+    1: ("unknown", None),  # swUnknownConstraint
+    2: ("under_defined", False),  # swUnderConstrained
+    3: ("fully_defined", True),  # swFullyConstrained
+    4: ("over_defined", False),  # swOverConstrained
+    5: ("no_solution", False),  # swNoSolution
+    6: ("invalid_solution", False),  # swInvalidSolution
+    7: ("autosolve_off", None),  # swAutosolveOff
+}
+
 
 class SolidWorksSketchMixin:
     """Expose sketch creation and editing methods via mixin-local implementation."""
@@ -355,9 +368,7 @@ def _create_sketch_impl(adapter: Any, plane: str) -> AdapterResult[str]:
             # sketch unselectable by later features.
             adapter.currentSketch = adapter._attempt(
                 lambda: adapter.currentModel.GetActiveSketch2()
-            ) or adapter._attempt(
-                lambda: adapter.swApp.ActiveDoc.GetActiveSketch2()
-            )
+            ) or adapter._attempt(lambda: adapter.swApp.ActiveDoc.GetActiveSketch2())
 
         adapter._sketch_count += 1
 
@@ -1027,7 +1038,13 @@ def _add_sketch_constraint_impl(
                 default=0,
             )
 
+        # Prefer the method-flagged ``currentModel`` dispatch (flagged just
+        # above); a bare ``swApp.ActiveDoc`` is unflagged, so on a drifted
+        # gen_py cache its ``GetActiveSketch2`` raises ``Member not found``
+        # or resolves non-callable and yields ``None`` (issue #29).
         active_sketch = adapter._attempt(
+            lambda: adapter.currentModel.GetActiveSketch2(), default=None
+        ) or adapter._attempt(
             lambda: adapter.swApp.ActiveDoc.GetActiveSketch2(), default=None
         )
         if active_sketch is None:
@@ -1978,10 +1995,7 @@ def _sketch_offset_impl(
             adapter.currentModel.ClearSelection2(True)
 
         direction = "inward" if reverse_direction else "outward"
-        return (
-            f"Offset_{offset_distance}_{direction}_"
-            f"{int(time.time() * 1000) % 10000}"
-        )
+        return f"Offset_{offset_distance}_{direction}_{int(time.time() * 1000) % 10000}"
 
     return cast(
         AdapterResult[str],
@@ -2052,7 +2066,11 @@ def _exit_sketch_impl(adapter: Any) -> AdapterResult[None]:
                 default=0,
             )
 
-        sw_active = adapter._attempt(lambda: adapter.swApp.ActiveDoc.GetActiveSketch2())
+        # Flagged ``currentModel`` first; unflagged ``ActiveDoc`` only as a
+        # fallback (issue #29 — gencache-state-dependent ``Member not found``).
+        sw_active = adapter._attempt(
+            lambda: adapter.currentModel.GetActiveSketch2()
+        ) or adapter._attempt(lambda: adapter.swApp.ActiveDoc.GetActiveSketch2())
         adapter_active = adapter.currentSketchManager
 
         # Already out of sketch-edit mode — clean up adapter state so a
@@ -2302,8 +2320,14 @@ def _check_sketch_fully_defined_impl(
                 lambda: sketch_feature.GetSpecificFeature2(), default=None
             )
         else:
-            sketch_obj = adapter.currentSketch or adapter._attempt(
-                lambda: adapter.swApp.ActiveDoc.GetActiveSketch2(), default=None
+            sketch_obj = (
+                adapter.currentSketch
+                or adapter._attempt(
+                    lambda: adapter.currentModel.GetActiveSketch2(), default=None
+                )
+                or adapter._attempt(
+                    lambda: adapter.swApp.ActiveDoc.GetActiveSketch2(), default=None
+                )
             )
             if sketch_obj is None and adapter._last_sketch_name:
                 sketch_feature = adapter._attempt(
@@ -2324,6 +2348,39 @@ def _check_sketch_fully_defined_impl(
             resolved_name = adapter._attempt(
                 lambda: str(sketch_feature.Name), default=None
             )
+
+        # Authoritative probe: ``ISketch::GetConstrainedStatus`` returns a
+        # ``swConstrainedStatus_e`` value (verified live on SW 2026). The
+        # speculative attribute probes below remain only as a fallback for
+        # builds whose type info does not expose it.
+        if sketch_obj is not None:
+            try:
+                from .. import sw_type_info as _sw_type_info
+            except ImportError:
+                _sw_type_info = None  # type: ignore[assignment]
+            if _sw_type_info is not None:
+                adapter._attempt(
+                    lambda: _sw_type_info.flag_methods(sketch_obj, "ISketch"),
+                    default=0,
+                )
+            raw_status = adapter._attempt(
+                lambda: sketch_obj.GetConstrainedStatus(), default=None
+            )
+            numeric_status = _to_number(raw_status)
+            mapped = (
+                CONSTRAINED_STATUS_MAP.get(int(numeric_status))
+                if numeric_status is not None
+                else None
+            )
+            if mapped is not None:
+                state, flag = mapped
+                return {
+                    "sketch_name": resolved_name,
+                    "is_fully_defined": flag,
+                    "definition_state": state,
+                    "source": "sketch.GetConstrainedStatus",
+                    "raw_status": int(numeric_status),
+                }
 
         probes: list[tuple[str, Any]] = []
 

@@ -12,7 +12,7 @@ from solidworks_mcp.adapters.solidworks import sketch
 class _FakeSwApp:
     """Minimal swApp stand-in; ActiveDoc proxies the adapter's currentModel."""
 
-    def __init__(self, adapter: "_FakeSketchAdapter") -> None:
+    def __init__(self, adapter: _FakeSketchAdapter) -> None:
         self._adapter = adapter
 
     @property
@@ -248,9 +248,7 @@ def test_spline_error_when_no_sketch_manager() -> None:
 
 def test_spline_error_when_too_few_points() -> None:
     adapter = _FakeSketchAdapter()
-    adapter.currentSketchManager = SimpleNamespace(
-        CreateSpline2=lambda *args: object()
-    )
+    adapter.currentSketchManager = SimpleNamespace(CreateSpline2=lambda *args: object())
     result = sketch._add_spline_impl(adapter, [{"x": 0.0, "y": 0.0}])
     assert result.status == AdapterResultStatus.ERROR
     assert "at least 2 points" in (result.error or "")
@@ -294,13 +292,9 @@ def test_sketch_linear_pattern_calls_com_with_converted_args() -> None:
     calls ``CreateLinearSketchStepAndRepeat`` with mm-to-m and
     direction-vector-to-radian conversions.
     """
-    adapter, create_pattern, clear_selection, seed_entity, _ = (
-        _make_pattern_adapter()
-    )
+    adapter, create_pattern, clear_selection, seed_entity, _ = _make_pattern_adapter()
 
-    result = sketch._sketch_linear_pattern_impl(
-        adapter, ["Line_1"], 1, 0, 5.0, 3
-    )
+    result = sketch._sketch_linear_pattern_impl(adapter, ["Line_1"], 1, 0, 5.0, 3)
 
     assert result.is_success
     assert result.data.startswith("LinearPattern_3x5.0_")
@@ -328,21 +322,15 @@ def test_sketch_linear_pattern_validates_inputs() -> None:
         == AdapterResultStatus.ERROR
     )
     assert (
-        sketch._sketch_linear_pattern_impl(
-            adapter, ["Line_1"], 1, 0, 5.0, 1
-        ).status
+        sketch._sketch_linear_pattern_impl(adapter, ["Line_1"], 1, 0, 5.0, 1).status
         == AdapterResultStatus.ERROR
     )
     assert (
-        sketch._sketch_linear_pattern_impl(
-            adapter, ["Line_1"], 1, 0, 0.0, 3
-        ).status
+        sketch._sketch_linear_pattern_impl(adapter, ["Line_1"], 1, 0, 0.0, 3).status
         == AdapterResultStatus.ERROR
     )
     assert (
-        sketch._sketch_linear_pattern_impl(
-            adapter, ["Line_1"], 0, 0, 5.0, 3
-        ).status
+        sketch._sketch_linear_pattern_impl(adapter, ["Line_1"], 0, 0, 5.0, 3).status
         == AdapterResultStatus.ERROR
     )
 
@@ -352,9 +340,7 @@ def test_sketch_linear_pattern_unknown_entity_does_not_mutate_selection() -> Non
     does not leave SW with a half-built selection state."""
     adapter, _, clear_selection, _, _ = _make_pattern_adapter()
 
-    result = sketch._sketch_linear_pattern_impl(
-        adapter, ["Line_NOPE"], 1, 0, 5.0, 3
-    )
+    result = sketch._sketch_linear_pattern_impl(adapter, ["Line_NOPE"], 1, 0, 5.0, 3)
 
     assert result.status == AdapterResultStatus.ERROR
     assert "Unknown sketch entity 'Line_NOPE'" in (result.error or "")
@@ -367,9 +353,7 @@ def test_sketch_linear_pattern_clears_selection_on_com_failure() -> None:
     adapter, create_pattern, clear_selection, _, _ = _make_pattern_adapter()
     create_pattern.return_value = False
 
-    result = sketch._sketch_linear_pattern_impl(
-        adapter, ["Line_1"], 1, 0, 5.0, 3
-    )
+    result = sketch._sketch_linear_pattern_impl(adapter, ["Line_1"], 1, 0, 5.0, 3)
 
     assert result.status == AdapterResultStatus.ERROR
     # ClearSelection2 must run both before selecting and after the failure.
@@ -699,9 +683,7 @@ def test_exit_sketch_sw_active_but_adapter_state_empty() -> None:
     assert adapter.currentSketchManager is None  # the divergent state
 
     result = sketch._exit_sketch_impl(adapter)
-    assert result.status == AdapterResultStatus.SUCCESS, (
-        f"unexpected: {result.error}"
-    )
+    assert result.status == AdapterResultStatus.SUCCESS, f"unexpected: {result.error}"
     sketch_manager.InsertSketch.assert_called_once_with(True)
     # Adapter state stays clean afterwards.
     assert adapter.currentSketchManager is None
@@ -853,6 +835,53 @@ def test_add_sketch_dimension_returns_generated_id_when_model_missing() -> None:
     result = sketch._add_sketch_dimension_impl(adapter, "Line_1", None, "linear", 12.0)
     assert result.is_success
     assert result.data.startswith("Dimension_")
+
+
+def test_check_sketch_fully_defined_prefers_get_constrained_status() -> None:
+    """The authoritative ``ISketch::GetConstrainedStatus`` probe wins.
+
+    swConstrainedStatus_e: 2=under, 3=fully, 4=over — and it takes priority
+    over the speculative attribute probes when both are present.
+    """
+    adapter = _FakeSketchAdapter()
+    adapter.currentModel = SimpleNamespace()
+
+    cases = {
+        2: ("under_defined", False),
+        3: ("fully_defined", True),
+        4: ("over_defined", False),
+        5: ("no_solution", False),
+        6: ("invalid_solution", False),
+    }
+    for raw, (state, flag) in cases.items():
+        adapter.currentSketch = SimpleNamespace(
+            GetConstrainedStatus=lambda r=raw: r,
+            # Contradicting speculative probe — must be ignored.
+            IsFullyDefined=lambda: True,
+        )
+        result = sketch._check_sketch_fully_defined_impl(adapter, None)
+        assert result.is_success
+        assert result.data["source"] == "sketch.GetConstrainedStatus"
+        assert result.data["raw_status"] == raw
+        assert result.data["definition_state"] == state
+        assert result.data["is_fully_defined"] is flag
+
+    # Unknown (1) and autosolve-off (7) report honestly with a null flag.
+    for raw, state in ((1, "unknown"), (7, "autosolve_off")):
+        adapter.currentSketch = SimpleNamespace(GetConstrainedStatus=lambda r=raw: r)
+        result = sketch._check_sketch_fully_defined_impl(adapter, None)
+        assert result.is_success
+        assert result.data["definition_state"] == state
+        assert result.data["is_fully_defined"] is None
+
+    # Out-of-range values fall through to the speculative probes.
+    adapter.currentSketch = SimpleNamespace(
+        GetConstrainedStatus=lambda: 99, IsFullyDefined=lambda: True
+    )
+    result = sketch._check_sketch_fully_defined_impl(adapter, None)
+    assert result.is_success
+    assert result.data["definition_state"] == "fully_defined"
+    assert result.data["source"] == "sketch.IsFullyDefined"
 
 
 def test_check_sketch_fully_defined_variants() -> None:
