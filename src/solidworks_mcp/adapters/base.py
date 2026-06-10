@@ -315,7 +315,13 @@ class CircularPatternParameters(BaseModel):
     Attributes:
         axis_point (list[float]): A point ``[x, y, z]`` in millimetres on the
             rotation-axis reference — a cylindrical face (uses its axis) or a
-            linear edge. Selected under mark 1.
+            linear edge. Selected under mark 1. Ignored when ``axis_name`` is
+            given. Point selection projects through the view, so a point on
+            an axis buried inside solid material picks the body face in front
+            of it instead — prefer ``axis_name`` for reference axes.
+        axis_name (str): Name of a reference axis feature (e.g. ``"Axis1"``)
+            to rotate about. Takes precedence over ``axis_point``; the robust
+            choice whenever the axis was created via ``create_axis``.
         features (list[str]): Names of the seed features to pattern. Selected
             under mark 4.
         count (int): Total number of instances, including the seed.
@@ -329,7 +335,8 @@ class CircularPatternParameters(BaseModel):
             corrupt slivers — observed live on SW 2026); also faster.
     """
 
-    axis_point: list[float]
+    axis_point: list[float] = []
+    axis_name: str = ""
     features: list[str]
     count: int
     angle: float = 360.0
