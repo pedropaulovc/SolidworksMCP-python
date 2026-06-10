@@ -62,6 +62,23 @@ gh api "repos/$REPO" -X PATCH --silent \
   -f merge_commit_message=PR_BODY \
   -F delete_branch_on_merge=true
 
+# ── Enable GitHub Pages so upstream's deploy-docs workflow succeeds ──────────
+# upstream's `deploy-docs.yml` triggers on push/PR to `main`; its `Setup Pages`
+# step (actions/configure-pages) fails with "Get Pages site failed ...
+# HttpError: Not Found" unless the repo has a Pages site whose build source is
+# GitHub Actions. Enable it here (build_type=workflow) so each `main` sync
+# builds and publishes the docs instead of leaving a perpetual red X. The
+# `deploy` job is already gated to `refs/heads/main`, so only main publishes.
+# Idempotent: POST creates the site, PUT updates the build source if it already
+# exists. A pre-existing custom domain / CNAME is left untouched.
+echo "  Enabling GitHub Pages (build source: GitHub Actions) ..."
+gh api "repos/$REPO/pages" -X POST -f build_type=workflow --silent 2>/dev/null \
+  || gh api "repos/$REPO/pages" -X PUT -f build_type=workflow --silent 2>/dev/null \
+  || echo "    (could not configure Pages — check repo Pages permissions)"
+
+# Re-activate the workflow in case a previous provisioning run disabled it.
+gh api "repos/$REPO/actions/workflows/deploy-docs.yml/enable" -X PUT --silent 2>/dev/null || true
+
 # ── Branch ruleset: Protect main ───────────────────────────────────────────
 # Adaptations vs typescript-project:
 #  - No required_status_checks (upstream's ci.yml is conda-based and we
