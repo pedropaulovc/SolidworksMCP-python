@@ -837,6 +837,83 @@ class ComponentCircularPatternParameters(BaseModel):
     axis_point: list[float] = []
 
 
+class MateEntityRef(BaseModel):
+    """A reference to one entity to mate, located by name or by point.
+
+    Attributes:
+        entity_type (str): ``SelectByID2`` entity-type string, e.g.
+            ``"FACE"``, ``"EDGE"``, ``"PLANE"``, ``"AXIS"``, ``"VERTEX"``.
+        name (str): Entity name for named entities. Inside a component the
+            qualified form is ``"Plane1@shaft-1@assembly"``; a single
+            ``"name@component"`` gets the assembly qualifier appended
+            automatically. Empty when locating by point.
+        point (list[float]): ``[x, y, z]`` in millimetres on the entity
+            (view-dependent pick); empty when locating by name.
+        mark (int): Explicit selection mark; 0 selects with the mate type's
+            default mark (1 for standard mates, 16 for width, 8 for cam).
+    """
+
+    entity_type: str
+    name: str = ""
+    point: list[float] = []
+    mark: int = 0
+
+
+class AddMateParameters(BaseModel):
+    """Parameters for adding a standard mate between selected entities.
+
+    Attributes:
+        mate_type (str): ``"coincident"``, ``"concentric"``,
+            ``"perpendicular"``, ``"parallel"``, ``"tangent"``,
+            ``"distance"``, ``"angle"``, ``"lock"`` or ``"width"``.
+        entities (list[MateEntityRef]): Entities to mate (two for standard
+            mates; width mates take the two width faces plus the two tab
+            faces).
+        alignment (str): ``"aligned"``, ``"anti_aligned"`` or ``"closest"``.
+        flip (bool): Flip to the other valid mate position (distance/angle).
+        distance (float): Distance value in millimetres (distance mates).
+        distance_limits (list[float]): ``[min, max]`` in millimetres for a
+            limit-distance mate; empty for a fixed distance.
+        angle (float): Angle value in degrees (angle mates).
+        angle_limits (list[float]): ``[min, max]`` in degrees for a
+            limit-angle mate; empty for a fixed angle.
+        lock_rotation (bool): Lock component rotation (concentric mates).
+    """
+
+    mate_type: str
+    entities: list[MateEntityRef]
+    alignment: str = "closest"
+    flip: bool = False
+    distance: float = 0.0
+    distance_limits: list[float] = []
+    angle: float = 0.0
+    angle_limits: list[float] = []
+    lock_rotation: bool = False
+
+
+class MateRefParameters(BaseModel):
+    """Parameters referencing one mate feature by name.
+
+    Attributes:
+        name (str): Mate feature name as shown in the tree, e.g.
+            ``"Coincident1"`` or ``"Concentric2"``.
+    """
+
+    name: str
+
+
+class SuppressMateParameters(BaseModel):
+    """Parameters for suppressing or unsuppressing a mate.
+
+    Attributes:
+        name (str): Mate feature name, e.g. ``"Coincident1"``.
+        suppress (bool): ``True`` to suppress, ``False`` to unsuppress.
+    """
+
+    name: str
+    suppress: bool = True
+
+
 class MassProperties(BaseModel):
     """Mass properties information.
 
@@ -1962,6 +2039,66 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="pattern_components_circular is not implemented by this adapter",
+        )
+
+    async def add_mate(
+        self, params: AddMateParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Add a standard mate between selected entities.
+
+        Args:
+            params (AddMateParameters): Mate type, entities and options.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created mate details or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="add_mate is not implemented by this adapter",
+        )
+
+    async def list_mates(self) -> AdapterResult[list[dict[str, Any]]]:
+        """List the mates of the active assembly.
+
+        Returns:
+            AdapterResult[list[dict[str, Any]]]: One entry per mate (name,
+            type, suppression state) or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="list_mates is not implemented by this adapter",
+        )
+
+    async def delete_mate(
+        self, params: MateRefParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Delete a mate by feature name.
+
+        Args:
+            params (MateRefParameters): Mate feature name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Deletion confirmation or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="delete_mate is not implemented by this adapter",
+        )
+
+    async def suppress_mate(
+        self, params: SuppressMateParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Suppress or unsuppress a mate by feature name.
+
+        Args:
+            params (SuppressMateParameters): Mate name and target state.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Resulting state or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="suppress_mate is not implemented by this adapter",
         )
 
     @abstractmethod

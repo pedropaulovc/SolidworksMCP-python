@@ -1,8 +1,9 @@
-"""Assembly component tools for SolidWorks MCP Server (Phase 7A).
+"""Assembly tools for SolidWorks MCP Server (Phases 7A/7B).
 
-Provides tools for managing components of the active assembly document:
-insertion, removal, replacement, precise move/rotate, fix/float and local
-component patterns. Mates are Phase 7B/7C.
+Provides tools for managing components of the active assembly document
+(insertion, removal, replacement, precise move/rotate, fix/float, local
+component patterns) and standard mates (add/list/delete/suppress).
+Mechanical mates are Phase 7C.
 """
 
 from typing import Any
@@ -12,14 +13,18 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from ..adapters.base import (
+    AddMateParameters,
     ComponentCircularPatternParameters,
     ComponentLinearPatternParameters,
     ComponentRefParameters,
     InsertComponentParameters,
+    MateEntityRef,
+    MateRefParameters,
     MoveComponentParameters,
     ReplaceComponentParameters,
     RotateComponentParameters,
     SolidWorksAdapter,
+    SuppressMateParameters,
 )
 from .modeling import _normalize_input
 
@@ -343,6 +348,192 @@ class PatternComponentsCircularInput(BaseModel):
             raise ValueError("axis_name or axis_point is required")
         if self.axis_point and len(self.axis_point) != 3:
             raise ValueError("axis_point must be [x, y, z] in millimetres")
+
+
+class MateEntityInput(BaseModel):
+    """Input schema for one entity of a mate, located by name or by point.
+
+    Attributes:
+        entity_type (str): SelectByID2 entity-type string.
+        name (str): Entity name; empty when locating by point.
+        point (list[float]): Pick point in mm; empty when locating by name.
+        mark (int): Explicit selection mark; 0 uses the mate-type default.
+    """
+
+    entity_type: str = Field(
+        description=(
+            "SelectByID2 entity-type string: 'FACE', 'EDGE', 'PLANE', "
+            "'AXIS', 'VERTEX', ..."
+        )
+    )
+    name: str = Field(
+        default="",
+        description=(
+            "Entity name — inside a component use 'Plane1@shaft-1' (the "
+            "assembly qualifier is appended automatically); empty when "
+            "locating by point"
+        ),
+    )
+    point: list[float] = Field(
+        default=[],
+        description=(
+            "[x, y, z] in millimetres on the entity (view-dependent pick); "
+            "empty when locating by name"
+        ),
+    )
+    mark: int = Field(
+        default=0,
+        description=(
+            "Explicit selection mark; 0 selects with the mate type's "
+            "default (1 standard, 16 width tab faces)"
+        ),
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        """Validate the entity locator.
+
+        Args:
+            __context (Any): The context value.
+
+        Returns:
+            None: None.
+
+        Raises:
+            ValueError: When the locator is missing or malformed.
+        """
+        if not self.entity_type.strip():
+            raise ValueError("entity_type is required")
+        if not self.name.strip() and not self.point:
+            raise ValueError("each entity needs a name or a point")
+        if self.point and len(self.point) != 3:
+            raise ValueError("point must be [x, y, z] in millimetres")
+
+
+class AddMateInput(BaseModel):
+    """Input schema for adding a standard mate.
+
+    Attributes:
+        mate_type (str): Standard mate type name.
+        entities (list[MateEntityInput]): Entities to mate.
+        alignment (str): Mate alignment.
+        flip (bool): Flip to the other valid position.
+        distance (float): Distance value in mm.
+        distance_limits (list[float]): [min, max] mm for a limit mate.
+        angle (float): Angle value in degrees.
+        angle_limits (list[float]): [min, max] degrees for a limit mate.
+        lock_rotation (bool): Lock rotation (concentric mates).
+    """
+
+    mate_type: str = Field(
+        description=(
+            "'coincident', 'concentric', 'perpendicular', 'parallel', "
+            "'tangent', 'distance', 'angle', 'width' or 'lock'"
+        )
+    )
+    entities: list[MateEntityInput] = Field(
+        description=(
+            "Entities to mate — two for standard mates; width mates take "
+            "the two width faces plus the two tab faces"
+        )
+    )
+    alignment: str = Field(
+        default="closest",
+        description="'aligned', 'anti_aligned' or 'closest'",
+    )
+    flip: bool = Field(
+        default=False,
+        description="Flip to the other valid mate position (distance/angle)",
+    )
+    distance: float = Field(
+        default=0.0,
+        description="Distance value in millimetres (distance mates)",
+    )
+    distance_limits: list[float] = Field(
+        default=[],
+        description=(
+            "[min, max] in millimetres for a limit-distance mate; empty "
+            "for a fixed distance"
+        ),
+    )
+    angle: float = Field(
+        default=0.0,
+        description="Angle value in degrees (angle mates)",
+    )
+    angle_limits: list[float] = Field(
+        default=[],
+        description=(
+            "[min, max] in degrees for a limit-angle mate; empty for a fixed angle"
+        ),
+    )
+    lock_rotation: bool = Field(
+        default=False,
+        description="Lock component rotation (concentric mates)",
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        """Validate the mate definition.
+
+        Args:
+            __context (Any): The context value.
+
+        Returns:
+            None: None.
+
+        Raises:
+            ValueError: When the mate definition is incomplete.
+        """
+        if not self.mate_type.strip():
+            raise ValueError("mate_type is required")
+        minimum_entities = 4 if self.mate_type == "width" else 2
+        if len(self.entities) < minimum_entities:
+            raise ValueError(
+                f"{self.mate_type} mate requires at least {minimum_entities} entities"
+            )
+        if self.distance_limits and len(self.distance_limits) != 2:
+            raise ValueError("distance_limits must be [min, max]")
+        if self.angle_limits and len(self.angle_limits) != 2:
+            raise ValueError("angle_limits must be [min, max]")
+
+
+class MateRefInput(BaseModel):
+    """Input schema referencing one mate of the active assembly.
+
+    Attributes:
+        name (str): Mate feature name.
+    """
+
+    name: str = Field(
+        description="Mate feature name as shown in the tree, e.g. 'Coincident1'"
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        """Validate the mate name.
+
+        Args:
+            __context (Any): The context value.
+
+        Returns:
+            None: None.
+
+        Raises:
+            ValueError: When the name is empty.
+        """
+        if not self.name.strip():
+            raise ValueError("name is required")
+
+
+class SuppressMateInput(MateRefInput):
+    """Input schema for suppressing or unsuppressing a mate.
+
+    Attributes:
+        name (str): Mate feature name.
+        suppress (bool): True to suppress, False to unsuppress.
+    """
+
+    suppress: bool = Field(
+        default=True,
+        description="True to suppress the mate, False to unsuppress it",
+    )
 
 
 async def register_assembly_tools(
@@ -777,5 +968,186 @@ async def register_assembly_tools(
             logger.error(f"Error in pattern_components_circular tool: {e}")
             return {"status": "error", "message": f"Unexpected error: {str(e)}"}
 
-    tool_count = 9  # Number of tools registered
+    @mcp.tool()
+    async def add_mate(input_data: AddMateInput) -> dict[str, Any]:
+        """Add a standard mate between entities of the active assembly.
+
+        Selects the entities (by name or pick point), then creates the mate
+        with the requested alignment and value. Distance/angle without
+        limits are fixed at the given value; with limits they become limit
+        mates. Width mates take the two width faces plus the two tab faces.
+
+        Args:
+            input_data (AddMateInput): Mate type, entities and options.
+
+        Returns:
+            dict[str, Any]: Status and created mate details.
+
+        Example:
+            ```python
+            result = await add_mate({
+                "mate_type": "concentric",
+                "entities": [
+                    {"entity_type": "FACE", "point": [0, 0, 10]},
+                    {"entity_type": "AXIS", "name": "Axis1@shaft-1"},
+                ],
+            })
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, AddMateInput)
+            result = await adapter.add_mate(
+                AddMateParameters(
+                    mate_type=input_data.mate_type,
+                    entities=[
+                        MateEntityRef(
+                            entity_type=e.entity_type,
+                            name=e.name,
+                            point=e.point,
+                            mark=e.mark,
+                        )
+                        for e in input_data.entities
+                    ],
+                    alignment=input_data.alignment,
+                    flip=input_data.flip,
+                    distance=input_data.distance,
+                    distance_limits=input_data.distance_limits,
+                    angle=input_data.angle,
+                    angle_limits=input_data.angle_limits,
+                    lock_rotation=input_data.lock_rotation,
+                )
+            )
+            if result.is_success:
+                payload = result.data or {}
+                return {
+                    "status": "success",
+                    "message": f"Added mate: {payload.get('name')}",
+                    "mate": payload,
+                    "execution_time": result.execution_time,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to add mate: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in add_mate tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def list_mates() -> dict[str, Any]:
+        """List the active assembly's mates.
+
+        Walks the MateGroup folder of the feature tree and returns each
+        mate's name, type and suppression state.
+
+        Returns:
+            dict[str, Any]: Status, mates and count.
+
+        Example:
+            ```python
+            result = await list_mates()
+            ```
+        """
+        try:
+            result = await adapter.list_mates()
+            if result.is_success:
+                mates = result.data or []
+                return {
+                    "status": "success",
+                    "mates": mates,
+                    "count": len(mates),
+                    "execution_time": result.execution_time,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to list mates: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in list_mates tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def delete_mate(input_data: MateRefInput) -> dict[str, Any]:
+        """Delete a mate of the active assembly by feature name.
+
+        Args:
+            input_data (MateRefInput): Mate feature name.
+
+        Returns:
+            dict[str, Any]: Status and deletion confirmation.
+
+        Example:
+            ```python
+            result = await delete_mate({"name": "Coincident1"})
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, MateRefInput)
+            result = await adapter.delete_mate(MateRefParameters(name=input_data.name))
+            if result.is_success:
+                payload = result.data or {}
+                return {
+                    "status": "success",
+                    "message": f"Deleted mate: {payload.get('name')}",
+                    "mate": payload,
+                    "execution_time": result.execution_time,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to delete mate: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in delete_mate tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def suppress_mate(input_data: SuppressMateInput) -> dict[str, Any]:
+        """Suppress or unsuppress a mate of the active assembly.
+
+        Applied across all configurations; the resulting state is read back
+        and verified.
+
+        Args:
+            input_data (SuppressMateInput): Mate name and target state.
+
+        Returns:
+            dict[str, Any]: Status and resulting suppression state.
+
+        Example:
+            ```python
+            result = await suppress_mate({
+                "name": "Distance1",
+                "suppress": True,
+            })
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, SuppressMateInput)
+            result = await adapter.suppress_mate(
+                SuppressMateParameters(
+                    name=input_data.name,
+                    suppress=input_data.suppress,
+                )
+            )
+            if result.is_success:
+                payload = result.data or {}
+                return {
+                    "status": "success",
+                    "message": f"Set mate suppression: {payload.get('name')}",
+                    "mate": payload,
+                    "execution_time": result.execution_time,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to set mate suppression: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in suppress_mate tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    tool_count = 13  # Number of tools registered
     return tool_count

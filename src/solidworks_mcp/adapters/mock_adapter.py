@@ -19,6 +19,7 @@ from .base import (
     AdapterHealth,
     AdapterResult,
     AdapterResultStatus,
+    AddMateParameters,
     AddThreadParameters,
     ApplyMaterialParameters,
     CircularPatternParameters,
@@ -39,6 +40,7 @@ from .base import (
     LinearPatternParameters,
     LoftParameters,
     MassProperties,
+    MateRefParameters,
     MeasureParameters,
     MirrorFeatureParameters,
     MoveComponentParameters,
@@ -50,6 +52,7 @@ from .base import (
     SolidWorksAdapter,
     SolidWorksFeature,
     SolidWorksModel,
+    SuppressMateParameters,
     SweepParameters,
 )
 from .solidworks.sketch import RELATION_NAME_MAP
@@ -136,6 +139,10 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         # holds file_path/configuration/position/rotation/fixed state so the
         # Phase 7A component tools behave statefully in mock mode.
         self._components: dict[str, dict[str, Any]] = {}
+        # Assembly mates keyed by feature name ("Coincident1"); each value
+        # holds mate_type/alignment/entities/suppressed state so the
+        # Phase 7B mate tools behave statefully in mock mode.
+        self._mates: dict[str, dict[str, Any]] = {}
         self._operation_count = 0
 
         # Configurable simulation delays (in seconds)
@@ -1716,6 +1723,187 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 "axis_name": params.axis_name,
                 "axis_point": params.axis_point,
             },
+        )
+
+    # Mirrors assembly._MATE_TYPES / _MATE_ALIGNMENTS so mock validation
+    # rejects exactly what the live adapter rejects.
+    _MATE_TYPES = (
+        "coincident",
+        "concentric",
+        "perpendicular",
+        "parallel",
+        "tangent",
+        "distance",
+        "angle",
+        "width",
+        "lock",
+    )
+    _MATE_ALIGNMENTS = ("aligned", "anti_aligned", "closest")
+
+    async def add_mate(
+        self, params: AddMateParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock adding a standard mate between entities.
+
+        Args:
+            params (AddMateParameters): Mate type, entities and options.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created mate details.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if params.mate_type not in self._MATE_TYPES:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown mate_type: {params.mate_type!r} "
+                f"(expected one of {sorted(self._MATE_TYPES)})",
+            )
+        if params.alignment not in self._MATE_ALIGNMENTS:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown alignment: {params.alignment!r} "
+                f"(expected one of {sorted(self._MATE_ALIGNMENTS)})",
+            )
+        minimum_entities = 4 if params.mate_type == "width" else 2
+        if len(params.entities) < minimum_entities:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"{params.mate_type} mate requires at least "
+                f"{minimum_entities} entities",
+            )
+        for limits, label in (
+            (params.distance_limits, "distance_limits"),
+            (params.angle_limits, "angle_limits"),
+        ):
+            if limits and len(limits) != 2:
+                return AdapterResult(
+                    status=AdapterResultStatus.ERROR,
+                    error=f"{label} must be [min, max]",
+                )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        stem = params.mate_type.title()
+        instance = (
+            sum(1 for m in self._mates.values() if m["mate_type"] == params.mate_type)
+            + 1
+        )
+        name = f"{stem}{instance}"
+        self._mates[name] = {
+            "mate_type": params.mate_type,
+            "alignment": params.alignment,
+            "entities": len(params.entities),
+            "suppressed": False,
+        }
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": name,
+                "mate_type": params.mate_type,
+                "alignment": params.alignment,
+                "entities": len(params.entities),
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def list_mates(self) -> AdapterResult[list[dict[str, Any]]]:
+        """Mock listing the active assembly's mates.
+
+        Returns:
+            AdapterResult[list[dict[str, Any]]]: Name/type/suppressed per mate.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        mates = [
+            {
+                "name": name,
+                "type": mate["mate_type"],
+                "suppressed": mate["suppressed"],
+            }
+            for name, mate in self._mates.items()
+        ]
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=mates,
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    def _mate_or_error(
+        self, name: str
+    ) -> tuple[str, dict[str, Any]] | AdapterResult[dict[str, Any]]:
+        """Resolve a stored mock mate, or build the error result."""
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if not name.strip():
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="name is required"
+            )
+        mate = self._mates.get(name)
+        if mate is None:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Mate not found: {name!r}",
+            )
+        return name, mate
+
+    async def delete_mate(
+        self, params: MateRefParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock deleting a mate by feature name.
+
+        Args:
+            params (MateRefParameters): Mate feature name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Deletion confirmation.
+        """
+        resolved = self._mate_or_error(params.name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, _ = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        del self._mates[name]
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": name, "removed": True},
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def suppress_mate(
+        self, params: SuppressMateParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock suppressing or unsuppressing a mate.
+
+        Args:
+            params (SuppressMateParameters): Mate name and target state.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Resulting suppression state.
+        """
+        resolved = self._mate_or_error(params.name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, mate = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        mate["suppressed"] = params.suppress
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": name, "suppressed": params.suppress},
+            execution_time=self._delays["model_operation"] / 2,
         )
 
     async def create_sketch(self, plane: str) -> AdapterResult[dict[str, Any]]:  # type: ignore[override]

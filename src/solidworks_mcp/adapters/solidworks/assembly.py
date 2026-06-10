@@ -31,14 +31,17 @@ from typing import Any, cast
 from ..base import (
     AdapterResult,
     AdapterResultStatus,
+    AddMateParameters,
     ComponentCircularPatternParameters,
     ComponentLinearPatternParameters,
     ComponentRefParameters,
     InsertComponentParameters,
+    MateRefParameters,
     MoveComponentParameters,
     ReplaceComponentParameters,
     RotateComponentParameters,
     SolidWorksFeature,
+    SuppressMateParameters,
 )
 from ..com_variant import null_callout
 from .features import (
@@ -62,6 +65,42 @@ _REPLACE_CONFIG_MATCH_NAME = 0
 _REPLACE_CONFIG_MANUALLY_SELECT = 1
 
 _MODEL_EXTENSION_DOC_TYPES = {".sldprt": 1, ".sldasm": 2}  # swDocumentTypes_e
+
+# swMateType_e — the standard (Phase 7B) subset
+_MATE_TYPES = {
+    "coincident": 0,
+    "concentric": 1,
+    "perpendicular": 2,
+    "parallel": 3,
+    "tangent": 4,
+    "distance": 5,
+    "angle": 6,
+    "width": 11,
+    "lock": 16,
+}
+
+# swMateAlign_e
+_MATE_ALIGNMENTS = {"aligned": 0, "anti_aligned": 1, "closest": 2}
+
+# AddMate5 selection marks: width tab faces use 16, everything else 1
+# (cam-follower's mark 8 arrives with the Phase 7C mechanical mates).
+_MATE_DEFAULT_MARKS = {"width": 16}
+
+# swAddMateError_e
+_MATE_ERRORS = {
+    0: "unknown error",
+    1: "no error",
+    2: "unknown mate type",
+    3: "unknown mate alignment",
+    4: "incorrect selections for mate",
+    5: "mate over-defines the assembly",
+    6: "invalid gear ratios",
+}
+
+# swFeatureSuppressionAction_e / swInConfigurationOpts_e
+_SUPPRESS_FEATURE = 0
+_UNSUPPRESS_FEATURE = 1
+_ALL_CONFIGURATIONS = 2
 
 
 class SolidWorksAssemblyMixin:
@@ -111,6 +150,24 @@ class SolidWorksAssemblyMixin:
         self, params: ComponentCircularPatternParameters
     ) -> AdapterResult[SolidWorksFeature]:
         return _pattern_components_circular_impl(self, params)
+
+    async def add_mate(
+        self, params: AddMateParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        return _add_mate_impl(self, params)
+
+    async def list_mates(self) -> AdapterResult[list[dict[str, Any]]]:
+        return _list_mates_impl(self)
+
+    async def delete_mate(
+        self, params: MateRefParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        return _delete_mate_impl(self, params)
+
+    async def suppress_mate(
+        self, params: SuppressMateParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        return _suppress_mate_impl(self, params)
 
 
 # ---------------------------------------------------------------------------
@@ -1023,4 +1080,379 @@ def _pattern_components_circular_impl(
         adapter._handle_com_operation(
             "pattern_components_circular", _circular_operation
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mates (Phase 7B)
+# ---------------------------------------------------------------------------
+
+
+def _qualify_entity_name(adapter: Any, name: str) -> str:
+    """Complete a mate-entity name with the assembly qualifier when needed.
+
+    ``SelectByID2`` names for entities inside a component take the form
+    ``"Plane1@shaft-1@assembly"``. A caller passing ``"Plane1@shaft-1"``
+    gets the assembly title appended; names with two ``@`` qualifiers (or
+    none — assembly-level planes like ``"Front Plane"``) pass through.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        name: Entity name as provided by the caller.
+
+    Returns:
+        str: Fully qualified entity name.
+    """
+    if name.count("@") == 1:
+        return f"{name}@{_assembly_title(adapter)}"
+    return name
+
+
+def _select_mate_entity(adapter: Any, ref: Any, mark: int) -> bool:
+    """Select one mate entity by name or point under a selection mark.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        ref: A ``MateEntityRef``.
+        mark: Selection mark to apply.
+
+    Returns:
+        bool: ``True`` when the entity selected.
+    """
+    if ref.name:
+        qualified = _qualify_entity_name(adapter, ref.name)
+        return bool(
+            adapter._attempt(
+                lambda: adapter.currentModel.Extension.SelectByID2(
+                    qualified,
+                    ref.entity_type,
+                    0.0,
+                    0.0,
+                    0.0,
+                    True,
+                    mark,
+                    null_callout(),
+                    0,
+                ),
+                default=False,
+            )
+        )
+    if len(ref.point) == 3:
+        x, y, z = (float(c) / 1000.0 for c in ref.point)
+        return bool(
+            adapter._attempt(
+                lambda: adapter.currentModel.Extension.SelectByID2(
+                    "", ref.entity_type, x, y, z, True, mark, null_callout(), 0
+                ),
+                default=False,
+            )
+        )
+    return False
+
+
+def _mate_group_subfeatures(adapter: Any) -> list[Any]:
+    """Collect the mate features inside the assembly's MateGroup folder(s).
+
+    Mates do not appear in the top-level ``FirstFeature``/``GetNextFeature``
+    walk — they are sub-features of the ``MateGroup`` feature, reached via
+    ``GetFirstSubFeature``/``GetNextSubFeature``.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+
+    Returns:
+        list[Any]: Mate feature dispatches in tree order.
+    """
+    mates: list[Any] = []
+    _flag_feature_methods(adapter.currentModel, "IModelDoc2")
+    feature = _read_member(adapter.currentModel, "FirstFeature")
+    for _ in range(5000):
+        if not feature:
+            break
+        _flag_feature_methods(feature, "IFeature")
+        if _read_member(feature, "GetTypeName2") == "MateGroup":
+            sub = _read_member(feature, "GetFirstSubFeature")
+            for _ in range(5000):
+                if not sub:
+                    break
+                _flag_feature_methods(sub, "IFeature")
+                mates.append(sub)
+                sub = _read_member(sub, "GetNextSubFeature")
+        feature = _read_member(feature, "GetNextFeature")
+    return mates
+
+
+def _mate_feature_by_name(adapter: Any, name: str) -> Any:
+    """Resolve a mate feature by its tree name.
+
+    ``FeatureByName`` resolves mates too; the MateGroup walk is the
+    fallback for builds where it does not reach sub-features.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        name: Mate feature name, e.g. ``"Coincident1"``.
+
+    Returns:
+        Any: The mate feature dispatch or ``None``.
+    """
+    feature = adapter._attempt(
+        lambda: adapter.currentModel.FeatureByName(name), default=None
+    )
+    if feature:
+        _flag_feature_methods(feature, "IFeature")
+        return feature
+    for mate in _mate_group_subfeatures(adapter):
+        if str(_read_member(mate, "Name")) == name:
+            return mate
+    return None
+
+
+def _mate_names(adapter: Any) -> set[str]:
+    """Return the current set of mate feature names."""
+    return {
+        str(_read_member(mate, "Name")) for mate in _mate_group_subfeatures(adapter)
+    }
+
+
+def _add_mate_impl(
+    adapter: Any, params: AddMateParameters
+) -> AdapterResult[dict[str, Any]]:
+    """Add a standard mate via ``IAssemblyDoc::AddMate5``.
+
+    ``AddMate5`` is selection-mark shaped (the right fit for late-bound
+    COM; the newer ``CreateMate`` needs typed mate-data objects): entities
+    are preselected under mark 1 (16 for width-mate tab faces), then the
+    call returns the mate and an ``out`` error status — passed as a
+    by-reference VARIANT under pywin32 late binding. A distance/angle
+    without limits sets the upper and lower limits equal to the value (per
+    the API remarks).
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Mate type, entities, alignment and value options.
+
+    Returns:
+        AdapterResult[dict[str, Any]]: Created mate name/type or error.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    mate_type = _MATE_TYPES.get(params.mate_type)
+    if mate_type is None:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown mate_type: {params.mate_type!r} "
+            f"(expected one of {sorted(_MATE_TYPES)})",
+        )
+    alignment = _MATE_ALIGNMENTS.get(params.alignment)
+    if alignment is None:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown alignment: {params.alignment!r} "
+            f"(expected one of {sorted(_MATE_ALIGNMENTS)})",
+        )
+    minimum_entities = 4 if params.mate_type == "width" else 2
+    if len(params.entities) < minimum_entities:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"{params.mate_type} mate requires at least "
+            f"{minimum_entities} entities",
+        )
+    for limits, label in (
+        (params.distance_limits, "distance_limits"),
+        (params.angle_limits, "angle_limits"),
+    ):
+        if limits and len(limits) != 2:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"{label} must be [min, max]",
+            )
+
+    def _mate_operation() -> dict[str, Any]:
+        model = adapter.currentModel
+        adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+        default_mark = _MATE_DEFAULT_MARKS.get(params.mate_type, 1)
+        for index, ref in enumerate(params.entities):
+            mark = ref.mark or default_mark
+            if not _select_mate_entity(adapter, ref, mark):
+                located = ref.name or ref.point
+                raise Exception(
+                    f"Failed to select mate entity {index + 1} "
+                    f"({ref.entity_type} at {located!r})"
+                )
+
+        distance = float(params.distance) / 1000.0
+        if params.distance_limits:
+            distance_lower = float(params.distance_limits[0]) / 1000.0
+            distance_upper = float(params.distance_limits[1]) / 1000.0
+        else:
+            distance_lower = distance_upper = distance
+        angle = math.radians(float(params.angle))
+        if params.angle_limits:
+            angle_lower = math.radians(float(params.angle_limits[0]))
+            angle_upper = math.radians(float(params.angle_limits[1]))
+        else:
+            angle_lower = angle_upper = angle
+
+        names_before = _mate_names(adapter)
+        _flag_feature_methods(model, "IAssemblyDoc")
+        error_status = _byref_i4()
+        mate = model.AddMate5(
+            mate_type,
+            alignment,
+            bool(params.flip),
+            distance,
+            distance_upper,
+            distance_lower,
+            1.0,  # GearRatioNumerator (gear mates are Phase 7C)
+            1.0,  # GearRatioDenominator
+            angle,
+            angle_upper,
+            angle_lower,
+            False,  # ForPositioningOnly — keep the mate
+            bool(params.lock_rotation),
+            0,  # WidthMateOption (swWidthMateOption_Centered)
+            error_status,
+        )
+        adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+
+        status = adapter._attempt(lambda: int(error_status.value), default=None)
+        if status not in (None, 1) or (mate is None and status != 1):
+            reason = _MATE_ERRORS.get(status or 0, f"error status {status}")
+            raise Exception(f"AddMate5 failed: {reason}")
+
+        new_names = sorted(_mate_names(adapter) - names_before)
+        name = new_names[-1] if new_names else ""
+        adapter._attempt(lambda: model.EditRebuild3())
+        return {
+            "name": name,
+            "mate_type": params.mate_type,
+            "alignment": params.alignment,
+            "entities": len(params.entities),
+        }
+
+    return cast(
+        AdapterResult[dict[str, Any]],
+        adapter._handle_com_operation("add_mate", _mate_operation),
+    )
+
+
+def _list_mates_impl(adapter: Any) -> AdapterResult[list[dict[str, Any]]]:
+    """List the active assembly's mates from the MateGroup folder.
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+
+    Returns:
+        AdapterResult[list[dict[str, Any]]]: ``name``/``type``/
+        ``suppressed`` per mate.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+
+    def _list_operation() -> list[dict[str, Any]]:
+        mates: list[dict[str, Any]] = []
+        for mate in _mate_group_subfeatures(adapter):
+            mates.append(
+                {
+                    "name": str(_read_member(mate, "Name")),
+                    "type": str(_read_member(mate, "GetTypeName2")),
+                    "suppressed": bool(
+                        adapter._attempt(lambda m=mate: m.IsSuppressed(), default=False)
+                    ),
+                }
+            )
+        return mates
+
+    return cast(
+        AdapterResult[list[dict[str, Any]]],
+        adapter._handle_com_operation("list_mates", _list_operation),
+    )
+
+
+def _delete_mate_impl(
+    adapter: Any, params: MateRefParameters
+) -> AdapterResult[dict[str, Any]]:
+    """Delete a mate by feature name (select + ``DeleteSelection2``).
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Mate feature name.
+
+    Returns:
+        AdapterResult[dict[str, Any]]: Deletion confirmation or error.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if not params.name.strip():
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="name is required")
+
+    def _delete_operation() -> dict[str, Any]:
+        model = adapter.currentModel
+        feature = _mate_feature_by_name(adapter, params.name)
+        if feature is None:
+            raise Exception(f"Mate not found: {params.name!r}")
+
+        adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+        if not adapter._attempt(lambda: feature.Select2(False, 0), default=False):
+            raise Exception(f"Failed to select mate: {params.name!r}")
+        deleted = adapter._attempt(
+            lambda: model.Extension.DeleteSelection2(0), default=False
+        )
+        if not deleted:
+            adapter._attempt(lambda: model.EditDelete(), default=None)
+        if params.name in _mate_names(adapter):
+            raise Exception(f"Mate {params.name!r} is still present after delete")
+        return {"name": params.name, "removed": True}
+
+    return cast(
+        AdapterResult[dict[str, Any]],
+        adapter._handle_com_operation("delete_mate", _delete_operation),
+    )
+
+
+def _suppress_mate_impl(
+    adapter: Any, params: SuppressMateParameters
+) -> AdapterResult[dict[str, Any]]:
+    """Suppress/unsuppress a mate via ``IFeature::SetSuppression2``.
+
+    Applied across all configurations; the resulting state is verified by
+    reading ``IsSuppressed`` back. The configuration-names argument is a
+    typed-null VARIANT (bare ``None`` raises ``Type mismatch`` under
+    pywin32 late binding).
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Mate feature name and target state.
+
+    Returns:
+        AdapterResult[dict[str, Any]]: Resulting state or error.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if not params.name.strip():
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="name is required")
+
+    def _suppress_operation() -> dict[str, Any]:
+        feature = _mate_feature_by_name(adapter, params.name)
+        if feature is None:
+            raise Exception(f"Mate not found: {params.name!r}")
+
+        action = _SUPPRESS_FEATURE if params.suppress else _UNSUPPRESS_FEATURE
+        adapter._attempt(
+            lambda: feature.SetSuppression2(
+                action, _ALL_CONFIGURATIONS, null_callout()
+            ),
+            default=False,
+        )
+        resulting = bool(
+            adapter._attempt(lambda: feature.IsSuppressed(), default=False)
+        )
+        if resulting != params.suppress:
+            state = "suppressed" if params.suppress else "unsuppressed"
+            raise Exception(f"Mate {params.name!r} did not become {state}")
+        return {"name": params.name, "suppressed": resulting}
+
+    return cast(
+        AdapterResult[dict[str, Any]],
+        adapter._handle_com_operation("suppress_mate", _suppress_operation),
     )
