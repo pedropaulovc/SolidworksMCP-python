@@ -1637,7 +1637,7 @@ def _circular_pattern_impl(
             spacing_rad,  # Spacing (radians; total angle when EqualSpacing)
             False,  # FlipDirection
             "NULL",  # DName
-            False,  # GeometryPattern
+            bool(params.geometry_pattern),  # GeometryPattern
             bool(params.equal_spacing),  # EqualSpacing
             False,  # VaryInstance
             False,  # SyncSubAssemblies
@@ -1663,6 +1663,7 @@ def _circular_pattern_impl(
                 "count": int(params.count),
                 "angle": float(params.angle),
                 "equal_spacing": bool(params.equal_spacing),
+                "geometry_pattern": bool(params.geometry_pattern),
             },
             properties={"created": datetime.now().isoformat()},
         )

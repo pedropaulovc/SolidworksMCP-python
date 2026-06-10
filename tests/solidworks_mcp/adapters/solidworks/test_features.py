@@ -287,6 +287,33 @@ def test_circular_pattern_impl_success() -> None:
     assert result.data.parameters["count"] == 6
 
 
+def test_circular_pattern_impl_geometry_pattern_forwarded() -> None:
+    adapter = _FakeFeatureAdapter()
+    created = SimpleNamespace(Name="CircPattern1")
+    captured: list[tuple] = []
+
+    def _capture(*args):
+        captured.append(args)
+        return created
+
+    adapter.currentModel = _named_feature_model(
+        FeatureManager=SimpleNamespace(FeatureCircularPattern5=_capture),
+    )
+    result = features._circular_pattern_impl(
+        adapter,
+        CircularPatternParameters(
+            axis_point=[0.0, 0.0, 10.0],
+            features=["Cut-Extrude1"],
+            count=6,
+            geometry_pattern=True,
+        ),
+    )
+    assert result.is_success
+    assert result.data.parameters["geometry_pattern"] is True
+    # FeatureCircularPattern5 arg 5 is GeometryPattern.
+    assert captured[0][4] is True
+
+
 def test_circular_pattern_impl_axis_selection_failure() -> None:
     adapter = _FakeFeatureAdapter()
     adapter.currentModel = _named_feature_model(

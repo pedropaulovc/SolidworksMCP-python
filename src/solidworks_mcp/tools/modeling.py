@@ -434,6 +434,7 @@ class CircularPatternInput(BaseModel):
         count (int): Total instances including the seed.
         angle (float): Total span in degrees when equal_spacing, else step.
         equal_spacing (bool): Distribute equally across angle.
+        geometry_pattern (bool): Copy seed geometry verbatim per instance.
     """
 
     axis_point: list[float] = Field(
@@ -450,6 +451,13 @@ class CircularPatternInput(BaseModel):
     )
     equal_spacing: bool = Field(
         default=True, description="Distribute instances equally across the angle"
+    )
+    geometry_pattern: bool = Field(
+        default=False,
+        description=(
+            "Copy the seed feature's geometry verbatim instead of re-solving "
+            "it per instance (required for equation-driven seed profiles)"
+        ),
     )
 
     def model_post_init(self, __context: Any) -> None:
@@ -1420,6 +1428,7 @@ async def register_modeling_tools(
                     count=input_data.count,
                     angle=input_data.angle,
                     equal_spacing=input_data.equal_spacing,
+                    geometry_pattern=input_data.geometry_pattern,
                 )
             )
             if result.is_success:
