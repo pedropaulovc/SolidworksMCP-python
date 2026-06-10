@@ -507,6 +507,14 @@ def _select_by_point(
     ``None`` raises ``Type mismatch`` under pywin32 late binding (see
     :func:`solidworks_mcp.adapters.com_variant.null_callout`).
 
+    .. warning:: Coordinate selection is **view-dependent**: SolidWorks picks
+        at the point's screen projection, so an entity hidden behind the body
+        in the current view orientation fails to select (verified live on SW
+        2026: in the default trimetric view the box vertex at the far-lower
+        corner and its adjacent hidden edges return ``False`` while all
+        visible ones succeed). Callers should locate entities by points
+        visible in the active view.
+
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
         entity_type: ``SelectByID2`` entity-type string, e.g. ``"FACE"`` or
@@ -1241,7 +1249,17 @@ def _feature_objects(adapter: Any) -> list[tuple[str, Any]]:
         for _ in range(5000):
             if not feat:
                 break
-            _flag_feature_methods(feat, "IFeature")
+            # Flag only the one method the walk calls. Full IFeature flagging
+            # costs a GetIDsOfNames round-trip per method name per feature —
+            # on every walk, because each GetNextFeature returns a fresh
+            # CDispatch the id()-keyed cache never hits — which made tree
+            # diffs quadratic in feature count (~13 s per feature creation on
+            # a 30-feature tree). ``Name`` is a property and needs no flag;
+            # ``_read_member`` tolerates either resolution anyway.
+            try:
+                feat._FlagAsMethod("GetNextFeature")
+            except Exception:
+                pass
             try:
                 name = _read_member(feat, "Name")
             except Exception:
@@ -1297,7 +1315,12 @@ def _resolve_feature(adapter: Any, returned: Any, names_before: set[str]) -> Any
         for name, feat in _feature_objects(adapter)
         if name and name not in names_before
     ]
-    return new[-1] if new else None
+    if not new:
+        return None
+    # The walk flags only GetNextFeature (perf); fully flag the one feature
+    # handed to callers so its members dispatch correctly downstream.
+    _flag_feature_methods(new[-1], "IFeature")
+    return new[-1]
 
 
 def _select_edge_points(adapter: Any, edge_points: list[list[float]]) -> None:
