@@ -5,6 +5,7 @@ multiple instances are available.
 """
 
 import asyncio
+import inspect
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -112,6 +113,53 @@ class ConnectionPoolAdapter(SolidWorksAdapter):
         self.pool_initialized = False
         self._lock = asyncio.Lock()
         self.timeout = timeout if timeout is not None else 30.0
+        self._install_generic_delegates()
+
+    def _install_generic_delegates(self) -> None:
+        """Route adapter methods without an explicit wrapper through the pool.
+
+        New adapter methods land on ``SolidWorksAdapter`` as overridable
+        defaults that return a "not implemented" error. Because this wrapper
+        also inherits from the base, attribute lookup resolves to that
+        default instead of a pooled adapter's implementation for any method
+        not explicitly wrapped above — silently disabling new tools whenever
+        this class lags the adapter surface. Instance-level delegates close
+        the gap generically: every public coroutine on the base that this
+        class (or a subclass) doesn't define is forwarded to a pooled
+        adapter.
+        """
+        explicit: set[str] = set()
+        for klass in type(self).__mro__:
+            if klass is SolidWorksAdapter:
+                break
+            explicit.update(vars(klass))
+        for name in dir(SolidWorksAdapter):
+            if name.startswith("_") or name in explicit:
+                continue
+            member = inspect.getattr_static(SolidWorksAdapter, name, None)
+            if not inspect.iscoroutinefunction(member):
+                continue
+            setattr(self, name, self._make_generic_delegate(name))
+
+    def _make_generic_delegate(
+        self, name: str
+    ) -> Callable[..., Awaitable[AdapterResult[Any]]]:
+        """Build a pool delegate for an adapter method.
+
+        Args:
+            name (str): Adapter method name to forward to a pooled adapter.
+
+        Returns:
+            Callable[..., Awaitable[AdapterResult[Any]]]: The delegate.
+        """
+
+        async def _delegate(*args: Any, **kwargs: Any) -> AdapterResult[Any]:
+            return await self._execute_with_pool(
+                name, lambda adapter: getattr(adapter, name)(*args, **kwargs)
+            )
+
+        _delegate.__name__ = name
+        return _delegate
 
     async def _attempt_async(
         self, operation: Callable[[], Awaitable[T]], default: T | None = None
