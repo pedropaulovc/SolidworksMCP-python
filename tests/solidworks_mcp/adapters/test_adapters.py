@@ -678,9 +678,7 @@ class TestPyWin32AdapterBranches:
         assert (
             await adapter.sketch_linear_pattern(["L1"], 1.0, 0.0, 5.0, 3)
         ).is_success
-        assert (
-            await adapter.sketch_circular_pattern(["L1"], 180.0, 4)
-        ).is_success
+        assert (await adapter.sketch_circular_pattern(["L1"], 180.0, 4)).is_success
         assert (await adapter.sketch_mirror(["L1"], "Centerline_42")).is_success
         assert (await adapter.sketch_offset(["L1"], 1.0, True)).is_success
 
@@ -2012,10 +2010,42 @@ class TestPyWin32AdapterBranches:
         assert stl_data.Merge is True
         assert stl_data.ExportBodiesAs == 0
 
+    def test_save_stl_with_extension_passes_full_saveas2_signature(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """SaveAs2 receives all 8 typed params (issue #28 VT_NULL fix).
+
+        ``IModelDocExtension::SaveAs2`` is ``(Name, Version, Options,
+        ExportData, ReferencePrefixOrSuffixText: str, AddTextAsPrefix: bool,
+        byref Errors, byref Warnings)`` — bare ``None``/wrong-typed
+        placeholders marshal as VT_NULL and SolidWorks rejects the call.
+        """
+        adapter = self._build_adapter(monkeypatch)
+        out_file = tmp_path / "out.stl"
+
+        def _saveas2(*args):
+            out_file.write_text("solid", encoding="utf-8")
+            return True
+
+        extension = SimpleNamespace(SaveAs2=Mock(side_effect=_saveas2))
+        stl_data = object()
+        saved = adapter._save_stl_with_extension(extension, stl_data, str(out_file))
+
+        assert saved is True
+        assert extension.SaveAs2.call_count == 1
+        args = extension.SaveAs2.call_args.args
+        assert len(args) == 8
+        assert args[0] == str(out_file)
+        assert args[1] == 0  # swSaveAsCurrentVersion
+        assert args[2] == 2  # swSaveAsOptions_Silent
+        assert args[3] is stl_data
+        assert args[4] == ""  # ReferencePrefixOrSuffixText must be a string
+        assert args[5] is False  # AddTextAsPrefix must be a bool
+
     def test_save_stl_with_extension_fallback_to_no_export_data(
         self, monkeypatch, tmp_path
     ) -> None:
-        """_save_stl_with_extension should retry SaveAs2 with None export data."""
+        """_save_stl_with_extension should retry SaveAs2 with typed-null export data."""
         adapter = self._build_adapter(monkeypatch)
         out_file = tmp_path / "out.stl"
 
@@ -2588,10 +2618,8 @@ class TestPyWin32AdapterBranches:
             if name in fail:
                 return None
             feature = SimpleNamespace()
-            feature.Select2 = (
-                lambda append, mark, _n=name: bool(
-                    selected.append((_n, append, mark)) or True
-                )
+            feature.Select2 = lambda append, mark, _n=name: bool(
+                selected.append((_n, append, mark)) or True
             )
             return feature
 
@@ -2713,9 +2741,7 @@ class TestPyWin32AdapterBranches:
         assert "Sketch1" in (result.error or "")
 
     @pytest.mark.asyncio
-    async def test_create_loft_no_model_and_too_few_profiles(
-        self, monkeypatch
-    ) -> None:
+    async def test_create_loft_no_model_and_too_few_profiles(self, monkeypatch) -> None:
         """create_loft guards: no active model, then fewer than two profiles."""
         adapter = self._build_adapter(monkeypatch)
 
@@ -2847,9 +2873,7 @@ class TestPyWin32AdapterBranches:
         adapter.currentSketchManager = None
         assert (await adapter.add_sketch_dimension("L1", None, "linear", 10.0)).is_error
         assert (await adapter.sketch_linear_pattern(["L1"], 1.0, 0.0, 5.0, 3)).is_error
-        assert (
-            await adapter.sketch_circular_pattern(["L1"], 180.0, 4)
-        ).is_error
+        assert (await adapter.sketch_circular_pattern(["L1"], 180.0, 4)).is_error
         assert (await adapter.sketch_mirror(["L1"], "CL1")).is_error
         assert (await adapter.sketch_offset(["L1"], 1.0, True)).is_error
 
