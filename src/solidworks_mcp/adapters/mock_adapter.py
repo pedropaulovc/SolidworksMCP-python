@@ -835,10 +835,16 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         Returns:
             AdapterResult[SolidWorksFeature]: The result produced by the operation.
         """
+        if not params.axis_name and not params.axis_point:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="Circular pattern requires axis_name or axis_point",
+            )
         return await self._mock_feature(
             "CircularPattern",
             {
                 "axis_point": params.axis_point,
+                "axis_name": params.axis_name,
                 "features": params.features,
                 "count": params.count,
                 "angle": params.angle,

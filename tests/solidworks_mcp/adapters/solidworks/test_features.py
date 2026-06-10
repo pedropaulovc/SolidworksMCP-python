@@ -330,6 +330,64 @@ def test_circular_pattern_impl_axis_selection_failure() -> None:
     assert "Failed to select rotation axis" in (result.error or "")
 
 
+def test_circular_pattern_impl_axis_name_selects_by_name() -> None:
+    adapter = _FakeFeatureAdapter()
+    created = SimpleNamespace(Name="CircPattern1")
+    looked_up: list[str] = []
+
+    def _feature_by_name(name):
+        looked_up.append(name)
+        return SimpleNamespace(Select2=lambda append, mark: True)
+
+    adapter.currentModel = _named_feature_model(
+        FeatureByName=_feature_by_name,
+        # Point selection must NOT be consulted when axis_name is given.
+        Extension=SimpleNamespace(
+            SelectByID2=lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("axis_point path used despite axis_name")
+            )
+        ),
+        FeatureManager=SimpleNamespace(FeatureCircularPattern5=lambda *a: created),
+    )
+    result = features._circular_pattern_impl(
+        adapter,
+        CircularPatternParameters(
+            axis_name="Axis1", features=["Cut-Extrude1"], count=24
+        ),
+    )
+    assert result.is_success
+    assert result.data.parameters["axis_name"] == "Axis1"
+    assert result.data.parameters["axis_entity"] == "AXIS"
+    assert "Axis1" in looked_up
+
+
+def test_circular_pattern_impl_axis_name_lookup_failure() -> None:
+    adapter = _FakeFeatureAdapter()
+    adapter.currentModel = _named_feature_model(
+        FeatureByName=lambda name: None,
+        FeatureManager=SimpleNamespace(FeatureCircularPattern5=lambda *a: object()),
+    )
+    result = features._circular_pattern_impl(
+        adapter,
+        CircularPatternParameters(axis_name="Nope", features=["F1"], count=4),
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "Failed to select rotation axis by name" in (result.error or "")
+
+
+def test_circular_pattern_impl_requires_axis_reference() -> None:
+    adapter = _FakeFeatureAdapter()
+    adapter.currentModel = _named_feature_model(
+        FeatureManager=SimpleNamespace(FeatureCircularPattern5=lambda *a: object()),
+    )
+    result = features._circular_pattern_impl(
+        adapter,
+        CircularPatternParameters(features=["F1"], count=4),
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "axis_name or axis_point" in (result.error or "")
+
+
 def test_linear_pattern_impl_success() -> None:
     adapter = _FakeFeatureAdapter()
     created = SimpleNamespace(Name="LPattern1")

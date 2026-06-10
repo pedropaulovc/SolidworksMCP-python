@@ -430,6 +430,7 @@ class CircularPatternInput(BaseModel):
 
     Attributes:
         axis_point (list[float]): Point [x, y, z] mm on the rotation axis ref.
+        axis_name (str): Reference-axis feature name (preferred over point).
         features (list[str]): Names of seed features to pattern.
         count (int): Total instances including the seed.
         angle (float): Total span in degrees when equal_spacing, else step.
@@ -438,10 +439,21 @@ class CircularPatternInput(BaseModel):
     """
 
     axis_point: list[float] = Field(
+        default=[],
         description=(
             "Point [x, y, z] in mm on the rotation-axis reference: a "
-            "cylindrical face or a linear edge."
-        )
+            "cylindrical face or a linear edge. Ignored when axis_name is "
+            "given; the point pick projects through the view and fails on "
+            "axes buried inside solid material."
+        ),
+    )
+    axis_name: str = Field(
+        default="",
+        description=(
+            "Name of a reference-axis feature (e.g. 'Axis1') to rotate "
+            "about. Takes precedence over axis_point; robust for axes from "
+            "create_axis."
+        ),
     )
     features: list[str] = Field(description="Names of seed features to pattern")
     count: int = Field(description="Total number of instances, including the seed")
@@ -461,7 +473,9 @@ class CircularPatternInput(BaseModel):
     )
 
     def model_post_init(self, __context: Any) -> None:
-        if len(self.axis_point) != 3:
+        if not self.axis_name and not self.axis_point:
+            raise ValueError("axis_name or axis_point is required")
+        if self.axis_point and len(self.axis_point) != 3:
             raise ValueError("axis_point must be [x, y, z]")
         if not self.features:
             raise ValueError("at least one feature is required")
@@ -1400,20 +1414,21 @@ async def register_modeling_tools(
     ) -> dict[str, Any]:
         """Create a circular pattern of features about an axis.
 
-        The rotation axis is located by a point on a cylindrical face or a
-        linear edge; the seed features are named.
+        The rotation axis is a named reference axis (axis_name, preferred)
+        or located by a point on a cylindrical face or a linear edge; the
+        seed features are named.
 
         Args:
-            input_data (CircularPatternInput): Axis point, features, count, angle.
+            input_data (CircularPatternInput): Axis ref, features, count, angle.
 
         Returns:
             dict[str, Any]: Status and feature details.
 
         Example:
             ```python
-            # 6 copies evenly around the axis through the central bore
+            # 6 copies evenly around a reference axis from create_axis
             result = await circular_pattern_feature({
-                "axis_point": [0, 0, 10],
+                "axis_name": "Axis1",
                 "features": ["Cut-Extrude1"],
                 "count": 6,
             })
@@ -1424,6 +1439,7 @@ async def register_modeling_tools(
             result = await adapter.circular_pattern_feature(
                 CircularPatternParameters(
                     axis_point=input_data.axis_point,
+                    axis_name=input_data.axis_name,
                     features=input_data.features,
                     count=input_data.count,
                     angle=input_data.angle,

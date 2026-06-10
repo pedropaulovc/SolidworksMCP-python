@@ -1583,8 +1583,11 @@ def _circular_pattern_impl(
 ) -> AdapterResult[SolidWorksFeature]:
     """Circular-pattern named features about an axis via ``FeatureCircularPattern5``.
 
-    The rotation axis (a cylindrical face or a linear edge) is selected by a
-    point under mark 1; the seed features are selected by name under mark 4.
+    The rotation axis is selected under mark 1 — by feature name when
+    ``params.axis_name`` is given (a reference axis, robust), otherwise by a
+    point on the reference (a cylindrical face or a linear edge; the point
+    pick projects through the view, so it fails on axes hidden inside solid
+    material). The seed features are selected by name under mark 4.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -1611,19 +1614,31 @@ def _circular_pattern_impl(
         return AdapterResult(
             status=AdapterResultStatus.ERROR, error="count must be >= 1"
         )
+    if not params.axis_name and not params.axis_point:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="Circular pattern requires axis_name or axis_point",
+        )
 
     def _circular_operation() -> SolidWorksFeature:
         adapter._attempt(
             lambda: adapter.currentModel.ClearSelection2(True), default=None
         )
-        axis_type = _select_reference_point(
-            adapter, params.axis_point, 1, ("EDGE", "AXIS", "FACE")
-        )
-        if axis_type is None:
-            raise Exception(
-                f"Failed to select rotation axis at point {params.axis_point} "
-                "(mm); point at a cylindrical face or a linear edge"
+        if params.axis_name:
+            if not _select_named_feature(adapter, params.axis_name, 1, False):
+                raise Exception(
+                    f"Failed to select rotation axis by name: {params.axis_name!r}"
+                )
+            axis_type = "AXIS"
+        else:
+            axis_type = _select_reference_point(
+                adapter, params.axis_point, 1, ("EDGE", "AXIS", "FACE")
             )
+            if axis_type is None:
+                raise Exception(
+                    f"Failed to select rotation axis at point {params.axis_point} "
+                    "(mm); point at a cylindrical face or a linear edge"
+                )
         for name in params.features:
             if not _select_named_feature(adapter, name, 4, True):
                 raise Exception(f"Failed to select feature to pattern: {name}")
@@ -1658,6 +1673,7 @@ def _circular_pattern_impl(
             id=adapter._get_feature_id(feature),
             parameters={
                 "axis_point": params.axis_point,
+                "axis_name": params.axis_name,
                 "axis_entity": axis_type,
                 "features": params.features,
                 "count": int(params.count),
