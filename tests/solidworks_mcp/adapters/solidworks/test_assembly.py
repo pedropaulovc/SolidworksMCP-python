@@ -10,14 +10,19 @@ import pytest
 from solidworks_mcp.adapters.base import (
     AdapterResult,
     AdapterResultStatus,
+    AddMateParameters,
     ComponentCircularPatternParameters,
     ComponentLinearPatternParameters,
     ComponentRefParameters,
     InsertComponentParameters,
+    MateEntityRef,
+    MateRefParameters,
     MoveComponentParameters,
     ReplaceComponentParameters,
     RotateComponentParameters,
+    SuppressMateParameters,
 )
+from solidworks_mcp.adapters.mock_adapter import MockSolidWorksAdapter
 from solidworks_mcp.adapters.solidworks import assembly as assembly_module
 
 
@@ -741,3 +746,530 @@ def test_pattern_circular_null_feature_errors() -> None:
     )
     assert result.is_error
     assert "Failed to create circular component pattern" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Mates (Phase 7B)
+# ---------------------------------------------------------------------------
+
+
+class _FakeMate:
+    def __init__(self, name, type_name="MateCoincident", suppressed=False) -> None:
+        self.Name = name
+        self._type_name = type_name
+        self._suppressed = suppressed
+        self._next = None
+        self.select_result = True
+        self.suppression_calls: list[tuple[int, int]] = []
+        self.suppression_applies = True
+
+    def GetTypeName2(self):  # noqa: N802
+        return self._type_name
+
+    def GetNextSubFeature(self):  # noqa: N802
+        return self._next
+
+    def IsSuppressed(self):  # noqa: N802
+        return self._suppressed
+
+    def Select2(self, _append, _mark):  # noqa: N802
+        return self.select_result
+
+    def SetSuppression2(self, action, configuration_option, _config_names):  # noqa: N802
+        self.suppression_calls.append((action, configuration_option))
+        if self.suppression_applies:
+            self._suppressed = action == 0
+        return True
+
+
+class _FakeMateGroup:
+    def __init__(self, mates) -> None:
+        self.mates = list(mates)
+        self.Name = "Mates"
+
+    def GetTypeName2(self):  # noqa: N802
+        return "MateGroup"
+
+    def GetFirstSubFeature(self):  # noqa: N802
+        for mate, succ in zip(self.mates, self.mates[1:], strict=False):
+            mate._next = succ
+        if self.mates:
+            self.mates[-1]._next = None
+        return self.mates[0] if self.mates else None
+
+    def GetNextFeature(self):  # noqa: N802
+        return None
+
+
+class _MateModel(_FakeAssemblyModel):
+    def __init__(self, mates=(), select_result=True) -> None:
+        super().__init__(select_result=select_result)
+        self.mate_group = _FakeMateGroup(mates)
+        self.FirstFeature = self.mate_group
+        self.mate_calls: list[tuple] = []
+        self.point_selections: list[tuple] = []
+        self.add_mate_name = "Coincident1"
+        self.add_mate_status = 1
+        self._last_feature = None
+
+    def FeatureByName(self, name):  # noqa: N802
+        mate = next((m for m in self.mate_group.mates if m.Name == name), None)
+        self._last_feature = mate
+        return mate
+
+    def _select_by_id2(self, name, entity_type, x, y, z, append, mark, callout, option):
+        self.point_selections.append((name, entity_type, x, y, z, mark))
+        return super()._select_by_id2(
+            name, entity_type, x, y, z, append, mark, callout, option
+        )
+
+    def _delete_selection(self, option):
+        if not self.delete_result:
+            return False
+        if self._last_feature in self.mate_group.mates:
+            self.mate_group.mates.remove(self._last_feature)
+        return True
+
+    def AddMate5(  # noqa: N802
+        self,
+        mate_type,
+        alignment,
+        flip,
+        distance,
+        distance_upper,
+        distance_lower,
+        gear_numerator,
+        gear_denominator,
+        angle,
+        angle_upper,
+        angle_lower,
+        for_positioning,
+        lock_rotation,
+        width_option,
+        error_status,
+    ):
+        self.mate_calls.append(
+            (
+                mate_type,
+                alignment,
+                flip,
+                distance,
+                distance_upper,
+                distance_lower,
+                gear_numerator,
+                gear_denominator,
+                angle,
+                angle_upper,
+                angle_lower,
+                for_positioning,
+                lock_rotation,
+                width_option,
+            )
+        )
+        try:
+            error_status.value = self.add_mate_status
+        except AttributeError:
+            pass
+        if self.add_mate_status != 1:
+            return None
+        mate = _FakeMate(self.add_mate_name)
+        self.mate_group.mates.append(mate)
+        return mate
+
+
+def _two_entities() -> list[MateEntityRef]:
+    return [
+        MateEntityRef(entity_type="PLANE", name="Plane1@shaft-1"),
+        MateEntityRef(entity_type="PLANE", name="Front Plane"),
+    ]
+
+
+def test_qualify_entity_name_appends_title_for_single_at() -> None:
+    adapter = _adapter_with(_FakeAssemblyModel())
+    qualify = assembly_module._qualify_entity_name
+    assert qualify(adapter, "Plane1@shaft-1") == "Plane1@shaft-1@frame"
+    assert qualify(adapter, "Front Plane") == "Front Plane"
+    assert qualify(adapter, "Plane1@shaft-1@other") == "Plane1@shaft-1@other"
+
+
+def test_add_mate_no_model_errors() -> None:
+    adapter = _FakeAdapter()
+    result = assembly_module._add_mate_impl(
+        adapter, AddMateParameters(mate_type="coincident", entities=_two_entities())
+    )
+    assert result.is_error
+    assert "No active model" in (result.error or "")
+
+
+def test_add_mate_unknown_type_errors() -> None:
+    adapter = _adapter_with(_MateModel())
+    result = assembly_module._add_mate_impl(
+        adapter, AddMateParameters(mate_type="gear", entities=_two_entities())
+    )
+    assert result.is_error
+    assert "Unknown mate_type" in (result.error or "")
+
+
+def test_add_mate_unknown_alignment_errors() -> None:
+    adapter = _adapter_with(_MateModel())
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="coincident", entities=_two_entities(), alignment="flipped"
+        ),
+    )
+    assert result.is_error
+    assert "Unknown alignment" in (result.error or "")
+
+
+def test_add_mate_entity_count_validation() -> None:
+    adapter = _adapter_with(_MateModel())
+    one = [MateEntityRef(entity_type="FACE", name="x@a-1")]
+    result = assembly_module._add_mate_impl(
+        adapter, AddMateParameters(mate_type="coincident", entities=one)
+    )
+    assert result.is_error
+    assert "at least 2 entities" in (result.error or "")
+
+    result = assembly_module._add_mate_impl(
+        adapter, AddMateParameters(mate_type="width", entities=_two_entities())
+    )
+    assert result.is_error
+    assert "at least 4 entities" in (result.error or "")
+
+
+def test_add_mate_bad_limits_errors() -> None:
+    adapter = _adapter_with(_MateModel())
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="distance", entities=_two_entities(), distance_limits=[1.0]
+        ),
+    )
+    assert result.is_error
+    assert "distance_limits must be [min, max]" in (result.error or "")
+
+
+def test_add_mate_concentric_success_selects_and_names() -> None:
+    model = _MateModel()
+    model.add_mate_name = "Concentric1"
+    adapter = _adapter_with(model)
+
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="concentric",
+            entities=_two_entities(),
+            alignment="anti_aligned",
+            lock_rotation=True,
+        ),
+    )
+
+    assert result.is_success
+    # Names qualified and selected under the default standard mark 1
+    assert ("Plane1@shaft-1@frame", "PLANE", 1) in model.selections
+    assert ("Front Plane", "PLANE", 1) in model.selections
+    call = model.mate_calls[0]
+    assert call[0] == 1  # swMateCONCENTRIC
+    assert call[1] == 1  # anti_aligned
+    assert call[12] is True  # lock_rotation
+    assert result.data == {
+        "name": "Concentric1",
+        "mate_type": "concentric",
+        "alignment": "anti_aligned",
+        "entities": 2,
+    }
+    assert model.rebuilds >= 1
+
+
+def test_add_mate_width_uses_mark_16() -> None:
+    model = _MateModel()
+    model.add_mate_name = "Width1"
+    adapter = _adapter_with(model)
+
+    entities = [
+        MateEntityRef(entity_type="FACE", name=f"face{i}@slide-1") for i in range(4)
+    ]
+    result = assembly_module._add_mate_impl(
+        adapter, AddMateParameters(mate_type="width", entities=entities)
+    )
+
+    assert result.is_success
+    assert all(mark == 16 for (_, _, mark) in model.selections)
+    assert model.mate_calls[0][0] == 11  # swMateWIDTH
+
+
+def test_add_mate_distance_converts_units_and_limits() -> None:
+    model = _MateModel()
+    model.add_mate_name = "Distance1"
+    adapter = _adapter_with(model)
+
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="distance",
+            entities=_two_entities(),
+            distance=25.4,
+            distance_limits=[10.0, 50.0],
+            angle=90.0,
+        ),
+    )
+
+    assert result.is_success
+    call = model.mate_calls[0]
+    assert abs(call[3] - 0.0254) < 1e-12  # distance in metres
+    assert abs(call[4] - 0.050) < 1e-12  # upper limit
+    assert abs(call[5] - 0.010) < 1e-12  # lower limit
+    assert abs(call[8] - math.radians(90.0)) < 1e-12  # angle in radians
+    assert abs(call[9] - math.radians(90.0)) < 1e-12  # no limits: upper = value
+
+
+def test_add_mate_by_point_converts_to_metres() -> None:
+    model = _MateModel()
+    adapter = _adapter_with(model)
+
+    entities = [
+        MateEntityRef(entity_type="FACE", point=[10.0, 20.0, 30.0]),
+        MateEntityRef(entity_type="PLANE", name="Front Plane"),
+    ]
+    result = assembly_module._add_mate_impl(
+        adapter, AddMateParameters(mate_type="coincident", entities=entities)
+    )
+
+    assert result.is_success
+    name, entity_type, x, y, z, mark = model.point_selections[0]
+    assert (name, entity_type, mark) == ("", "FACE", 1)
+    _assert_close([x, y, z], [0.01, 0.02, 0.03])
+
+
+def test_add_mate_selection_failure_errors() -> None:
+    model = _MateModel(select_result=False)
+    adapter = _adapter_with(model)
+
+    result = assembly_module._add_mate_impl(
+        adapter, AddMateParameters(mate_type="coincident", entities=_two_entities())
+    )
+    assert result.is_error
+    assert "Failed to select mate entity 1" in (result.error or "")
+
+
+def test_add_mate_error_status_reports_reason() -> None:
+    model = _MateModel()
+    model.add_mate_status = 4
+    adapter = _adapter_with(model)
+
+    result = assembly_module._add_mate_impl(
+        adapter, AddMateParameters(mate_type="coincident", entities=_two_entities())
+    )
+    assert result.is_error
+    assert "incorrect selections" in (result.error or "")
+
+
+def test_list_mates_walks_mate_group() -> None:
+    mates = [
+        _FakeMate("Coincident1"),
+        _FakeMate("Distance1", type_name="MateDistanceDim", suppressed=True),
+    ]
+    adapter = _adapter_with(_MateModel(mates=mates))
+
+    result = assembly_module._list_mates_impl(adapter)
+
+    assert result.is_success
+    assert result.data == [
+        {"name": "Coincident1", "type": "MateCoincident", "suppressed": False},
+        {"name": "Distance1", "type": "MateDistanceDim", "suppressed": True},
+    ]
+
+
+def test_list_mates_no_model_errors() -> None:
+    result = assembly_module._list_mates_impl(_FakeAdapter())
+    assert result.is_error
+    assert "No active model" in (result.error or "")
+
+
+def test_delete_mate_success_removes_feature() -> None:
+    mate = _FakeMate("Coincident1")
+    model = _MateModel(mates=[mate])
+    adapter = _adapter_with(model)
+
+    result = assembly_module._delete_mate_impl(
+        adapter, MateRefParameters(name="Coincident1")
+    )
+
+    assert result.is_success
+    assert result.data == {"name": "Coincident1", "removed": True}
+    assert mate not in model.mate_group.mates
+
+
+def test_delete_mate_unknown_errors() -> None:
+    adapter = _adapter_with(_MateModel())
+    result = assembly_module._delete_mate_impl(
+        adapter, MateRefParameters(name="Ghost1")
+    )
+    assert result.is_error
+    assert "Mate not found" in (result.error or "")
+
+
+def test_delete_mate_still_present_errors() -> None:
+    mate = _FakeMate("Coincident1")
+    model = _MateModel(mates=[mate])
+    model.delete_result = False
+    model.EditDelete = lambda: None
+    adapter = _adapter_with(model)
+
+    result = assembly_module._delete_mate_impl(
+        adapter, MateRefParameters(name="Coincident1")
+    )
+    assert result.is_error
+    assert "still present" in (result.error or "")
+
+
+def test_delete_mate_empty_name_errors() -> None:
+    adapter = _adapter_with(_MateModel())
+    result = assembly_module._delete_mate_impl(adapter, MateRefParameters(name="  "))
+    assert result.is_error
+    assert "name is required" in (result.error or "")
+
+
+def test_suppress_mate_success_applies_all_configurations() -> None:
+    mate = _FakeMate("Distance1")
+    adapter = _adapter_with(_MateModel(mates=[mate]))
+
+    result = assembly_module._suppress_mate_impl(
+        adapter, SuppressMateParameters(name="Distance1", suppress=True)
+    )
+
+    assert result.is_success
+    assert mate.suppression_calls == [(0, 2)]  # suppress, all configurations
+    assert result.data == {"name": "Distance1", "suppressed": True}
+
+
+def test_unsuppress_mate_success() -> None:
+    mate = _FakeMate("Distance1", suppressed=True)
+    adapter = _adapter_with(_MateModel(mates=[mate]))
+
+    result = assembly_module._suppress_mate_impl(
+        adapter, SuppressMateParameters(name="Distance1", suppress=False)
+    )
+
+    assert result.is_success
+    assert mate.suppression_calls == [(1, 2)]
+    assert result.data == {"name": "Distance1", "suppressed": False}
+
+
+def test_suppress_mate_state_not_applied_errors() -> None:
+    mate = _FakeMate("Distance1")
+    mate.suppression_applies = False
+    adapter = _adapter_with(_MateModel(mates=[mate]))
+
+    result = assembly_module._suppress_mate_impl(
+        adapter, SuppressMateParameters(name="Distance1", suppress=True)
+    )
+    assert result.is_error
+    assert "did not become suppressed" in (result.error or "")
+
+
+def test_suppress_mate_unknown_errors() -> None:
+    adapter = _adapter_with(_MateModel())
+    result = assembly_module._suppress_mate_impl(
+        adapter, SuppressMateParameters(name="Ghost1")
+    )
+    assert result.is_error
+    assert "Mate not found" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Mock adapter parity (Phase 7B)
+# ---------------------------------------------------------------------------
+
+
+async def _connected_mock() -> MockSolidWorksAdapter:
+    adapter = MockSolidWorksAdapter(
+        {"mock_connect_delay": 0, "mock_model_delay": 0, "mock_sketch_delay": 0}
+    )
+    await adapter.connect()
+    await adapter.create_part()
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_mock_add_mate_names_by_type_and_lists() -> None:
+    adapter = await _connected_mock()
+
+    first = await adapter.add_mate(
+        AddMateParameters(mate_type="coincident", entities=_two_entities())
+    )
+    second = await adapter.add_mate(
+        AddMateParameters(mate_type="coincident", entities=_two_entities())
+    )
+    other = await adapter.add_mate(
+        AddMateParameters(mate_type="distance", entities=_two_entities())
+    )
+
+    assert first.data["name"] == "Coincident1"
+    assert second.data["name"] == "Coincident2"
+    assert other.data["name"] == "Distance1"
+
+    listed = await adapter.list_mates()
+    assert [m["name"] for m in listed.data] == [
+        "Coincident1",
+        "Coincident2",
+        "Distance1",
+    ]
+    assert all(m["suppressed"] is False for m in listed.data)
+
+
+@pytest.mark.asyncio
+async def test_mock_add_mate_mirrors_impl_validations() -> None:
+    adapter = await _connected_mock()
+
+    bad_type = await adapter.add_mate(
+        AddMateParameters(mate_type="gear", entities=_two_entities())
+    )
+    assert bad_type.is_error
+    assert "Unknown mate_type" in (bad_type.error or "")
+
+    bad_alignment = await adapter.add_mate(
+        AddMateParameters(
+            mate_type="coincident", entities=_two_entities(), alignment="x"
+        )
+    )
+    assert bad_alignment.is_error
+    assert "Unknown alignment" in (bad_alignment.error or "")
+
+    too_few = await adapter.add_mate(
+        AddMateParameters(mate_type="width", entities=_two_entities())
+    )
+    assert too_few.is_error
+    assert "at least 4 entities" in (too_few.error or "")
+
+    bad_limits = await adapter.add_mate(
+        AddMateParameters(
+            mate_type="angle", entities=_two_entities(), angle_limits=[1.0]
+        )
+    )
+    assert bad_limits.is_error
+    assert "angle_limits must be [min, max]" in (bad_limits.error or "")
+
+
+@pytest.mark.asyncio
+async def test_mock_delete_and_suppress_mate_round_trip() -> None:
+    adapter = await _connected_mock()
+    await adapter.add_mate(
+        AddMateParameters(mate_type="tangent", entities=_two_entities())
+    )
+
+    suppressed = await adapter.suppress_mate(
+        SuppressMateParameters(name="Tangent1", suppress=True)
+    )
+    assert suppressed.data == {"name": "Tangent1", "suppressed": True}
+    listed = await adapter.list_mates()
+    assert listed.data[0]["suppressed"] is True
+
+    deleted = await adapter.delete_mate(MateRefParameters(name="Tangent1"))
+    assert deleted.data == {"name": "Tangent1", "removed": True}
+    assert (await adapter.list_mates()).data == []
+
+    missing = await adapter.delete_mate(MateRefParameters(name="Tangent1"))
+    assert missing.is_error
+    assert "Mate not found" in (missing.error or "")
