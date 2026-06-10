@@ -62,19 +62,81 @@ def test_flagged_passes_through_none() -> None:
     assert sw_type_info.flagged(None, "ISldWorks") is None
 
 
+class _Flaggable:
+    """Weakref-able stand-in for a CDispatch recording _FlagAsMethod calls."""
+
+    def __init__(self) -> None:
+        self.flagged: list[str] = []
+
+    def _FlagAsMethod(self, name: str) -> None:  # noqa: N802 — COM casing
+        self.flagged.append(name)
+
+
 def test_invalidate_flag_cache_clears_and_pops() -> None:
     """invalidate_flag_cache should clear or remove entries."""
     # Validate both the full clear and per-object pop behavior.
+    import weakref
+
     from solidworks_mcp.adapters import sw_type_info
 
-    obj = object()
-    sw_type_info._flag_cache[id(obj)] = {"ISldWorks"}
+    obj = _Flaggable()
+    sw_type_info._flag_cache[id(obj)] = (weakref.ref(obj), {"ISldWorks"})
     sw_type_info.invalidate_flag_cache(obj)
     assert id(obj) not in sw_type_info._flag_cache
 
-    sw_type_info._flag_cache[id(obj)] = {"ISldWorks"}
+    sw_type_info._flag_cache[id(obj)] = (weakref.ref(obj), {"ISldWorks"})
     sw_type_info.invalidate_flag_cache()
     assert sw_type_info._flag_cache == {}
+
+
+def test_flag_cache_hit_requires_identity(monkeypatch) -> None:
+    """A new object at a recycled id must be flagged, not cache-skipped.
+
+    Regression: the cache was keyed by bare ``id(obj)``, so a fresh dispatch
+    allocated at a garbage-collected object's address inherited its
+    "already flagged" record and was silently left unflagged (live symptom:
+    ``GetActiveSketch2`` degraded to a property read mid-session and
+    ``create_sketch`` returned synthetic ``Sketch_N`` names).
+    """
+    from solidworks_mcp.adapters import sw_type_info
+
+    monkeypatch.setattr(
+        sw_type_info, "_interface_methods", {"IModelDoc2": frozenset({"GetTitle"})}
+    )
+    monkeypatch.setattr(sw_type_info, "_wrapper_module", object())
+
+    first = _Flaggable()
+    assert sw_type_info.flag_methods(first, "IModelDoc2") == 1
+    assert sw_type_info.flag_methods(first, "IModelDoc2") == 0  # same obj: no-op
+
+    # Simulate id reuse: poison the cache at the new object's id with an
+    # entry whose weakref points at a *different* (still-alive) object.
+    second = _Flaggable()
+    import weakref
+
+    sw_type_info._flag_cache[id(second)] = (weakref.ref(first), {"IModelDoc2"})
+    assert sw_type_info.flag_methods(second, "IModelDoc2") == 1
+    assert second.flagged == ["GetTitle"]
+
+
+def test_flag_cache_entry_evicted_on_gc(monkeypatch) -> None:
+    """Cache entries disappear when their object is garbage collected."""
+    import gc
+
+    from solidworks_mcp.adapters import sw_type_info
+
+    monkeypatch.setattr(
+        sw_type_info, "_interface_methods", {"IModelDoc2": frozenset({"GetTitle"})}
+    )
+    monkeypatch.setattr(sw_type_info, "_wrapper_module", object())
+
+    obj = _Flaggable()
+    sw_type_info.flag_methods(obj, "IModelDoc2")
+    obj_id = id(obj)
+    assert obj_id in sw_type_info._flag_cache
+    del obj
+    gc.collect()
+    assert obj_id not in sw_type_info._flag_cache
 
 
 def test_load_wrapper_warns_when_genpy_missing(monkeypatch) -> None:

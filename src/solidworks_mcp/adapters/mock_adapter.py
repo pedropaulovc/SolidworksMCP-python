@@ -20,6 +20,10 @@ from .base import (
     AdapterResult,
     AdapterResultStatus,
     CircularPatternParameters,
+    CreateAxisParameters,
+    CreateCoordinateSystemParameters,
+    CreatePlaneParameters,
+    CreateReferencePointParameters,
     DraftParameters,
     ExtrusionParameters,
     LinearPatternParameters,
@@ -891,6 +895,91 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 "neutral_plane": params.neutral_plane,
                 "face_points": params.face_points,
                 "flip": params.flip,
+            },
+        )
+
+    async def create_plane(
+        self, params: CreatePlaneParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock creating a constraint-based reference plane.
+
+        Args:
+            params (CreatePlaneParameters): The params value.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "RefPlane",
+            {
+                "mode": params.mode,
+                "base_plane": params.base_plane,
+                "offset": params.offset,
+                "angle": params.angle,
+                "flip": params.flip,
+            },
+        )
+
+    async def create_axis(
+        self, params: CreateAxisParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock creating a reference axis.
+
+        Args:
+            params (CreateAxisParameters): The params value.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "RefAxis",
+            {
+                "mode": params.mode,
+                "planes": params.planes,
+                "face_point": params.face_point,
+                "points": params.points,
+                "edge_point": params.edge_point,
+            },
+        )
+
+    async def create_reference_point(
+        self, params: CreateReferencePointParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock creating reference point(s).
+
+        Args:
+            params (CreateReferencePointParameters): The params value.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "RefPoint",
+            {
+                "mode": params.mode,
+                "along": params.along,
+                "distance": params.distance,
+                "percentage": params.percentage,
+                "count": params.count,
+            },
+        )
+
+    async def create_coordinate_system(
+        self, params: CreateCoordinateSystemParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock creating a coordinate-system feature.
+
+        Args:
+            params (CreateCoordinateSystemParameters): The params value.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "CoordSys",
+            {
+                "position": params.position,
+                "rotation": params.rotation,
             },
         )
 

@@ -34,6 +34,7 @@ works.
 from __future__ import annotations
 
 import inspect
+import weakref
 from typing import Any
 
 from loguru import logger
@@ -56,7 +57,39 @@ _interface_methods: dict[str, frozenset[str]] = {}
 # Per-object record of which interfaces have already been flagged. Keyed by
 # id(obj) so ``flag_methods(doc, 'IModelDoc2')`` followed by
 # ``flag_methods(doc, 'IAssemblyDoc')`` does incremental work, not a no-op.
-_flag_cache: dict[int, set[str]] = {}
+# The value carries a weakref to the object so a *new* dispatch landing at a
+# recycled address is never mistaken for an already-flagged one — that
+# collision left ``GetActiveSketch2`` (etc.) unflagged on fresh documents in
+# long sessions, silently degrading them to property reads. Dead entries are
+# evicted by the weakref callback.
+_flag_cache: dict[int, tuple[weakref.ref[Any], set[str]]] = {}
+
+
+def _cache_entry_for(obj: Any) -> set[str]:
+    """Return the flagged-interface set for ``obj``, verifying identity.
+
+    A hit requires the stored weakref to resolve to ``obj`` itself; a stale
+    entry from a garbage-collected object at the same address is replaced.
+    Objects that cannot be weak-referenced get a fresh (uncached) set each
+    call — correct, just without the no-op shortcut.
+    """
+    obj_id = id(obj)
+    entry = _flag_cache.get(obj_id)
+    if entry is not None and entry[0]() is obj:
+        return entry[1]
+
+    already: set[str] = set()
+
+    def _evict(ref: weakref.ref[Any], obj_id: int = obj_id) -> None:
+        current = _flag_cache.get(obj_id)
+        if current is not None and current[0] is ref:
+            del _flag_cache[obj_id]
+
+    try:
+        _flag_cache[obj_id] = (weakref.ref(obj, _evict), already)
+    except TypeError:
+        pass
+    return already
 
 
 def _load_wrapper() -> None:
@@ -178,8 +211,7 @@ def flag_methods(obj: Any, *interfaces: str) -> int:
     if not _interface_methods or obj is None:
         return 0
 
-    obj_id = id(obj)
-    already = _flag_cache.setdefault(obj_id, set())
+    already = _cache_entry_for(obj)
 
     # Only flag methods from interfaces we haven't already processed for
     # this object. Repeats are a no-op; novel interfaces add incrementally.
@@ -243,8 +275,10 @@ def flag_doc(obj: Any, doc_type: int) -> int:
 def invalidate_flag_cache(obj: Any | None = None) -> None:
     """Forget that ``obj`` has been flagged, or clear the cache entirely.
 
-    Needed when a dispatch is closed / re-acquired; the new object at the
-    same address would otherwise be treated as already-flagged.
+    Address reuse by a *different* object is detected automatically (the
+    cache stores a weakref and verifies identity), so this is only needed
+    when the same live dispatch must be re-flagged — e.g. after its gen_py
+    wrapper state was rebuilt.
     """
     if obj is None:
         _flag_cache.clear()
