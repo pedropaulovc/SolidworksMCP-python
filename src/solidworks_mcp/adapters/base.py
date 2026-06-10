@@ -322,6 +322,11 @@ class CircularPatternParameters(BaseModel):
         angle (float): Total angular span in degrees when ``equal_spacing`` is
             true, otherwise the spacing between instances in degrees.
         equal_spacing (bool): Distribute instances equally across ``angle``.
+        geometry_pattern (bool): Copy the seed feature's geometry verbatim
+            instead of re-solving the feature at each instance. Required for
+            reliable instances when the seed profile is equation-driven
+            (per-instance re-solve of global-variable spline profiles produces
+            corrupt slivers — observed live on SW 2026); also faster.
     """
 
     axis_point: list[float]
@@ -329,6 +334,7 @@ class CircularPatternParameters(BaseModel):
     count: int
     angle: float = 360.0
     equal_spacing: bool = True
+    geometry_pattern: bool = False
 
 
 class LinearPatternParameters(BaseModel):

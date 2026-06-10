@@ -843,6 +843,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 "count": params.count,
                 "angle": params.angle,
                 "equal_spacing": params.equal_spacing,
+                "geometry_pattern": params.geometry_pattern,
             },
         )
 

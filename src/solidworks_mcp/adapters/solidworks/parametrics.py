@@ -402,12 +402,15 @@ def _create_configuration_impl(
 def _set_active_configuration_impl(
     adapter: Any, name: str
 ) -> AdapterResult[dict[str, Any]]:
-    """Activate a configuration and rebuild the model.
+    """Activate a configuration and force-rebuild the model.
 
     ``IModelDoc2::ShowConfiguration2`` switches the active configuration;
-    the follow-up ``EditRebuild3`` is required so geometry driven by
-    configured values/equations reflects the new configuration (per the API
-    remarks the tree is otherwise left in a needs-rebuild state).
+    the follow-up rebuild must be ``ForceRebuild3(False)`` — a plain
+    ``EditRebuild3`` only rebuilds features flagged dirty and leaves
+    equation-driven curve geometry (``CreateEquationSpline2`` profiles
+    referencing global variables) at the previous configuration's shape
+    (observed live on SW 2026: the sketch kept stale coordinates and the
+    dependent cut removed nothing until a force rebuild).
 
     Args:
         adapter: A fully connected ``PyWin32Adapter``.
@@ -422,8 +425,16 @@ def _set_active_configuration_impl(
     def _activate_operation() -> dict[str, Any]:
         _activate_configuration(adapter, name)
         rebuilt = bool(
-            adapter._attempt(lambda: adapter.currentModel.EditRebuild3(), default=False)
+            adapter._attempt(
+                lambda: adapter.currentModel.ForceRebuild3(False), default=False
+            )
         )
+        if not rebuilt:
+            rebuilt = bool(
+                adapter._attempt(
+                    lambda: adapter.currentModel.EditRebuild3(), default=False
+                )
+            )
         return {"name": name, "rebuilt": rebuilt}
 
     return cast(
