@@ -1076,6 +1076,70 @@ class TestPyWin32AdapterBranches:
         assert feature_manager.FeatureCut3.called
 
     @pytest.mark.asyncio
+    async def test_both_directions_maps_to_midplane_end_condition(self, monkeypatch):
+        """both_directions=True must pass swEndCondMidPlane as T1 for solid extrusions and cuts."""
+        adapter = self._build_adapter(monkeypatch)
+
+        feature_obj = SimpleNamespace(Name="Feat1", GetID=lambda: 1)
+        feature_manager = SimpleNamespace(
+            FeatureExtrusion3=Mock(return_value=feature_obj),
+            FeatureCut3=Mock(return_value=feature_obj),
+        )
+        adapter.currentModel = SimpleNamespace(
+            Extension=SimpleNamespace(SelectByID2=Mock(return_value=True)),
+            SketchManager=SimpleNamespace(
+                InsertSketch=Mock(return_value=SimpleNamespace(Name="SketchA"))
+            ),
+            FeatureManager=feature_manager,
+            ClearSelection2=Mock(return_value=True),
+        )
+        assert (await adapter.create_sketch("Front")).is_success
+
+        midplane = adapter.constants["swEndCondMidPlane"]
+        blind = adapter.constants["swEndCondBlind"]
+
+        def extrude_params(both: bool) -> SimpleNamespace:
+            return SimpleNamespace(
+                depth=10.0,
+                draft_angle=0.0,
+                reverse_direction=False,
+                both_directions=both,
+                thin_feature=False,
+                thin_thickness=None,
+                merge_result=True,
+            )
+
+        assert (await adapter.create_extrusion(extrude_params(True))).is_success
+        # T1 is the 4th positional arg of FeatureExtrusion3; depth (6th)
+        # stays the TOTAL depth — SolidWorks splits it across both sides.
+        args = feature_manager.FeatureExtrusion3.call_args.args
+        assert args[3] == midplane
+        assert args[5] == pytest.approx(10.0 / 1000.0)
+
+        assert (await adapter.create_extrusion(extrude_params(False))).is_success
+        assert feature_manager.FeatureExtrusion3.call_args.args[3] == blind
+
+        cut_midplane = await adapter.create_cut_extrude(
+            SimpleNamespace(depth=4.0, both_directions=True)
+        )
+        assert cut_midplane.is_success
+        assert feature_manager.FeatureCut3.call_args.args[3] == midplane
+
+        cut_blind = await adapter.create_cut_extrude(SimpleNamespace(depth=4.0))
+        assert cut_blind.is_success
+        assert feature_manager.FeatureCut3.call_args.args[3] == blind
+
+        # ThroughAll still wins over both_directions for cuts.
+        cut_through = await adapter.create_cut_extrude(
+            SimpleNamespace(depth=4.0, both_directions=True, end_condition="ThroughAll")
+        )
+        assert cut_through.is_success
+        assert (
+            feature_manager.FeatureCut3.call_args.args[3]
+            == adapter.constants["swEndCondThroughAll"]
+        )
+
+    @pytest.mark.asyncio
     async def test_feature_id_and_mass_properties_tuple_fallback(self, monkeypatch):
         """Feature IDs and mass properties should support common COM compatibility variants."""
         adapter = self._build_adapter(monkeypatch)

@@ -227,12 +227,19 @@ def _create_extrusion_impl(
                 )
         else:
             t0 = adapter.constants.get("swStartSketchPlane", 0)
+            # Mid-plane extrusion: T1 carries the end condition; depth stays
+            # the TOTAL depth (SolidWorks splits it across both sides).
+            t1 = (
+                adapter.constants["swEndCondMidPlane"]
+                if normalized.both_directions
+                else adapter.constants["swEndCondBlind"]
+            )
             try:
                 feature = feature_manager.FeatureExtrusion3(
                     True,
                     False,
                     normalized.reverse_direction,
-                    adapter.constants["swEndCondBlind"],
+                    t1,
                     adapter.constants["swEndCondBlind"],
                     normalized.depth / 1000.0,
                     0.0,
@@ -258,7 +265,7 @@ def _create_extrusion_impl(
                     True,
                     False,
                     normalized.reverse_direction,
-                    adapter.constants["swEndCondBlind"],
+                    t1,
                     adapter.constants["swEndCondBlind"],
                     normalized.depth / 1000.0,
                     0.0,
@@ -975,11 +982,18 @@ def _create_cut_extrude_impl(
             end_condition=str(getattr(params, "end_condition", "Blind")),
             feature_scope=bool(getattr(params, "feature_scope", False)),
             auto_select=bool(getattr(params, "auto_select", True)),
+            both_directions=bool(getattr(params, "both_directions", False)),
         )
         feature_manager = adapter.currentModel.FeatureManager
 
         end_condition = (normalized.end_condition or "Blind").strip().lower()
-        t1 = adapter.constants["swEndCondBlind"]
+        # Mid-plane cut: T1 carries the end condition; depth stays the TOTAL
+        # depth (SolidWorks splits it across both sides of the sketch plane).
+        t1 = (
+            adapter.constants["swEndCondMidPlane"]
+            if normalized.both_directions
+            else adapter.constants["swEndCondBlind"]
+        )
         depth_m = normalized.depth / 1000.0
         if end_condition in {"throughall", "through all", "through_all"}:
             t1 = adapter.constants["swEndCondThroughAll"]
@@ -1162,7 +1176,7 @@ def _create_cut_extrude_impl(
                     True,
                     False,
                     normalized.reverse_direction,
-                    adapter.constants["swEndCondBlind"],
+                    t1,
                     adapter.constants["swEndCondBlind"],
                     False,
                     False,
