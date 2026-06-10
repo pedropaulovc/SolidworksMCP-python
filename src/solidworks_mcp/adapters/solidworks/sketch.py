@@ -2363,9 +2363,18 @@ def _check_sketch_fully_defined_impl(
                     lambda: _sw_type_info.flag_methods(sketch_obj, "ISketch"),
                     default=0,
                 )
-            raw_status = adapter._attempt(
-                lambda: sketch_obj.GetConstrainedStatus(), default=None
-            )
+            # Late-bound dispatches sometimes resolve ``GetConstrainedStatus``
+            # as a property instead of a method (verified live on SW 2026:
+            # ``GetActiveSketch2`` objects fetched after relations exist on
+            # the sketch drift to property resolution even when freshly
+            # flagged — same class as issue #29). Attribute access then
+            # already performs the COM property-get and returns the int, so
+            # only call when the member is callable.
+            def _read_constrained_status() -> Any:
+                member = getattr(sketch_obj, "GetConstrainedStatus", None)
+                return member() if callable(member) else member
+
+            raw_status = adapter._attempt(_read_constrained_status, default=None)
             numeric_status = _to_number(raw_status)
             mapped = (
                 CONSTRAINED_STATUS_MAP.get(int(numeric_status))
