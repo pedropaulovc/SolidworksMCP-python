@@ -19,10 +19,15 @@ from .base import (
     AdapterHealth,
     AdapterResult,
     AdapterResultStatus,
+    CircularPatternParameters,
+    DraftParameters,
     ExtrusionParameters,
+    LinearPatternParameters,
     LoftParameters,
     MassProperties,
+    MirrorFeatureParameters,
     RevolveParameters,
+    ShellParameters,
     SolidWorksAdapter,
     SolidWorksFeature,
     SolidWorksModel,
@@ -715,6 +720,178 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             status=AdapterResultStatus.SUCCESS,
             data=feature,
             execution_time=self._delays["feature_operation"],
+        )
+
+    async def _mock_feature(
+        self, type_name: str, parameters: dict[str, Any]
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Build, record, and return a stub feature for a mocked operation.
+
+        Args:
+            type_name (str): Feature type label (e.g. ``"Chamfer"``).
+            parameters (dict[str, Any]): Echoed input parameters.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: SUCCESS with a stub feature, or
+            ERROR when there is no active model.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+
+        await asyncio.sleep(self._delays["feature_operation"])
+        self._operation_count += 1
+
+        feature = SolidWorksFeature(
+            name=f"{type_name}{len(self._features) + 1}",
+            type=type_name,
+            id=str(uuid.uuid4()),
+            parameters=parameters,
+            properties={"created": datetime.now().isoformat(), "mock": True},
+        )
+        self._features[feature.id or feature.name] = feature
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=feature,
+            execution_time=self._delays["feature_operation"],
+        )
+
+    async def add_fillet(
+        self, radius: float, edge_points: list[list[float]]
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock adding a fillet feature to edges located by coordinate.
+
+        Args:
+            radius (float): Fillet radius in millimeters.
+            edge_points (list[list[float]]): Points on edges to fillet.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "Fillet", {"radius": radius, "edge_points": edge_points}
+        )
+
+    async def add_chamfer(
+        self, distance: float, edge_points: list[list[float]]
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock adding a chamfer feature to edges located by coordinate.
+
+        Args:
+            distance (float): Chamfer distance in millimeters.
+            edge_points (list[list[float]]): Points on edges to chamfer.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "Chamfer", {"distance": distance, "edge_points": edge_points}
+        )
+
+    async def mirror_feature(
+        self, params: MirrorFeatureParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock mirroring features about a reference plane.
+
+        Args:
+            params (MirrorFeatureParameters): The params value.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "Mirror",
+            {
+                "plane": params.plane,
+                "features": params.features,
+                "merge": params.merge,
+                "geometry_pattern": params.geometry_pattern,
+            },
+        )
+
+    async def circular_pattern_feature(
+        self, params: CircularPatternParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock creating a circular feature pattern.
+
+        Args:
+            params (CircularPatternParameters): The params value.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "CircularPattern",
+            {
+                "axis_point": params.axis_point,
+                "features": params.features,
+                "count": params.count,
+                "angle": params.angle,
+                "equal_spacing": params.equal_spacing,
+            },
+        )
+
+    async def linear_pattern_feature(
+        self, params: LinearPatternParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock creating a linear feature pattern.
+
+        Args:
+            params (LinearPatternParameters): The params value.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "LinearPattern",
+            {
+                "direction_point": params.direction_point,
+                "features": params.features,
+                "count": params.count,
+                "spacing": params.spacing,
+            },
+        )
+
+    async def shell(
+        self, params: ShellParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock hollowing out the solid body.
+
+        Args:
+            params (ShellParameters): The params value.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "Shell",
+            {
+                "thickness": params.thickness,
+                "face_points": params.face_points,
+                "outward": params.outward,
+            },
+        )
+
+    async def draft(
+        self, params: DraftParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock applying a neutral-plane draft.
+
+        Args:
+            params (DraftParameters): The params value.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "Draft",
+            {
+                "angle": params.angle,
+                "neutral_plane": params.neutral_plane,
+                "face_points": params.face_points,
+                "flip": params.flip,
+            },
         )
 
     async def create_sketch(self, plane: str) -> AdapterResult[dict[str, Any]]:  # type: ignore[override]

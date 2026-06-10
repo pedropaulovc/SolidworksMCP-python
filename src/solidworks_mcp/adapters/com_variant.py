@@ -1,0 +1,64 @@
+"""COM VARIANT marshalling helpers for pywin32 late binding.
+
+Late-bound SolidWorks calls take their arguments as VARIANTs. A few argument
+types do not round-trip from plain Python values and need an explicit VARIANT
+wrapper, or the call fails at the COM boundary. This module centralises those
+conversions so every call site marshals them the same way.
+
+All helpers import ``pywin32`` lazily and degrade to a benign value when it is
+unavailable (e.g. Linux CI running the mock suite), so importing this module is
+safe on every platform.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def null_callout() -> Any:
+    """Return a typed-null ``Callout`` argument for ``SelectByID2``.
+
+    ``IModelDocExtension::SelectByID2`` (and the ``IModelDoc2`` variant) take an
+    optional ``Callout`` parameter typed as an ``ICallout`` object pointer.
+    Under pywin32 late binding a bare Python ``None`` marshals as ``VT_NULL``,
+    which SolidWorks rejects with ``com_error (-2147352571, 'Type mismatch')``
+    — the failure long misattributed to "``SelectByID2`` is broken on this
+    build". Passing a ``VT_DISPATCH`` null VARIANT instead supplies the
+    null-object-pointer type SolidWorks expects, and the call succeeds for
+    faces/edges by coordinate and named entities by name, with selection marks.
+
+    Returns:
+        Any: ``VARIANT(VT_DISPATCH, None)`` on Windows with pywin32 available;
+        plain ``None`` as a fallback otherwise (mock adapters and CI never
+        reach a real COM boundary, so the value is inert there).
+    """
+    try:
+        import pythoncom
+        from win32com.client import VARIANT
+
+        return VARIANT(pythoncom.VT_DISPATCH, None)
+    except Exception:
+        return None
+
+
+def empty_double_array() -> Any:
+    """Return an empty array-of-doubles VARIANT for unused SAFEARRAY params.
+
+    Some SolidWorks methods take an optional ``double[]`` (e.g. the ``Radii``
+    argument of ``IModelDoc2::FeatureFillet3``, unused when the radius count is
+    zero). Under late binding the correct typed-absent value is an empty
+    ``VT_ARRAY | VT_R8`` VARIANT, not a bare ``None`` (which would marshal as
+    ``VT_NULL`` — the same class of failure as :func:`null_callout`).
+
+    Returns:
+        Any: ``VARIANT(VT_ARRAY | VT_R8, [])`` on Windows with pywin32
+        available; plain ``None`` as a fallback otherwise (CI never reaches a
+        real COM boundary).
+    """
+    try:
+        import pythoncom
+        from win32com.client import VARIANT
+
+        return VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, [])
+    except Exception:
+        return None

@@ -11,9 +11,14 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from ..adapters.base import (
+    CircularPatternParameters,
+    DraftParameters,
     ExtrusionParameters,
+    LinearPatternParameters,
     LoftParameters,
+    MirrorFeatureParameters,
     RevolveParameters,
+    ShellParameters,
     SolidWorksAdapter,
     SweepParameters,
 )
@@ -352,19 +357,195 @@ class AddFilletInput(CompatInput):
     """Input schema for adding a fillet feature.
 
     Attributes:
-        edge_names (list[str]): Edge names to fillet.
         radius (float): Fillet radius in millimeters.
+        edge_points (list[list[float]]): Points ``[x, y, z]`` (mm), one per edge.
     """
 
     radius: float = Field(description="Fillet radius in millimeters")
-    edge_names: list[str] = Field(
-        default_factory=list,
-        description="Named edges to fillet (e.g. 'Edge<1>'). Leave empty to fillet all edges.",
+    edge_points: list[list[float]] = Field(
+        description=(
+            "Edges to fillet, located by a point [x, y, z] in mm lying on each "
+            "edge (SolidWorks edges have no stable name)."
+        ),
     )
 
     def model_post_init(self, __context: Any) -> None:
         if self.radius <= 0:
             raise ValueError("radius must be positive")
+        if not self.edge_points:
+            raise ValueError("at least one edge point is required")
+        if any(len(p) != 3 for p in self.edge_points):
+            raise ValueError("each edge point must be [x, y, z]")
+
+
+class AddChamferInput(CompatInput):
+    """Input schema for adding a chamfer feature.
+
+    Attributes:
+        distance (float): Chamfer leg length in millimeters.
+        edge_points (list[list[float]]): Points ``[x, y, z]`` (mm), one per edge.
+    """
+
+    distance: float = Field(description="Chamfer distance in millimeters")
+    edge_points: list[list[float]] = Field(
+        description=(
+            "Edges to chamfer, located by a point [x, y, z] in mm lying on each "
+            "edge (SolidWorks edges have no stable name)."
+        ),
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.distance <= 0:
+            raise ValueError("distance must be positive")
+        if not self.edge_points:
+            raise ValueError("at least one edge point is required")
+        if any(len(p) != 3 for p in self.edge_points):
+            raise ValueError("each edge point must be [x, y, z]")
+
+
+class MirrorFeatureInput(BaseModel):
+    """Input schema for a 3D mirror-feature operation.
+
+    Attributes:
+        plane (str): Name of the mirror plane or planar face.
+        features (list[str]): Names of features to mirror.
+        merge (bool): Merge resulting bodies.
+        geometry_pattern (bool): Mirror geometry only.
+    """
+
+    plane: str = Field(description="Mirror plane name, e.g. 'Right Plane'")
+    features: list[str] = Field(description="Names of features to mirror")
+    merge: bool = Field(default=True, description="Merge resulting bodies")
+    geometry_pattern: bool = Field(
+        default=False, description="Mirror geometry only (faster, no re-solve)"
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.features:
+            raise ValueError("at least one feature to mirror is required")
+
+
+class CircularPatternInput(BaseModel):
+    """Input schema for a circular feature pattern.
+
+    Attributes:
+        axis_point (list[float]): Point [x, y, z] mm on the rotation axis ref.
+        features (list[str]): Names of seed features to pattern.
+        count (int): Total instances including the seed.
+        angle (float): Total span in degrees when equal_spacing, else step.
+        equal_spacing (bool): Distribute equally across angle.
+    """
+
+    axis_point: list[float] = Field(
+        description=(
+            "Point [x, y, z] in mm on the rotation-axis reference: a "
+            "cylindrical face or a linear edge."
+        )
+    )
+    features: list[str] = Field(description="Names of seed features to pattern")
+    count: int = Field(description="Total number of instances, including the seed")
+    angle: float = Field(
+        default=360.0,
+        description="Total angle in degrees (equal spacing) or step angle",
+    )
+    equal_spacing: bool = Field(
+        default=True, description="Distribute instances equally across the angle"
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        if len(self.axis_point) != 3:
+            raise ValueError("axis_point must be [x, y, z]")
+        if not self.features:
+            raise ValueError("at least one feature is required")
+        if self.count < 1:
+            raise ValueError("count must be >= 1")
+
+
+class LinearPatternInput(BaseModel):
+    """Input schema for a linear feature pattern.
+
+    Attributes:
+        direction_point (list[float]): Point [x, y, z] mm on the direction ref.
+        features (list[str]): Names of seed features to pattern.
+        count (int): Total instances including the seed.
+        spacing (float): Distance between instances in mm.
+    """
+
+    direction_point: list[float] = Field(
+        description=(
+            "Point [x, y, z] in mm on the direction reference, typically a "
+            "linear edge."
+        )
+    )
+    features: list[str] = Field(description="Names of seed features to pattern")
+    count: int = Field(description="Total number of instances, including the seed")
+    spacing: float = Field(description="Distance between instances in mm")
+
+    def model_post_init(self, __context: Any) -> None:
+        if len(self.direction_point) != 3:
+            raise ValueError("direction_point must be [x, y, z]")
+        if not self.features:
+            raise ValueError("at least one feature is required")
+        if self.count < 1:
+            raise ValueError("count must be >= 1")
+        if self.spacing <= 0:
+            raise ValueError("spacing must be positive")
+
+
+class ShellInput(BaseModel):
+    """Input schema for a shell operation.
+
+    Attributes:
+        thickness (float): Wall thickness in mm.
+        face_points (list[list[float]]): Points on faces to remove.
+        outward (bool): Thicken outward instead of inward.
+    """
+
+    thickness: float = Field(description="Wall thickness in mm")
+    face_points: list[list[float]] = Field(
+        default_factory=list,
+        description=(
+            "Faces to remove, located by a point [x, y, z] in mm on each. "
+            "Empty shells the body closed (no opening)."
+        ),
+    )
+    outward: bool = Field(
+        default=False, description="Add thickness outward instead of inward"
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.thickness <= 0:
+            raise ValueError("thickness must be positive")
+        if any(len(p) != 3 for p in self.face_points):
+            raise ValueError("each face point must be [x, y, z]")
+
+
+class DraftInput(BaseModel):
+    """Input schema for a neutral-plane draft operation.
+
+    Attributes:
+        angle (float): Draft angle in degrees.
+        neutral_plane (str): Name of the neutral plane/planar face.
+        face_points (list[list[float]]): Points on faces to draft.
+        flip (bool): Reverse the draft direction.
+    """
+
+    angle: float = Field(description="Draft angle in degrees")
+    neutral_plane: str = Field(
+        description="Neutral plane name, e.g. 'Top Plane'"
+    )
+    face_points: list[list[float]] = Field(
+        description="Faces to draft, located by a point [x, y, z] in mm on each"
+    )
+    flip: bool = Field(default=False, description="Reverse the draft direction")
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.neutral_plane:
+            raise ValueError("neutral_plane is required")
+        if not self.face_points:
+            raise ValueError("at least one face point is required")
+        if any(len(p) != 3 for p in self.face_points):
+            raise ValueError("each face point must be [x, y, z]")
 
 
 class CreateAssemblyInput(CompatInput):
@@ -1057,27 +1238,29 @@ async def register_modeling_tools(
 
     @mcp.tool()
     async def add_fillet(input_data: AddFilletInput) -> dict[str, Any]:
-        """Add a fillet (rounded edge) to selected edges of the current model.
+        """Add a constant-radius fillet (rounded edge) to the current model.
 
-        Rounds the specified named edges with the given radius. Edge names use the
-        SolidWorks convention, e.g. 'Edge<1>', or you can leave edge_names empty to
-        fillet all edges if the adapter supports it.
+        Rounds the edges located by the given points. Each edge is identified by
+        a point ``[x, y, z]`` in millimetres lying on it, because SolidWorks
+        edges have no caller-stable name.
 
         Args:
-            input_data (AddFilletInput): Radius and edge names.
+            input_data (AddFilletInput): Radius and edge points.
 
         Returns:
             dict[str, Any]: Status and feature details.
 
         Example:
             ```python
-            # Fillet two specific edges with 2 mm radius
-            result = await add_fillet({"radius": 2.0, "edge_names": ["Edge<1>", "Edge<2>"]})
+            # Fillet the edge passing through (25, 0, 50) mm with a 2 mm radius
+            result = await add_fillet({"radius": 2.0, "edge_points": [[25, 0, 50]]})
             ```
         """
         try:
             input_data = _normalize_input(input_data, AddFilletInput)
-            result = await adapter.add_fillet(input_data.radius, input_data.edge_names)
+            result = await adapter.add_fillet(
+                input_data.radius, input_data.edge_points
+            )
             if result.is_success:
                 feature = result.data
                 return {
@@ -1088,7 +1271,7 @@ async def register_modeling_tools(
                             feature, "feature_name", "name", default="Fillet"
                         ),
                         "radius": input_data.radius,
-                        "edges": input_data.edge_names,
+                        "edge_points": input_data.edge_points,
                     },
                     "execution_time": result.execution_time,
                 }
@@ -1099,6 +1282,339 @@ async def register_modeling_tools(
                 }
         except Exception as e:
             logger.error(f"Error in add_fillet tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def add_chamfer(input_data: AddChamferInput) -> dict[str, Any]:
+        """Add an equal-distance (45°) chamfer to the current model.
+
+        Bevels the edges located by the given points. Each edge is identified by
+        a point ``[x, y, z]`` in millimetres lying on it.
+
+        Args:
+            input_data (AddChamferInput): Distance and edge points.
+
+        Returns:
+            dict[str, Any]: Status and feature details.
+
+        Example:
+            ```python
+            # Chamfer the edge through (25, 0, 50) mm with a 1.5 mm leg
+            result = await add_chamfer({"distance": 1.5, "edge_points": [[25, 0, 50]]})
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, AddChamferInput)
+            result = await adapter.add_chamfer(
+                input_data.distance, input_data.edge_points
+            )
+            if result.is_success:
+                feature = result.data
+                return {
+                    "status": "success",
+                    "message": f"Created chamfer: {_result_value(feature, 'feature_name', 'name', default='Chamfer')}",
+                    "chamfer": {
+                        "name": _result_value(
+                            feature, "feature_name", "name", default="Chamfer"
+                        ),
+                        "distance": input_data.distance,
+                        "edge_points": input_data.edge_points,
+                    },
+                    "execution_time": result.execution_time,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to add chamfer: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in add_chamfer tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def mirror_feature(input_data: MirrorFeatureInput) -> dict[str, Any]:
+        """Mirror existing features about a reference plane (3D mirror).
+
+        Distinct from ``sketch_mirror`` (which reflects 2D sketch entities).
+        Features to mirror are named (e.g. ``"Boss-Extrude1"``); the mirror
+        plane is named (e.g. ``"Right Plane"``).
+
+        Args:
+            input_data (MirrorFeatureInput): Plane, features, and options.
+
+        Returns:
+            dict[str, Any]: Status and feature details.
+
+        Example:
+            ```python
+            result = await mirror_feature({
+                "plane": "Right Plane",
+                "features": ["Boss-Extrude1"],
+            })
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, MirrorFeatureInput)
+            result = await adapter.mirror_feature(
+                MirrorFeatureParameters(
+                    plane=input_data.plane,
+                    features=input_data.features,
+                    merge=input_data.merge,
+                    geometry_pattern=input_data.geometry_pattern,
+                )
+            )
+            if result.is_success:
+                feature = result.data
+                return {
+                    "status": "success",
+                    "message": f"Created mirror: {_result_value(feature, 'feature_name', 'name', default='Mirror')}",
+                    "mirror": {
+                        "name": _result_value(
+                            feature, "feature_name", "name", default="Mirror"
+                        ),
+                        "plane": input_data.plane,
+                        "features": input_data.features,
+                    },
+                    "execution_time": result.execution_time,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to mirror feature: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in mirror_feature tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def circular_pattern_feature(
+        input_data: CircularPatternInput,
+    ) -> dict[str, Any]:
+        """Create a circular pattern of features about an axis.
+
+        The rotation axis is located by a point on a cylindrical face or a
+        linear edge; the seed features are named.
+
+        Args:
+            input_data (CircularPatternInput): Axis point, features, count, angle.
+
+        Returns:
+            dict[str, Any]: Status and feature details.
+
+        Example:
+            ```python
+            # 6 copies evenly around the axis through the central bore
+            result = await circular_pattern_feature({
+                "axis_point": [0, 0, 10],
+                "features": ["Cut-Extrude1"],
+                "count": 6,
+            })
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, CircularPatternInput)
+            result = await adapter.circular_pattern_feature(
+                CircularPatternParameters(
+                    axis_point=input_data.axis_point,
+                    features=input_data.features,
+                    count=input_data.count,
+                    angle=input_data.angle,
+                    equal_spacing=input_data.equal_spacing,
+                )
+            )
+            if result.is_success:
+                feature = result.data
+                return {
+                    "status": "success",
+                    "message": f"Created circular pattern: {_result_value(feature, 'feature_name', 'name', default='CircularPattern')}",
+                    "circular_pattern": {
+                        "name": _result_value(
+                            feature,
+                            "feature_name",
+                            "name",
+                            default="CircularPattern",
+                        ),
+                        "count": input_data.count,
+                        "angle": input_data.angle,
+                        "features": input_data.features,
+                    },
+                    "execution_time": result.execution_time,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to create circular pattern: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in circular_pattern_feature tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def linear_pattern_feature(
+        input_data: LinearPatternInput,
+    ) -> dict[str, Any]:
+        """Create a linear pattern of features along a direction.
+
+        The direction is located by a point on a linear edge (or axis); the
+        seed features are named.
+
+        Args:
+            input_data (LinearPatternInput): Direction point, features, count, spacing.
+
+        Returns:
+            dict[str, Any]: Status and feature details.
+
+        Example:
+            ```python
+            # 4 copies 20 mm apart along the edge through (50, 0, 0)
+            result = await linear_pattern_feature({
+                "direction_point": [50, 0, 0],
+                "features": ["Cut-Extrude1"],
+                "count": 4,
+                "spacing": 20.0,
+            })
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, LinearPatternInput)
+            result = await adapter.linear_pattern_feature(
+                LinearPatternParameters(
+                    direction_point=input_data.direction_point,
+                    features=input_data.features,
+                    count=input_data.count,
+                    spacing=input_data.spacing,
+                )
+            )
+            if result.is_success:
+                feature = result.data
+                return {
+                    "status": "success",
+                    "message": f"Created linear pattern: {_result_value(feature, 'feature_name', 'name', default='LinearPattern')}",
+                    "linear_pattern": {
+                        "name": _result_value(
+                            feature, "feature_name", "name", default="LinearPattern"
+                        ),
+                        "count": input_data.count,
+                        "spacing": input_data.spacing,
+                        "features": input_data.features,
+                    },
+                    "execution_time": result.execution_time,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to create linear pattern: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in linear_pattern_feature tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def shell(input_data: ShellInput) -> dict[str, Any]:
+        """Hollow out the solid body to a wall thickness, optionally opening faces.
+
+        Faces to remove are located by a point on each; an empty face list
+        produces a closed hollow.
+
+        Args:
+            input_data (ShellInput): Thickness, faces to remove, direction.
+
+        Returns:
+            dict[str, Any]: Status and feature details.
+
+        Example:
+            ```python
+            # 2 mm wall, opening the top face at (0, 0, 100)
+            result = await shell({"thickness": 2.0, "face_points": [[0, 0, 100]]})
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, ShellInput)
+            result = await adapter.shell(
+                ShellParameters(
+                    thickness=input_data.thickness,
+                    face_points=input_data.face_points,
+                    outward=input_data.outward,
+                )
+            )
+            if result.is_success:
+                feature = result.data
+                return {
+                    "status": "success",
+                    "message": f"Created shell: {_result_value(feature, 'feature_name', 'name', default='Shell')}",
+                    "shell": {
+                        "name": _result_value(
+                            feature, "feature_name", "name", default="Shell"
+                        ),
+                        "thickness": input_data.thickness,
+                        "face_points": input_data.face_points,
+                    },
+                    "execution_time": result.execution_time,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to create shell: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in shell tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def draft(input_data: DraftInput) -> dict[str, Any]:
+        """Apply a neutral-plane draft (taper) to selected faces.
+
+        The neutral plane (which stays fixed) is named; faces to taper are
+        located by a point on each.
+
+        Args:
+            input_data (DraftInput): Angle, neutral plane, faces, direction.
+
+        Returns:
+            dict[str, Any]: Status and feature details.
+
+        Example:
+            ```python
+            # 3-degree draft on the side face at (25, 0, 50), pivoting about Top
+            result = await draft({
+                "angle": 3.0,
+                "neutral_plane": "Top Plane",
+                "face_points": [[25, 0, 50]],
+            })
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, DraftInput)
+            result = await adapter.draft(
+                DraftParameters(
+                    angle=input_data.angle,
+                    neutral_plane=input_data.neutral_plane,
+                    face_points=input_data.face_points,
+                    flip=input_data.flip,
+                )
+            )
+            if result.is_success:
+                feature = result.data
+                return {
+                    "status": "success",
+                    "message": f"Created draft: {_result_value(feature, 'feature_name', 'name', default='Draft')}",
+                    "draft": {
+                        "name": _result_value(
+                            feature, "feature_name", "name", default="Draft"
+                        ),
+                        "angle": input_data.angle,
+                        "neutral_plane": input_data.neutral_plane,
+                        "face_points": input_data.face_points,
+                    },
+                    "execution_time": result.execution_time,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to create draft: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in draft tool: {e}")
             return {"status": "error", "message": f"Unexpected error: {str(e)}"}
 
     @mcp.tool()
@@ -1224,5 +1740,5 @@ async def register_modeling_tools(
             logger.error(f"Error in create_loft tool: {e}")
             return {"status": "error", "message": f"Unexpected error: {str(e)}"}
 
-    tool_count = 12  # Number of tools registered
+    tool_count = 18  # Number of tools registered
     return tool_count

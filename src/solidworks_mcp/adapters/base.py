@@ -284,6 +284,105 @@ class LoftParameters(BaseModel):
     merge_result: bool = True
 
 
+class MirrorFeatureParameters(BaseModel):
+    """Parameters for a 3D mirror-feature operation.
+
+    Mirrors existing features about a reference plane or planar face. Distinct
+    from the sketch-level ``sketch_mirror`` (which reflects 2D sketch entities).
+
+    Attributes:
+        plane (str): Name of the mirror plane or planar face (e.g.
+            ``"Right Plane"``). Selected under mark 2.
+        features (list[str]): Names of the features to mirror (e.g.
+            ``["Boss-Extrude1"]``). Selected under mark 1.
+        geometry_pattern (bool): Mirror only the feature geometry rather than
+            re-solving the whole feature.
+        merge (bool): Merge resulting bodies into a single solid.
+    """
+
+    plane: str
+    features: list[str]
+    geometry_pattern: bool = False
+    merge: bool = True
+
+
+class CircularPatternParameters(BaseModel):
+    """Parameters for a circular feature-pattern operation.
+
+    Attributes:
+        axis_point (list[float]): A point ``[x, y, z]`` in millimetres on the
+            rotation-axis reference — a cylindrical face (uses its axis) or a
+            linear edge. Selected under mark 1.
+        features (list[str]): Names of the seed features to pattern. Selected
+            under mark 4.
+        count (int): Total number of instances, including the seed.
+        angle (float): Total angular span in degrees when ``equal_spacing`` is
+            true, otherwise the spacing between instances in degrees.
+        equal_spacing (bool): Distribute instances equally across ``angle``.
+    """
+
+    axis_point: list[float]
+    features: list[str]
+    count: int
+    angle: float = 360.0
+    equal_spacing: bool = True
+
+
+class LinearPatternParameters(BaseModel):
+    """Parameters for a linear feature-pattern operation.
+
+    Attributes:
+        direction_point (list[float]): A point ``[x, y, z]`` in millimetres on
+            the direction reference — typically a linear edge. Selected under
+            mark 1.
+        features (list[str]): Names of the seed features to pattern. Selected
+            under mark 4.
+        count (int): Total number of instances, including the seed.
+        spacing (float): Distance between instances in millimetres.
+    """
+
+    direction_point: list[float]
+    features: list[str]
+    count: int
+    spacing: float
+
+
+class ShellParameters(BaseModel):
+    """Parameters for a shell operation (hollow out a solid).
+
+    Attributes:
+        thickness (float): Wall thickness in millimetres.
+        face_points (list[list[float]]): Points ``[x, y, z]`` in millimetres,
+            one per face to remove (open the shell on). An empty list shells the
+            body with no face removed (a closed hollow). Each is selected under
+            mark 1.
+        outward (bool): Add the thickness outward (grow the body) rather than
+            inward.
+    """
+
+    thickness: float
+    face_points: list[list[float]] = []
+    outward: bool = False
+
+
+class DraftParameters(BaseModel):
+    """Parameters for a neutral-plane draft operation.
+
+    Attributes:
+        angle (float): Draft angle in degrees.
+        neutral_plane (str): Name of the neutral plane or planar face that the
+            draft pivots about (e.g. ``"Top Plane"``). Selected under mark 1.
+        face_points (list[list[float]]): Points ``[x, y, z]`` in millimetres,
+            one per face to draft. Each is selected under mark 2.
+        flip (bool): Reverse the draft direction.
+    """
+
+    angle: float
+    neutral_plane: str
+    face_points: list[list[float]]
+    flip: bool = False
+
+
 class MassProperties(BaseModel):
     """Mass properties information.
 
@@ -908,8 +1007,8 @@ class SolidWorksAdapter(ABC):
         )
 
     async def create_cut_extrude(
-        self, params: "ExtrusionParameters"
-    ) -> "AdapterResult[Any]":
+        self, params: ExtrusionParameters
+    ) -> AdapterResult[Any]:
         """Create a cut-extrude feature from the active sketch.
 
         Cuts material from the current solid body using the active sketch profile.
@@ -927,15 +1026,18 @@ class SolidWorksAdapter(ABC):
         )
 
     async def add_fillet(
-        self, radius: float, edge_names: list[str]
-    ) -> "AdapterResult[Any]":
-        """Add a fillet feature to selected edges.
+        self, radius: float, edge_points: list[list[float]]
+    ) -> AdapterResult[Any]:
+        """Add a fillet feature to edges located by coordinate.
 
-        Rounds the selected edges of the current solid body with the given radius.
+        Rounds edges of the current solid body with the given radius. Each edge
+        is located by a point ``[x, y, z]`` (millimetres) lying on it, since
+        SolidWorks edges have no caller-stable name.
 
         Args:
             radius (float): Fillet radius in millimeters.
-            edge_names (list[str]): List of edge names to fillet.
+            edge_points (list[list[float]]): Points ``[x, y, z]`` in mm, one per
+                edge to fillet.
 
         Returns:
             AdapterResult: Feature result or error.
@@ -943,6 +1045,100 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="add_fillet is not implemented by this adapter",
+        )
+
+    async def add_chamfer(
+        self, distance: float, edge_points: list[list[float]]
+    ) -> AdapterResult[Any]:
+        """Add an equal-distance chamfer to edges located by coordinate.
+
+        Args:
+            distance (float): Chamfer distance in millimeters.
+            edge_points (list[list[float]]): Points ``[x, y, z]`` in mm, one per
+                edge to chamfer.
+
+        Returns:
+            AdapterResult: Feature result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="add_chamfer is not implemented by this adapter",
+        )
+
+    async def mirror_feature(
+        self, params: MirrorFeatureParameters
+    ) -> AdapterResult[Any]:
+        """Mirror existing features about a reference plane.
+
+        Args:
+            params (MirrorFeatureParameters): Mirror plane, features, options.
+
+        Returns:
+            AdapterResult: Feature result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="mirror_feature is not implemented by this adapter",
+        )
+
+    async def circular_pattern_feature(
+        self, params: CircularPatternParameters
+    ) -> AdapterResult[Any]:
+        """Create a circular pattern of features about an axis.
+
+        Args:
+            params (CircularPatternParameters): Axis, features, count, angle.
+
+        Returns:
+            AdapterResult: Feature result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="circular_pattern_feature is not implemented by this adapter",
+        )
+
+    async def linear_pattern_feature(
+        self, params: LinearPatternParameters
+    ) -> AdapterResult[Any]:
+        """Create a linear pattern of features along a direction.
+
+        Args:
+            params (LinearPatternParameters): Direction, features, count, spacing.
+
+        Returns:
+            AdapterResult: Feature result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="linear_pattern_feature is not implemented by this adapter",
+        )
+
+    async def shell(self, params: ShellParameters) -> AdapterResult[Any]:
+        """Hollow out the solid body, optionally removing faces.
+
+        Args:
+            params (ShellParameters): Thickness, faces to remove, direction.
+
+        Returns:
+            AdapterResult: Feature result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="shell is not implemented by this adapter",
+        )
+
+    async def draft(self, params: DraftParameters) -> AdapterResult[Any]:
+        """Apply a neutral-plane draft to selected faces.
+
+        Args:
+            params (DraftParameters): Angle, neutral plane, faces, direction.
+
+        Returns:
+            AdapterResult: Feature result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="draft is not implemented by this adapter",
         )
 
     @abstractmethod

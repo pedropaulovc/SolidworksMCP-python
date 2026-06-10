@@ -15,7 +15,12 @@ from solidworks_mcp.adapters.base import (
     AdapterHealth,
     AdapterResult,
     AdapterResultStatus,
+    CircularPatternParameters,
+    DraftParameters,
     ExtrusionParameters,
+    LinearPatternParameters,
+    MirrorFeatureParameters,
+    ShellParameters,
     SolidWorksFeature,
 )
 from solidworks_mcp.adapters.circuit_breaker import (
@@ -1579,3 +1584,114 @@ class TestConnectionPoolLegacyCoverage:
         await pool.release(conn)
         await pool.cleanup()
         assert closed == [True]
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 part-feature primitives — MockSolidWorksAdapter success + guard paths
+# ---------------------------------------------------------------------------
+
+
+class TestMockAdapterPhase2Features:
+    """Mock-adapter unit tests for the Phase 2 feature primitives.
+
+    Each tool gets a no-model guard check and a success-path check, per the
+    issue #3 acceptance criteria.
+    """
+
+    @staticmethod
+    async def _ready_adapter() -> MockSolidWorksAdapter:
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_add_chamfer_guard_and_success(self):
+        guard = await MockSolidWorksAdapter({}).add_chamfer(1.5, [[0.0, 0.0, 5.0]])
+        assert guard.status == AdapterResultStatus.ERROR
+        assert "No active model" in (guard.error or "")
+
+        adapter = await self._ready_adapter()
+        result = await adapter.add_chamfer(1.5, [[10.0, 0.0, 5.0]])
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.type == "Chamfer"
+        assert result.data.parameters["distance"] == 1.5
+
+    @pytest.mark.asyncio
+    async def test_add_fillet_guard_and_success(self):
+        guard = await MockSolidWorksAdapter({}).add_fillet(2.0, [[0.0, 0.0, 5.0]])
+        assert guard.status == AdapterResultStatus.ERROR
+
+        adapter = await self._ready_adapter()
+        result = await adapter.add_fillet(2.0, [[10.0, 0.0, 5.0]])
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.type == "Fillet"
+
+    @pytest.mark.asyncio
+    async def test_mirror_feature_guard_and_success(self):
+        params = MirrorFeatureParameters(plane="Right Plane", features=["Boss-Extrude1"])
+        guard = await MockSolidWorksAdapter({}).mirror_feature(params)
+        assert guard.status == AdapterResultStatus.ERROR
+
+        adapter = await self._ready_adapter()
+        result = await adapter.mirror_feature(params)
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.type == "Mirror"
+        assert result.data.parameters["plane"] == "Right Plane"
+
+    @pytest.mark.asyncio
+    async def test_circular_pattern_guard_and_success(self):
+        params = CircularPatternParameters(
+            axis_point=[0.0, 0.0, 10.0], features=["Cut-Extrude1"], count=6
+        )
+        guard = await MockSolidWorksAdapter({}).circular_pattern_feature(params)
+        assert guard.status == AdapterResultStatus.ERROR
+
+        adapter = await self._ready_adapter()
+        result = await adapter.circular_pattern_feature(params)
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.type == "CircularPattern"
+        assert result.data.parameters["count"] == 6
+
+    @pytest.mark.asyncio
+    async def test_linear_pattern_guard_and_success(self):
+        params = LinearPatternParameters(
+            direction_point=[50.0, 0.0, 0.0],
+            features=["Cut-Extrude1"],
+            count=4,
+            spacing=20.0,
+        )
+        guard = await MockSolidWorksAdapter({}).linear_pattern_feature(params)
+        assert guard.status == AdapterResultStatus.ERROR
+
+        adapter = await self._ready_adapter()
+        result = await adapter.linear_pattern_feature(params)
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.type == "LinearPattern"
+        assert result.data.parameters["spacing"] == 20.0
+
+    @pytest.mark.asyncio
+    async def test_shell_guard_and_success(self):
+        params = ShellParameters(thickness=2.0, face_points=[[0.0, 0.0, 100.0]])
+        guard = await MockSolidWorksAdapter({}).shell(params)
+        assert guard.status == AdapterResultStatus.ERROR
+
+        adapter = await self._ready_adapter()
+        result = await adapter.shell(params)
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.type == "Shell"
+        assert result.data.parameters["thickness"] == 2.0
+
+    @pytest.mark.asyncio
+    async def test_draft_guard_and_success(self):
+        params = DraftParameters(
+            angle=3.0, neutral_plane="Top Plane", face_points=[[25.0, 0.0, 50.0]]
+        )
+        guard = await MockSolidWorksAdapter({}).draft(params)
+        assert guard.status == AdapterResultStatus.ERROR
+
+        adapter = await self._ready_adapter()
+        result = await adapter.draft(params)
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data.type == "Draft"
+        assert result.data.parameters["neutral_plane"] == "Top Plane"

@@ -40,7 +40,16 @@ import pytest
 
 # base.py is pure-pydantic (no pywin32), so importing the parameter models at
 # module scope is safe on non-Windows CI even though the SW tests are skipped.
-from solidworks_mcp.adapters.base import LoftParameters, SweepParameters
+from solidworks_mcp.adapters.base import (
+    CircularPatternParameters,
+    DraftParameters,
+    ExtrusionParameters,
+    LinearPatternParameters,
+    LoftParameters,
+    MirrorFeatureParameters,
+    ShellParameters,
+    SweepParameters,
+)
 
 # Skip the entire module when the env flag isn't set. This matches the
 # pattern used by tests/test_real_solidworks_integration.py and keeps CI
@@ -2082,3 +2091,206 @@ async def test_create_loft_too_few_profiles_returns_error(connected_adapter) -> 
         assert "at least 2 profile" in (bad.error or "")
     finally:
         await adapter.close_model(save=False)
+
+
+# ---- Phase 2 part-feature primitives live regression ----
+#
+# Fork issue #3 / upstream phase 2. Each test builds a known part, applies the
+# feature, and asserts a solid body still exists (the feature built rather than
+# silently no-opping). Selection uses SelectByID2 with the typed-null Callout
+# (faces/edges by coordinate) and FeatureByName+Select2 (named planes/features).
+
+
+async def _build_box(adapter, half: float = 25.0, depth: float = 100.0) -> None:
+    """Build a centred box: x,y in [-half, half] mm, z in [0, depth] mm."""
+    assert (await adapter.create_part()).is_success
+    assert (await adapter.create_sketch("Front")).is_success
+    assert (await adapter.add_rectangle(-half, -half, half, half)).is_success
+    assert (await adapter.exit_sketch()).is_success
+    assert (await adapter.create_extrusion(ExtrusionParameters(depth=depth))).is_success
+
+
+async def _build_cylinder(adapter, radius: float = 25.0, depth: float = 100.0) -> None:
+    """Build a cylinder along +Z: radius mm, z in [0, depth] mm."""
+    assert (await adapter.create_part()).is_success
+    assert (await adapter.create_sketch("Front")).is_success
+    assert (await adapter.add_circle(0.0, 0.0, radius)).is_success
+    assert (await adapter.exit_sketch()).is_success
+    assert (await adapter.create_extrusion(ExtrusionParameters(depth=depth))).is_success
+
+
+async def test_add_chamfer_and_fillet_on_box_edges(connected_adapter) -> None:
+    """Chamfer one vertical edge and fillet another, locating each by a point.
+
+    Regression: the old SelectByID2-by-edge-name path raised ``Type mismatch``
+    on this build (bare ``None`` Callout), and chamfer called the non-existent
+    ``IFeatureManager.FeatureChamfer``. Both now use a typed-null Callout,
+    coordinate selection, and the IModelDoc2-level feature calls.
+    """
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        chamfer = await adapter.add_chamfer(4.0, [[25.0, 25.0, 50.0]])
+        assert chamfer.is_success, f"add_chamfer failed: {chamfer.error}"
+        assert chamfer.data.type == "Chamfer"
+        assert chamfer.data.name, "chamfer feature has no name"
+
+        fillet = await adapter.add_fillet(4.0, [[-25.0, 25.0, 50.0]])
+        assert fillet.is_success, f"add_fillet failed: {fillet.error}"
+        assert fillet.data.type == "Fillet"
+        # FeatureFillet3 returns a non-IFeature on this build; the impl recovers
+        # the real feature from the tree, so the name must still resolve.
+        assert fillet.data.name and fillet.data.name != "None", (
+            f"fillet name did not resolve: {fillet.data.name!r}"
+        )
+        assert _solid_body_count(adapter) == 1
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_chamfer_bad_edge_point_errors(connected_adapter) -> None:
+    """A point that lies on no edge must error clearly, not silently no-op."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        # Centre of the body - not on any edge.
+        bad = await adapter.add_chamfer(2.0, [[0.0, 0.0, 50.0]])
+        assert bad.is_error
+        assert "Failed to select edge" in (bad.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_shell_hollows_box(connected_adapter) -> None:
+    """Shell removing the far (z=100) face leaves a single hollow body."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        shell = await adapter.shell(
+            ShellParameters(thickness=3.0, face_points=[[0.0, 0.0, 100.0]])
+        )
+        assert shell.is_success, f"shell failed: {shell.error}"
+        assert shell.data.type == "Shell"
+        assert shell.data.name, "shell feature has no name"
+        assert _solid_body_count(adapter) == 1
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_mirror_feature_duplicates_cut_across_plane(connected_adapter) -> None:
+    """An off-centre cut mirrored across the Right Plane yields a symmetric hole.
+
+    The cut feature is selected by name (mark 1) and the plane by name (mark 2)
+    via FeatureByName+Select2.
+    """
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        assert (await adapter.create_sketch("Front")).is_success
+        assert (await adapter.add_circle(15.0, 10.0, 4.0)).is_success
+        assert (await adapter.exit_sketch()).is_success
+        cut = await adapter.create_cut_extrude(ExtrusionParameters(depth=100.0))
+        assert cut.is_success, f"create_cut_extrude failed: {cut.error}"
+
+        mirror = await adapter.mirror_feature(
+            MirrorFeatureParameters(plane="Right Plane", features=[cut.data.name])
+        )
+        assert mirror.is_success, f"mirror_feature failed: {mirror.error}"
+        assert mirror.data.type == "Mirror"
+        assert mirror.data.name, "mirror feature has no name"
+        assert _solid_body_count(adapter) == 1
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_circular_pattern_feature_around_cylinder_axis(connected_adapter) -> None:
+    """A hole in a cylinder, patterned 6x about the cylindrical-face axis.
+
+    The rotation axis is located by a point on the cylindrical face (mark 1);
+    the seed cut is selected by name (mark 4).
+    """
+    adapter = connected_adapter
+    await _build_cylinder(adapter, radius=25.0, depth=100.0)
+    try:
+        assert (await adapter.create_sketch("Front")).is_success
+        assert (await adapter.add_circle(15.0, 0.0, 3.0)).is_success
+        assert (await adapter.exit_sketch()).is_success
+        cut = await adapter.create_cut_extrude(ExtrusionParameters(depth=100.0))
+        assert cut.is_success, f"create_cut_extrude failed: {cut.error}"
+
+        pattern = await adapter.circular_pattern_feature(
+            CircularPatternParameters(
+                axis_point=[25.0, 0.0, 50.0], features=[cut.data.name], count=6
+            )
+        )
+        assert pattern.is_success, f"circular_pattern_feature failed: {pattern.error}"
+        assert pattern.data.type == "CircularPattern"
+        assert pattern.data.parameters["count"] == 6
+        assert _solid_body_count(adapter) == 1
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_linear_pattern_feature_along_edge(connected_adapter) -> None:
+    """A hole patterned 4x along a bottom edge direction at 10 mm spacing.
+
+    The direction is located by a point on the linear edge (mark 1); the seed
+    cut is selected by name (mark 4).
+    """
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        assert (await adapter.create_sketch("Front")).is_success
+        assert (await adapter.add_circle(-15.0, 0.0, 3.0)).is_success
+        assert (await adapter.exit_sketch()).is_success
+        cut = await adapter.create_cut_extrude(ExtrusionParameters(depth=100.0))
+        assert cut.is_success, f"create_cut_extrude failed: {cut.error}"
+
+        pattern = await adapter.linear_pattern_feature(
+            LinearPatternParameters(
+                direction_point=[0.0, -25.0, 0.0],
+                features=[cut.data.name],
+                count=4,
+                spacing=10.0,
+            )
+        )
+        assert pattern.is_success, f"linear_pattern_feature failed: {pattern.error}"
+        assert pattern.data.type == "LinearPattern"
+        assert pattern.data.parameters["count"] == 4
+        assert _solid_body_count(adapter) == 1
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_draft_tapers_face(connected_adapter) -> None:
+    """Draft the +X face about the Top plane; the body stays a single solid.
+
+    The neutral plane is selected by name (mark 1) and the face by a point on
+    it (mark 2).
+    """
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        draft = await adapter.draft(
+            DraftParameters(
+                angle=10.0,
+                neutral_plane="Top Plane",
+                face_points=[[25.0, 0.0, 50.0]],
+            )
+        )
+        assert draft.is_success, f"draft failed: {draft.error}"
+        assert draft.data.type == "Draft"
+        assert draft.data.name, "draft feature has no name"
+        assert _solid_body_count(adapter) == 1
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_mirror_feature_no_model_returns_error(connected_adapter) -> None:
+    """mirror_feature without an open model errors without touching SW."""
+    adapter = connected_adapter
+    result = await adapter.mirror_feature(
+        MirrorFeatureParameters(plane="Right Plane", features=["Boss-Extrude1"])
+    )
+    assert result.is_error
+    assert "No active model" in (result.error or "")

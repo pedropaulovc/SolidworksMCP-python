@@ -9,12 +9,18 @@ from typing import Any, cast
 from ..base import (
     AdapterResult,
     AdapterResultStatus,
+    CircularPatternParameters,
+    DraftParameters,
     ExtrusionParameters,
+    LinearPatternParameters,
     LoftParameters,
+    MirrorFeatureParameters,
     RevolveParameters,
+    ShellParameters,
     SolidWorksFeature,
     SweepParameters,
 )
+from ..com_variant import empty_double_array, null_callout
 
 
 class SolidWorksFeaturesMixin:
@@ -46,14 +52,39 @@ class SolidWorksFeaturesMixin:
         return _create_cut_extrude_impl(self, params)
 
     async def add_fillet(
-        self, radius: float, edge_names: list[str]
+        self, radius: float, edge_points: list[list[float]]
     ) -> AdapterResult[SolidWorksFeature]:
-        return _add_fillet_impl(self, radius, edge_names)
+        return _add_fillet_impl(self, radius, edge_points)
 
     async def add_chamfer(
-        self, distance: float, edge_names: list[str]
+        self, distance: float, edge_points: list[list[float]]
     ) -> AdapterResult[SolidWorksFeature]:
-        return _add_chamfer_impl(self, distance, edge_names)
+        return _add_chamfer_impl(self, distance, edge_points)
+
+    async def mirror_feature(
+        self, params: MirrorFeatureParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        return _mirror_feature_impl(self, params)
+
+    async def circular_pattern_feature(
+        self, params: CircularPatternParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        return _circular_pattern_impl(self, params)
+
+    async def linear_pattern_feature(
+        self, params: LinearPatternParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        return _linear_pattern_impl(self, params)
+
+    async def shell(
+        self, params: ShellParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        return _shell_impl(self, params)
+
+    async def draft(
+        self, params: DraftParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        return _draft_impl(self, params)
 
 
 def _create_extrusion_impl(
@@ -428,12 +459,14 @@ def _select_named_feature(
     Sweep and loft rely on selection marks to tell SolidWorks which selection
     is the profile (1), guide curve (2), or sweep path (4).  We resolve the
     feature with ``IModelDoc2::FeatureByName`` and select it with
-    ``IFeature::Select2(append, mark)`` — the same proven path the rest of the
-    adapter uses for plane/sketch selection.  ``IModelDocExtension::SelectByID2``
-    is avoided deliberately: late-bound ``SelectByID2`` raises
-    ``Type mismatch`` on some SolidWorks builds, whereas ``FeatureByName`` +
-    ``Select2`` is reliable, works for sketches *and* reference curves such as
-    a helix, and needs no entity-type string.
+    ``IFeature::Select2(append, mark)``.  This is preferred for *named* entities
+    (sketches, planes, reference curves such as a helix) because it needs no
+    entity-type string and no coordinate.  ``IModelDocExtension::SelectByID2``
+    is the right tool for *geometric* entities that have no name (faces, edges
+    by coordinate) — see :func:`_select_by_point`.  (Note: late-bound
+    ``SelectByID2`` is not broken on this build; the ``Type mismatch`` once
+    blamed on it was a bare-``None`` ``Callout`` argument — see
+    :func:`solidworks_mcp.adapters.com_variant.null_callout`.)
 
     Args:
         adapter: A connected adapter with a valid ``currentModel``.
@@ -454,6 +487,47 @@ def _select_named_feature(
         return False
     return bool(
         adapter._attempt(lambda: feature.Select2(append, mark), default=False)
+    )
+
+
+def _select_by_point(
+    adapter: Any,
+    entity_type: str,
+    point_mm: list[float],
+    mark: int,
+    append: bool,
+) -> bool:
+    """Select a geometric entity (face/edge) by a point lying on it.
+
+    Faces and edges have no caller-stable name, so the caller locates them with
+    a point on the entity. Selection goes through ``SelectByID2`` with an empty
+    name and the point in **metres** (the caller passes millimetres). The
+    optional ``Callout`` argument is a typed-null VARIANT — passing bare
+    ``None`` raises ``Type mismatch`` under pywin32 late binding (see
+    :func:`solidworks_mcp.adapters.com_variant.null_callout`).
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        entity_type: ``SelectByID2`` entity-type string, e.g. ``"FACE"`` or
+            ``"EDGE"``.
+        point_mm: ``[x, y, z]`` in millimetres on the target entity.
+        mark: Selection mark.
+        append: ``True`` to add to the current selection set, ``False`` to
+            replace it.
+
+    Returns:
+        bool: ``True`` when SolidWorks selected an entity at that point.
+    """
+    if len(point_mm) != 3:
+        return False
+    x, y, z = (float(c) / 1000.0 for c in point_mm)
+    return bool(
+        adapter._attempt(
+            lambda: adapter.currentModel.Extension.SelectByID2(
+                "", entity_type, x, y, z, append, mark, null_callout(), 0
+            ),
+            default=False,
+        )
     )
 
 
@@ -946,7 +1020,7 @@ def _create_cut_extrude_impl(
             ) + [f"Sketch{n}" for n in range(adapter._sketch_count, 0, -1)]:
                 sel_result = adapter._attempt(
                     lambda c=candidate: adapter.currentModel.Extension.SelectByID2(
-                        c, "SKETCH", 0.0, 0.0, 0.0, False, 0, None, 0
+                        c, "SKETCH", 0.0, 0.0, 0.0, False, 0, null_callout(), 0
                     ),
                     default=False,
                 )
@@ -1136,23 +1210,118 @@ def _create_cut_extrude_impl(
     )
 
 
-def _add_fillet_impl(
-    adapter: Any, radius: float, edge_names: list[str]
-) -> AdapterResult[SolidWorksFeature]:
-    """Create a constant-radius fillet on one or more named edges.
+def _feature_objects(adapter: Any) -> list[tuple[str, Any]]:
+    """Walk the feature tree, returning ``(name, COM object)`` for each feature.
 
-    Each edge in ``edge_names`` is selected by name using
-    ``Extension.SelectByID2`` with entity type ``"EDGE"``.  After all edges
-    are in the selection set, ``FeatureFillet3`` is called to build the
-    feature.
+    Robust to pywin32's method-vs-property ambiguity via :func:`_read_member`.
+    The walk is bounded so a misbehaving ``GetNextFeature`` cannot spin forever.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+
+    Returns:
+        list[tuple[str, Any]]: ``(name, feature)`` pairs in tree order. Empty
+        when the tree is inaccessible.
+    """
+    out: list[tuple[str, Any]] = []
+    try:
+        _flag_feature_methods(adapter.currentModel, "IModelDoc2")
+        feat = _read_member(adapter.currentModel, "FirstFeature")
+        for _ in range(5000):
+            if not feat:
+                break
+            _flag_feature_methods(feat, "IFeature")
+            try:
+                name = _read_member(feat, "Name")
+            except Exception:
+                name = None
+            out.append((str(name) if name is not None else "", feat))
+            try:
+                feat = _read_member(feat, "GetNextFeature")
+            except Exception:
+                break
+    except Exception:
+        pass
+    return out
+
+
+def _feature_names(adapter: Any) -> set[str]:
+    """Return the set of feature names currently in the tree.
+
+    Captured before a feature-creation call so the new feature can later be
+    identified by diffing (see :func:`_resolve_feature`).
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+
+    Returns:
+        set[str]: Feature names present now.
+    """
+    return {name for name, _ in _feature_objects(adapter) if name}
+
+
+def _resolve_feature(adapter: Any, returned: Any, names_before: set[str]) -> Any:
+    """Return a usable ``IFeature`` for a just-created feature.
+
+    Prefers the value the COM call returned when it exposes a readable
+    ``Name``.  Some calls instead return a non-feature (``FeatureFillet3``
+    returns an ``int`` on this build) or ``None`` on success
+    (``InsertFeatureShell``); in that case the new feature is found by diffing
+    the current tree against ``names_before``.  Diffing (rather than taking the
+    tree tail) is robust even when a call also appends auxiliary features.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        returned: Whatever the feature-creation COM call returned.
+        names_before: Feature names captured before the call
+            (:func:`_feature_names`).
+
+    Returns:
+        Any: A feature object exposing ``Name``, or ``None`` if none is found.
+    """
+    if returned and _read_member(returned, "Name") is not None:
+        return returned
+    new = [
+        feat
+        for name, feat in _feature_objects(adapter)
+        if name and name not in names_before
+    ]
+    return new[-1] if new else None
+
+
+def _select_edge_points(adapter: Any, edge_points: list[list[float]]) -> None:
+    """Clear the selection, then select each edge located by a point on it.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        edge_points: Points ``[x, y, z]`` (mm), one per edge to select.
+
+    Raises:
+        Exception: When an edge cannot be selected at a given point.
+    """
+    adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True), default=None)
+    for point in edge_points:
+        if not _select_by_point(adapter, "EDGE", point, 0, True):
+            raise Exception(f"Failed to select edge at point {point} (mm)")
+
+
+def _add_fillet_impl(
+    adapter: Any, radius: float, edge_points: list[list[float]]
+) -> AdapterResult[SolidWorksFeature]:
+    """Create a constant-radius fillet on edges located by coordinate.
+
+    Each edge is located by a point on it (millimetres) and selected with
+    ``SelectByID2`` — SolidWorks edges have no caller-stable name (the
+    ``"Edge<1>"`` form is not a valid ``SelectByID2`` identifier on this build).
+    After all edges are selected, ``IModelDoc2::FeatureFillet3`` (constant-size
+    form) builds the round.
 
     Args:
         adapter: A fully connected ``PyWin32Adapter`` with a non-``None``
             ``currentModel``.
-        radius: Fillet radius in **millimetres**.  Converted to metres
-            internally before the COM call.
-        edge_names: List of SolidWorks edge entity names to fillet, e.g.
-            ``["Edge<1>", "Edge<2>"]``.
+        radius: Fillet radius in **millimetres**.  Converted to metres before
+            the COM call.
+        edge_points: Points ``[x, y, z]`` in mm, one per edge to fillet.
 
     Returns:
         AdapterResult[SolidWorksFeature]: On success, ``data`` is a
@@ -1160,98 +1329,45 @@ def _add_fillet_impl(
         ``status`` is ``ERROR``.
 
     Raises:
-        Exception: Propagated through ``_handle_com_operation`` when an
-            edge cannot be selected or ``FeatureFillet3`` returns ``None``.
-
-    Example::
-
-        result = pywin32_feature_ops.add_fillet(
-            adapter, radius=3.0, edge_names=["Edge<1>", "Edge<3>"]
-        )
-        print(result.data.name)  # e.g. "Fillet1"
+        Exception: Propagated through ``_handle_com_operation`` when an edge
+            cannot be selected or the fillet feature is not created.
     """
     if not adapter.currentModel:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if not edge_points:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="Fillet requires at least one edge point",
+        )
 
     def _fillet_operation() -> SolidWorksFeature:
-        """Inner COM closure that selects edges and invokes FeatureFillet3.
+        names_before = _feature_names(adapter)
+        _select_edge_points(adapter, edge_points)
 
-        Returns:
-            SolidWorksFeature: Populated feature descriptor.
-
-        Raises:
-            Exception: If any edge selection fails or the feature is ``None``.
-        """
-        # Detect SW major version for FeatureFillet3 parameter count
-        fillet_sw_major = 0
-        if getattr(adapter, "swApp", None):
-            rev = adapter._attempt(
-                lambda: adapter._get_attr_or_call(adapter.swApp, "RevisionNumber"),
-                default="0",
-            )
-            try:
-                fillet_sw_major = int(str(rev).split(".")[0])
-            except (ValueError, IndexError):
-                fillet_sw_major = 0
-
-        for edge_name in edge_names:
-            selected = adapter.currentModel.Extension.SelectByID2(
-                edge_name,
-                "EDGE",
-                0,
-                0,
-                0,
-                True,
-                0,
-                None,
-                0,
-            )
-            if not selected:
-                raise Exception(f"Failed to select edge: {edge_name}")
-
-        # SW 2025 (major=33): IModelDoc2.FeatureFillet3 (9 params) verified.
-        # Other versions: IFeatureManager.FeatureFillet3 (16 params, original code).
-        if fillet_sw_major == 33:
-            feature = adapter.currentModel.FeatureFillet3(
-                radius / 1000.0,  # R1 in meters
-                True,  # Propagate
-                0,  # Ftyp
-                0,
-                0,  # VarRadTyp, OverflowType
-                0,
-                None,  # NRadii, Radii
-                False,
-                False,  # UseHelpPoint, UseTangentHoldLine
-            )
-        else:
-            feature_manager = adapter.currentModel.FeatureManager
-            feature = feature_manager.FeatureFillet3(
-                radius / 1000.0,
-                0,
-                0,
-                0,
-                0,
-                False,
-                False,
-                False,
-                False,
-                False,
-                False,
-                False,
-                False,
-                0,
-                False,
-            )
-
-        # IModelDoc2.FeatureFillet3 returns int on SW 2025, not IFeature
-        if not feature and fillet_sw_major != 33:
+        # IModelDoc2.FeatureFillet3 constant-radius form (9 args) — verified on
+        # SW 2025 and 2026.  NRadii=0 applies R1 (metres) to every selected
+        # edge.  (The old IFeatureManager 16-arg branch had the wrong arity and
+        # the old SelectByID2-by-name path could never select an edge live.)
+        feature = adapter.currentModel.FeatureFillet3(
+            radius / 1000.0,  # R1 (metres)
+            True,  # Propagate to tangent faces
+            0,  # Ftyp (0 = constant-size round)
+            False,  # VarRadTyp
+            0,  # OverflowType (default)
+            0,  # NRadii
+            empty_double_array(),  # Radii (empty array; unused when NRadii == 0)
+            False,  # UseHelpPoint
+            False,  # UseTangentHoldLine
+        )
+        feature = _resolve_feature(adapter, feature, names_before)
+        if not feature:
             raise Exception("Failed to create fillet")
 
         return SolidWorksFeature(
-            name=feature.Name,
+            name=str(_read_member(feature, "Name")),
             type="Fillet",
             id=adapter._get_feature_id(feature),
-            parameters={"radius": radius, "edges": edge_names},
+            parameters={"radius": radius, "edge_points": edge_points},
             properties={"created": datetime.now().isoformat()},
         )
 
@@ -1262,22 +1378,20 @@ def _add_fillet_impl(
 
 
 def _add_chamfer_impl(
-    adapter: Any, distance: float, edge_names: list[str]
+    adapter: Any, distance: float, edge_points: list[list[float]]
 ) -> AdapterResult[SolidWorksFeature]:
-    """Create an equal-distance chamfer on one or more named edges.
+    """Create an equal-distance (45°) chamfer on edges located by coordinate.
 
-    Each edge in ``edge_names`` is selected by name using
-    ``Extension.SelectByID2`` with entity type ``"EDGE"``.  After all edges
-    are in the selection set, ``FeatureChamfer`` is called in
-    equal-distance mode (type ``1``).
+    Each edge is located by a point on it (millimetres) and selected with
+    ``SelectByID2`` (edges have no caller-stable name).  ``IModelDoc2::
+    FeatureChamfer(Width, Angle, Flip)`` then builds a distance-angle chamfer;
+    a 45° angle yields equal legs of ``distance``.
 
     Args:
         adapter: A fully connected ``PyWin32Adapter`` with a non-``None``
             ``currentModel``.
-        distance: Chamfer distance in **millimetres**.  Converted to metres
-            internally.
-        edge_names: List of SolidWorks edge entity names, e.g.
-            ``["Edge<2>", "Edge<5>"]``.
+        distance: Chamfer leg length in **millimetres**.  Converted to metres.
+        edge_points: Points ``[x, y, z]`` in mm, one per edge to chamfer.
 
     Returns:
         AdapterResult[SolidWorksFeature]: On success, ``data`` is a
@@ -1285,60 +1399,482 @@ def _add_chamfer_impl(
         ``status`` is ``ERROR``.
 
     Raises:
-        Exception: Propagated through ``_handle_com_operation`` when an
-            edge cannot be selected or ``FeatureChamfer`` returns ``None``.
-
-    Example::
-
-        result = pywin32_feature_ops.add_chamfer(
-            adapter, distance=2.0, edge_names=["Edge<2>"]
-        )
-        print(result.data.name)  # e.g. "Chamfer1"
+        Exception: Propagated through ``_handle_com_operation`` when an edge
+            cannot be selected or the chamfer feature is not created.
     """
+    import math
+
     if not adapter.currentModel:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
-
-    def _chamfer_operation() -> SolidWorksFeature:
-        """Inner COM closure that selects edges and invokes FeatureChamfer.
-
-        Returns:
-            SolidWorksFeature: Populated feature descriptor.
-
-        Raises:
-            Exception: If any edge selection fails or the feature is ``None``.
-        """
-        for edge_name in edge_names:
-            selected = adapter.currentModel.Extension.SelectByID2(
-                edge_name, "EDGE", 0, 0, 0, True, 0, None, 0
-            )
-            if not selected:
-                raise Exception(f"Failed to select edge: {edge_name}")
-
-        feature_manager = adapter.currentModel.FeatureManager
-        feature = feature_manager.FeatureChamfer(
-            1,
-            distance / 1000.0,
-            distance / 1000.0,
-            0,
-            0,
-            False,
-            False,
-            False,
-            False,
+    if not edge_points:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="Chamfer requires at least one edge point",
         )
 
+    def _chamfer_operation() -> SolidWorksFeature:
+        names_before = _feature_names(adapter)
+        _select_edge_points(adapter, edge_points)
+
+        # IModelDoc2.FeatureChamfer(Width, Angle, Flip): distance-angle form.
+        # 45° => equal legs == Width.  (IFeatureManager has no FeatureChamfer
+        # on this build, only InsertFeatureChamfer; the old call was broken.)
+        feature = adapter.currentModel.FeatureChamfer(
+            distance / 1000.0,  # Width (metres)
+            math.radians(45.0),  # Angle (radians)
+            False,  # Flip
+        )
+        feature = _resolve_feature(adapter, feature, names_before)
         if not feature:
             raise Exception("Failed to create chamfer")
 
         return SolidWorksFeature(
-            name=feature.Name,
+            name=str(_read_member(feature, "Name")),
             type="Chamfer",
             id=adapter._get_feature_id(feature),
-            parameters={"distance": distance, "edges": edge_names},
+            parameters={"distance": distance, "edge_points": edge_points},
             properties={"created": datetime.now().isoformat()},
         )
 
     return cast(
         AdapterResult[SolidWorksFeature],
         adapter._handle_com_operation("add_chamfer", _chamfer_operation),
+    )
+
+
+def _select_reference_point(
+    adapter: Any,
+    point_mm: list[float],
+    mark: int,
+    entity_types: tuple[str, ...] = ("EDGE", "AXIS", "FACE"),
+) -> str | None:
+    """Select a direction/axis reference located by a point on it.
+
+    A pattern's direction (linear) or axis (circular) can be a linear edge, a
+    reference axis, or a cylindrical/planar face.  The caller points at one;
+    this tries each entity type at that point and returns the type that
+    selected, or ``None``.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        point_mm: ``[x, y, z]`` in millimetres on the reference entity.
+        mark: Selection mark to apply.
+        entity_types: ``SelectByID2`` entity types to try, in order.
+
+    Returns:
+        str | None: The entity type that selected, or ``None`` if none matched.
+    """
+    for entity_type in entity_types:
+        if _select_by_point(adapter, entity_type, point_mm, mark, True):
+            return entity_type
+    return None
+
+
+def _mirror_feature_impl(
+    adapter: Any, params: MirrorFeatureParameters
+) -> AdapterResult[SolidWorksFeature]:
+    """Mirror one or more named features about a plane via ``InsertMirrorFeature2``.
+
+    Features to mirror are selected by name under mark 1; the mirror plane (a
+    reference plane or planar face) is selected by name under mark 2.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        params: Mirror parameters (plane name, feature names, options).
+
+    Returns:
+        AdapterResult[SolidWorksFeature]: ``data.type == "Mirror"`` on success.
+
+    Raises:
+        Exception: Propagated through ``_handle_com_operation`` on selection
+            failure or when the mirror feature is not created.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if not params.features:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="Mirror requires at least one feature to mirror",
+        )
+    if not params.plane:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR, error="Mirror requires a 'plane' name"
+        )
+
+    def _mirror_operation() -> SolidWorksFeature:
+        adapter._attempt(
+            lambda: adapter.currentModel.ClearSelection2(True), default=None
+        )
+        for name in params.features:
+            if not _select_named_feature(adapter, name, 1, True):
+                raise Exception(f"Failed to select feature to mirror: {name}")
+        if not _select_named_feature(adapter, params.plane, 2, True):
+            raise Exception(f"Failed to select mirror plane: {params.plane}")
+
+        feature_manager = adapter.currentModel.FeatureManager
+        _flag_feature_methods(feature_manager, "IFeatureManager")
+        names_before = _feature_names(adapter)
+        feature = feature_manager.InsertMirrorFeature2(
+            False,  # BMirrorBody (mirror features, not bodies)
+            bool(params.geometry_pattern),  # BGeometryPattern
+            bool(params.merge),  # BMerge
+            False,  # BKnit (surfaces only)
+            0,  # ScopeOptions = swFeatureScope_AllBodies
+        )
+        feature = _resolve_feature(adapter, feature, names_before)
+        if not feature:
+            raise Exception("Failed to create mirror feature")
+
+        return SolidWorksFeature(
+            name=str(_read_member(feature, "Name")),
+            type="Mirror",
+            id=adapter._get_feature_id(feature),
+            parameters={
+                "plane": params.plane,
+                "features": params.features,
+                "merge": bool(params.merge),
+                "geometry_pattern": bool(params.geometry_pattern),
+            },
+            properties={"created": datetime.now().isoformat()},
+        )
+
+    return cast(
+        AdapterResult[SolidWorksFeature],
+        adapter._handle_com_operation("mirror_feature", _mirror_operation),
+    )
+
+
+def _circular_pattern_impl(
+    adapter: Any, params: CircularPatternParameters
+) -> AdapterResult[SolidWorksFeature]:
+    """Circular-pattern named features about an axis via ``FeatureCircularPattern5``.
+
+    The rotation axis (a cylindrical face or a linear edge) is selected by a
+    point under mark 1; the seed features are selected by name under mark 4.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        params: Circular-pattern parameters.
+
+    Returns:
+        AdapterResult[SolidWorksFeature]: ``data.type == "CircularPattern"`` on
+        success.
+
+    Raises:
+        Exception: Propagated through ``_handle_com_operation`` on selection
+            failure or when the pattern feature is not created.
+    """
+    import math
+
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if not params.features:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="Circular pattern requires at least one feature",
+        )
+    if params.count < 1:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR, error="count must be >= 1"
+        )
+
+    def _circular_operation() -> SolidWorksFeature:
+        adapter._attempt(
+            lambda: adapter.currentModel.ClearSelection2(True), default=None
+        )
+        axis_type = _select_reference_point(
+            adapter, params.axis_point, 1, ("EDGE", "AXIS", "FACE")
+        )
+        if axis_type is None:
+            raise Exception(
+                f"Failed to select rotation axis at point {params.axis_point} "
+                "(mm); point at a cylindrical face or a linear edge"
+            )
+        for name in params.features:
+            if not _select_named_feature(adapter, name, 4, True):
+                raise Exception(f"Failed to select feature to pattern: {name}")
+
+        spacing_rad = math.radians(float(params.angle))
+        feature_manager = adapter.currentModel.FeatureManager
+        _flag_feature_methods(feature_manager, "IFeatureManager")
+        names_before = _feature_names(adapter)
+        feature = feature_manager.FeatureCircularPattern5(
+            int(params.count),  # Number (incl. seed)
+            spacing_rad,  # Spacing (radians; total angle when EqualSpacing)
+            False,  # FlipDirection
+            "NULL",  # DName
+            False,  # GeometryPattern
+            bool(params.equal_spacing),  # EqualSpacing
+            False,  # VaryInstance
+            False,  # SyncSubAssemblies
+            False,  # BDir2
+            False,  # BSymmetric
+            0,  # Number2
+            0.0,  # Spacing2
+            "NULL",  # DName2
+            False,  # EqualSpacing2
+        )
+        feature = _resolve_feature(adapter, feature, names_before)
+        if not feature:
+            raise Exception("Failed to create circular pattern")
+
+        return SolidWorksFeature(
+            name=str(_read_member(feature, "Name")),
+            type="CircularPattern",
+            id=adapter._get_feature_id(feature),
+            parameters={
+                "axis_point": params.axis_point,
+                "axis_entity": axis_type,
+                "features": params.features,
+                "count": int(params.count),
+                "angle": float(params.angle),
+                "equal_spacing": bool(params.equal_spacing),
+            },
+            properties={"created": datetime.now().isoformat()},
+        )
+
+    return cast(
+        AdapterResult[SolidWorksFeature],
+        adapter._handle_com_operation("circular_pattern_feature", _circular_operation),
+    )
+
+
+def _linear_pattern_impl(
+    adapter: Any, params: LinearPatternParameters
+) -> AdapterResult[SolidWorksFeature]:
+    """Linear-pattern named features along a direction via ``FeatureLinearPattern5``.
+
+    The direction reference (typically a linear edge) is selected by a point
+    under mark 1; the seed features are selected by name under mark 4.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        params: Linear-pattern parameters.
+
+    Returns:
+        AdapterResult[SolidWorksFeature]: ``data.type == "LinearPattern"`` on
+        success.
+
+    Raises:
+        Exception: Propagated through ``_handle_com_operation`` on selection
+            failure or when the pattern feature is not created.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if not params.features:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="Linear pattern requires at least one feature",
+        )
+    if params.count < 1:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR, error="count must be >= 1"
+        )
+
+    def _linear_operation() -> SolidWorksFeature:
+        adapter._attempt(
+            lambda: adapter.currentModel.ClearSelection2(True), default=None
+        )
+        dir_type = _select_reference_point(
+            adapter, params.direction_point, 1, ("EDGE", "AXIS", "FACE")
+        )
+        if dir_type is None:
+            raise Exception(
+                f"Failed to select direction at point {params.direction_point} "
+                "(mm); point at a linear edge or axis"
+            )
+        for name in params.features:
+            if not _select_named_feature(adapter, name, 4, True):
+                raise Exception(f"Failed to select feature to pattern: {name}")
+
+        feature_manager = adapter.currentModel.FeatureManager
+        _flag_feature_methods(feature_manager, "IFeatureManager")
+        names_before = _feature_names(adapter)
+        feature = feature_manager.FeatureLinearPattern5(
+            int(params.count),  # Num1 (incl. seed)
+            float(params.spacing) / 1000.0,  # Spacing1 (metres)
+            1,  # Num2 (direction 2 unused)
+            0.0,  # Spacing2
+            False,  # FlipDir1
+            False,  # FlipDir2
+            "",  # DName1
+            "",  # DName2
+            False,  # GeometryPattern
+            False,  # VaryInstance
+            False,  # HasOffset1
+            False,  # HasOffset2
+            True,  # CtrlByNum1
+            True,  # CtrlByNum2
+            False,  # FromCentroid1
+            False,  # FromCentroid2
+            False,  # RevOffset1
+            False,  # RevOffset2
+            0.0,  # Offset1
+            0.0,  # Offset2
+            False,  # D2PatternSeedOnly
+            False,  # SyncSubAssemblies
+        )
+        feature = _resolve_feature(adapter, feature, names_before)
+        if not feature:
+            raise Exception("Failed to create linear pattern")
+
+        return SolidWorksFeature(
+            name=str(_read_member(feature, "Name")),
+            type="LinearPattern",
+            id=adapter._get_feature_id(feature),
+            parameters={
+                "direction_point": params.direction_point,
+                "direction_entity": dir_type,
+                "features": params.features,
+                "count": int(params.count),
+                "spacing": float(params.spacing),
+            },
+            properties={"created": datetime.now().isoformat()},
+        )
+
+    return cast(
+        AdapterResult[SolidWorksFeature],
+        adapter._handle_com_operation("linear_pattern_feature", _linear_operation),
+    )
+
+
+def _shell_impl(
+    adapter: Any, params: ShellParameters
+) -> AdapterResult[SolidWorksFeature]:
+    """Hollow the solid body via ``IModelDoc2::InsertFeatureShell``.
+
+    Faces to remove are selected by a point on each (mark 1).  An empty
+    ``face_points`` shells the body closed (no opening).  ``InsertFeatureShell``
+    returns ``void``, so the created feature is recovered from the tree.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        params: Shell parameters (thickness, faces to remove, direction).
+
+    Returns:
+        AdapterResult[SolidWorksFeature]: ``data.type == "Shell"`` on success.
+
+    Raises:
+        Exception: Propagated through ``_handle_com_operation`` on selection
+            failure or when the shell feature is not created.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if params.thickness <= 0:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR, error="thickness must be positive"
+        )
+
+    def _shell_operation() -> SolidWorksFeature:
+        adapter._attempt(
+            lambda: adapter.currentModel.ClearSelection2(True), default=None
+        )
+        for point in params.face_points:
+            if not _select_by_point(adapter, "FACE", point, 1, True):
+                raise Exception(f"Failed to select face at point {point} (mm)")
+
+        # InsertFeatureShell(Thickness metres, Outward) returns void.
+        names_before = _feature_names(adapter)
+        adapter.currentModel.InsertFeatureShell(
+            float(params.thickness) / 1000.0, bool(params.outward)
+        )
+        feature = _resolve_feature(adapter, None, names_before)
+        if not feature:
+            raise Exception("Failed to create shell")
+
+        return SolidWorksFeature(
+            name=str(_read_member(feature, "Name")),
+            type="Shell",
+            id=adapter._get_feature_id(feature),
+            parameters={
+                "thickness": float(params.thickness),
+                "face_points": params.face_points,
+                "outward": bool(params.outward),
+            },
+            properties={"created": datetime.now().isoformat()},
+        )
+
+    return cast(
+        AdapterResult[SolidWorksFeature],
+        adapter._handle_com_operation("shell", _shell_operation),
+    )
+
+
+def _draft_impl(
+    adapter: Any, params: DraftParameters
+) -> AdapterResult[SolidWorksFeature]:
+    """Apply a neutral-plane draft via ``IFeatureManager::InsertMultiFaceDraft``.
+
+    The neutral plane is selected by name under mark 1; faces to draft are
+    selected by a point on each under mark 2.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        params: Draft parameters (angle, neutral plane, faces, direction).
+
+    Returns:
+        AdapterResult[SolidWorksFeature]: ``data.type == "Draft"`` on success.
+
+    Raises:
+        Exception: Propagated through ``_handle_com_operation`` on selection
+            failure or when the draft feature is not created.
+    """
+    import math
+
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if not params.neutral_plane:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="Draft requires a 'neutral_plane' name",
+        )
+    if not params.face_points:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="Draft requires at least one face point",
+        )
+
+    def _draft_operation() -> SolidWorksFeature:
+        adapter._attempt(
+            lambda: adapter.currentModel.ClearSelection2(True), default=None
+        )
+        if not _select_named_feature(adapter, params.neutral_plane, 1, True):
+            raise Exception(
+                f"Failed to select neutral plane: {params.neutral_plane}"
+            )
+        for point in params.face_points:
+            if not _select_by_point(adapter, "FACE", point, 2, True):
+                raise Exception(f"Failed to select face at point {point} (mm)")
+
+        feature_manager = adapter.currentModel.FeatureManager
+        _flag_feature_methods(feature_manager, "IFeatureManager")
+        names_before = _feature_names(adapter)
+        feature = feature_manager.InsertMultiFaceDraft(
+            math.radians(float(params.angle)),  # Angle (radians)
+            bool(params.flip),  # FlipDir
+            False,  # EdgeDraft (face draft)
+            0,  # PropType (no propagation)
+            False,  # IsStepDraft
+            False,  # IsBodyDraft
+        )
+        feature = _resolve_feature(adapter, feature, names_before)
+        if not feature:
+            raise Exception("Failed to create draft")
+
+        return SolidWorksFeature(
+            name=str(_read_member(feature, "Name")),
+            type="Draft",
+            id=adapter._get_feature_id(feature),
+            parameters={
+                "angle": float(params.angle),
+                "neutral_plane": params.neutral_plane,
+                "face_points": params.face_points,
+                "flip": bool(params.flip),
+            },
+            properties={"created": datetime.now().isoformat()},
+        )
+
+    return cast(
+        AdapterResult[SolidWorksFeature],
+        adapter._handle_com_operation("draft", _draft_operation),
     )
