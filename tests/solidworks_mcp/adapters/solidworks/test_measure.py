@@ -240,11 +240,19 @@ def test_measure_null_measure_tool_errors() -> None:
 
 
 def test_measure_calculate_falls_back_to_typed_null() -> None:
-    """A VT_NULL type mismatch on Calculate(None) retries with a typed null."""
+    """A VT_NULL type mismatch on Calculate(None) retries with a typed null.
+
+    The double rejects the first attempt by call count, not by argument
+    value: off Windows ``null_dispatch()`` legitimately falls back to plain
+    ``None``, so an argument-based check would also reject the retry.
+    """
 
     class _PickyMeasure(_FakeMeasure):
+        attempts = 0
+
         def Calculate(self, entities):  # noqa: N802
-            if entities is None:
+            self.attempts += 1
+            if self.attempts == 1:
                 raise TypeError("Type mismatch")
             return super().Calculate(entities)
 
@@ -256,7 +264,8 @@ def test_measure_calculate_falls_back_to_typed_null() -> None:
 
     assert result.is_success
     assert result.data["length"] == 1.0
-    assert len(tool.calculate_args) == 1  # the retry, with the typed null
+    assert tool.attempts == 2  # first raised, retry with the typed null
+    assert len(tool.calculate_args) == 1
 
 
 def test_snake_case() -> None:
