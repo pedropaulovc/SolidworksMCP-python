@@ -62,19 +62,22 @@ gh api "repos/$REPO" -X PATCH --silent \
   -f merge_commit_message=PR_BODY \
   -F delete_branch_on_merge=true
 
-# ── Disable upstream's GitHub Pages deploy on the fork ──────────────────────
-# upstream's `deploy-docs.yml` triggers on push/PR to `main`. The fork has
-# no GitHub Pages site configured, so its `Setup Pages`
-# (actions/configure-pages) step fails with "Get Pages site failed ...
-# HttpError: Not Found" — a perpetual red X on every `main` sync push and on
-# any PR that targets `main`. Docs deployment is upstream's concern, not the
-# fork's (pedro-ci covers fork testing), so disable the workflow here rather
-# than editing the upstream-tracked `deploy-docs.yml` (which must mirror
-# upstream exactly). Idempotent: disabling an already-disabled workflow is a
-# no-op. Referenced by file name so it survives a fresh clone (no hardcoded id).
-echo "  Disabling upstream deploy-docs.yml workflow on the fork ..."
-gh api "repos/$REPO/actions/workflows/deploy-docs.yml/disable" -X PUT --silent 2>/dev/null \
-  || echo "    (deploy-docs.yml not present or already disabled — skipping)"
+# ── Enable GitHub Pages so upstream's deploy-docs workflow succeeds ──────────
+# upstream's `deploy-docs.yml` triggers on push/PR to `main`; its `Setup Pages`
+# step (actions/configure-pages) fails with "Get Pages site failed ...
+# HttpError: Not Found" unless the repo has a Pages site whose build source is
+# GitHub Actions. Enable it here (build_type=workflow) so each `main` sync
+# builds and publishes the docs instead of leaving a perpetual red X. The
+# `deploy` job is already gated to `refs/heads/main`, so only main publishes.
+# Idempotent: POST creates the site, PUT updates the build source if it already
+# exists. A pre-existing custom domain / CNAME is left untouched.
+echo "  Enabling GitHub Pages (build source: GitHub Actions) ..."
+gh api "repos/$REPO/pages" -X POST -f build_type=workflow --silent 2>/dev/null \
+  || gh api "repos/$REPO/pages" -X PUT -f build_type=workflow --silent 2>/dev/null \
+  || echo "    (could not configure Pages — check repo Pages permissions)"
+
+# Re-activate the workflow in case a previous provisioning run disabled it.
+gh api "repos/$REPO/actions/workflows/deploy-docs.yml/enable" -X PUT --silent 2>/dev/null || true
 
 # ── Branch ruleset: Protect main ───────────────────────────────────────────
 # Adaptations vs typescript-project:
