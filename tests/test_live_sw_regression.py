@@ -627,16 +627,12 @@ async def test_add_ellipse_creates_real_ellipse(connected_adapter) -> None:
         minor_dx_m = mnr[0] - ctr[0]
         minor_dy_m = mnr[1] - ctr[1]
 
-        assert (
-            abs(major_dx_m - expected_major_m) < tol_m and abs(major_dy_m) < tol_m
-        ), (
+        assert abs(major_dx_m - expected_major_m) < tol_m and abs(major_dy_m) < tol_m, (
             f"major-axis offset ({major_dx_m}, {major_dy_m}) m, expected "
             f"(~{expected_major_m}, ~0); axis order or mm-to-m conversion "
             f"is probably broken"
         )
-        assert (
-            abs(minor_dx_m) < tol_m and abs(minor_dy_m - expected_minor_m) < tol_m
-        ), (
+        assert abs(minor_dx_m) < tol_m and abs(minor_dy_m - expected_minor_m) < tol_m, (
             f"minor-axis offset ({minor_dx_m}, {minor_dy_m}) m, expected "
             f"(~0, ~{expected_minor_m}); axis order or mm-to-m "
             f"conversion is probably broken"
@@ -955,9 +951,7 @@ async def test_sketch_circular_pattern_creates_real_pattern(
             angle=360.0,
             count=6,
         )
-        assert pattern.is_success, (
-            f"sketch_circular_pattern failed: {pattern.error}"
-        )
+        assert pattern.is_success, f"sketch_circular_pattern failed: {pattern.error}"
         assert pattern.data.startswith("CircularPattern_6x360.0deg_"), (
             f"unexpected circular pattern id: {pattern.data!r}"
         )
@@ -1430,9 +1424,7 @@ async def test_polygon_id_flows_into_linear_pattern_live(
     assert part_result.is_success, f"create_part failed: {part_result.error}"
     try:
         sketch_result = await adapter.create_sketch("Front")
-        assert sketch_result.is_success, (
-            f"create_sketch failed: {sketch_result.error}"
-        )
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
 
         seed = await adapter.add_polygon(
             center_x=-50.0, center_y=0.0, radius=5.0, sides=6
@@ -1744,9 +1736,7 @@ async def test_arc_id_flows_into_mirror_and_offset_live(
             f"setup failed: {cl.error} / {arc.error}"
         )
 
-        mirrored = await adapter.sketch_mirror(
-            entities=[arc.data], mirror_line=cl.data
-        )
+        mirrored = await adapter.sketch_mirror(entities=[arc.data], mirror_line=cl.data)
         assert mirrored.is_success, f"arc -> mirror failed: {mirrored.error}"
 
         offset = await adapter.sketch_offset(
@@ -1806,8 +1796,17 @@ async def test_exit_sketch_clears_leftover_sw_sketch_live(
         adapter._reset_sketch_entity_registry()
 
         # SW still has the sketch open (verify before the actual exercise).
+        # Probe through the method-flagged ``currentModel`` dispatch — a bare
+        # ``swApp.ActiveDoc`` is unflagged, so on a drifted gen_py cache its
+        # ``GetActiveSketch2`` raises ``Member not found`` (issue #29).  The
+        # probe still reflects SW-side truth: ``GetActiveSketch2`` queries the
+        # live document, independent of the adapter sketch handles nulled above.
+        from solidworks_mcp.adapters import sw_type_info
+
+        sw_type_info.flag_methods(adapter.currentModel, "IModelDoc2")
+
         def _probe_sw_state() -> object:
-            return adapter.swApp.ActiveDoc.GetActiveSketch2()
+            return adapter.currentModel.GetActiveSketch2()
 
         pre = adapter._handle_com_operation("probe_pre_exit", _probe_sw_state)
         assert pre.is_success and pre.data is not None, (
@@ -1840,6 +1839,54 @@ async def test_exit_sketch_clears_leftover_sw_sketch_live(
         await adapter.close_model(save=False)
 
 
+async def test_check_sketch_fully_defined_reports_constrained_status_live(
+    connected_adapter,
+) -> None:
+    """``check_sketch_fully_defined`` must read real SW state.
+
+    The implementation previously probed a list of speculative attribute
+    names, none of which exist on the SW 2026 type library, so every live
+    call returned ``definition_state='unknown', source='unavailable'``.  It
+    now calls ``ISketch::GetConstrainedStatus`` (``swConstrainedStatus_e``:
+    2=under, 3=fully, 4=over) — drive a circle from under-defined to
+    fully-defined via a ``fix`` constraint and assert both readings.
+    """
+    adapter = connected_adapter
+    await adapter.exit_sketch()
+
+    part_result = await adapter.create_part()
+    assert part_result.is_success, f"create_part failed: {part_result.error}"
+
+    try:
+        sketch_result = await adapter.create_sketch("Front")
+        assert sketch_result.is_success, f"create_sketch failed: {sketch_result.error}"
+        circle = await adapter.add_circle(30.0, 20.0, 10.0)
+        assert circle.is_success, f"add_circle failed: {circle.error}"
+
+        under = await adapter.check_sketch_fully_defined()
+        assert under.is_success, f"check (under) failed: {under.error}"
+        assert under.data["source"] == "sketch.GetConstrainedStatus", (
+            f"expected the GetConstrainedStatus probe, got {under.data!r}"
+        )
+        assert under.data["is_fully_defined"] is False
+        assert under.data["definition_state"] == "under_defined"
+
+        fix = await adapter.add_sketch_constraint(circle.data, None, "fix")
+        assert fix.is_success, f"fix constraint failed: {fix.error}"
+
+        full = await adapter.check_sketch_fully_defined()
+        assert full.is_success, f"check (full) failed: {full.error}"
+        assert full.data["is_fully_defined"] is True, (
+            f"fixed circle should be fully defined, got {full.data!r}"
+        )
+        assert full.data["definition_state"] == "fully_defined"
+
+        exit_result = await adapter.exit_sketch()
+        assert exit_result.is_success, f"exit_sketch failed: {exit_result.error}"
+    finally:
+        await adapter.close_model(save=False)
+
+
 async def test_spline_id_flows_into_mirror_live(connected_adapter) -> None:
     """``add_spline`` ID -> ``sketch_mirror``.
 
@@ -1867,9 +1914,7 @@ async def test_spline_id_flows_into_mirror_live(connected_adapter) -> None:
             f"setup failed: {spl.error} / {cl.error}"
         )
 
-        mirrored = await adapter.sketch_mirror(
-            entities=[spl.data], mirror_line=cl.data
-        )
+        mirrored = await adapter.sketch_mirror(entities=[spl.data], mirror_line=cl.data)
         assert mirrored.is_success, (
             f"spline -> mirror composition failed: {mirrored.error}"
         )
@@ -1993,9 +2038,7 @@ async def test_create_loft_tapered_bevel(connected_adapter) -> None:
         assert c2.is_success, f"add_circle #2 failed: {c2.error}"
         assert (await adapter.exit_sketch()).is_success
 
-        loft = await adapter.create_loft(
-            LoftParameters(profiles=[s1.data, s2.data])
-        )
+        loft = await adapter.create_loft(LoftParameters(profiles=[s1.data, s2.data]))
         assert loft.is_success, f"create_loft failed: {loft.error}"
         assert loft.data.type == "Loft"
         assert loft.data.name, "loft feature has no name"
