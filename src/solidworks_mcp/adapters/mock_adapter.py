@@ -19,8 +19,11 @@ from .base import (
     AdapterHealth,
     AdapterResult,
     AdapterResultStatus,
+    AddThreadParameters,
+    ApplyMaterialParameters,
     CircularPatternParameters,
     CreateAxisParameters,
+    CreateBomParameters,
     CreateConfigurationParameters,
     CreateCoordinateSystemParameters,
     CreateEquationCurveParameters,
@@ -1182,6 +1185,167 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
             data=values,
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def apply_material(
+        self, params: ApplyMaterialParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock assigning a material to the active part.
+
+        Args:
+            params (ApplyMaterialParameters): Material, database, scope.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Applied material details.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if not params.material.strip():
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="Material name is required"
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "material": params.material,
+                "configuration": params.configuration or "Default",
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def add_thread(
+        self, params: AddThreadParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock adding a cosmetic thread to a circular edge.
+
+        Args:
+            params (AddThreadParameters): Edge location and thread spec.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Thread feature details.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if params.standard not in {
+            "none",
+            "ansi_inch",
+            "ansi_metric",
+            "bsi",
+            "din",
+            "helicoil_inch",
+            "helicoil_metric",
+            "iso",
+            "jis",
+        }:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown thread standard: {params.standard!r}",
+            )
+        if params.end_type not in {"blind", "blind_upto_next", "through", "blind_2dia"}:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown thread end_type: {params.end_type!r}",
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": "Cosmetic Thread1",
+                "standard": params.standard,
+                "size": params.size,
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    def _mock_bom_contents(self, params: CreateBomParameters) -> dict[str, Any]:
+        """Deterministic BOM payload shared by create/export mocks."""
+        return {
+            "rows": 2,
+            "columns": 3,
+            "header": ["ITEM NO.", "PART NUMBER", "QTY."],
+            "data": [
+                ["1", self._current_model.name if self._current_model else "Part1", "1"]
+            ],
+            "configuration": params.configuration or "Default",
+            "bom_type": params.bom_type,
+        }
+
+    async def create_bom(
+        self, params: CreateBomParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock inserting a BOM table.
+
+        Args:
+            params (CreateBomParameters): BOM type, configuration, template.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Deterministic table contents.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if params.bom_type not in {"parts_only", "top_level", "indented", "flattened"}:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown bom_type: {params.bom_type!r}",
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data=self._mock_bom_contents(params),
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def export_bom_csv(
+        self, params: CreateBomParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock exporting a BOM table to CSV (no file is written).
+
+        Args:
+            params (CreateBomParameters): BOM options plus ``file_path``.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Export summary.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if params.bom_type not in {"parts_only", "top_level", "indented", "flattened"}:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown bom_type: {params.bom_type!r}",
+            )
+        if not params.file_path.strip():
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="file_path is required for export_bom_csv",
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        contents = self._mock_bom_contents(params)
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "file_path": params.file_path,
+                "rows": contents["rows"],
+                "columns": contents["columns"],
+                "configuration": contents["configuration"],
+            },
             execution_time=self._delays["model_operation"] / 2,
         )
 

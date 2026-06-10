@@ -41,8 +41,11 @@ import pytest
 # base.py is pure-pydantic (no pywin32), so importing the parameter models at
 # module scope is safe on non-Windows CI even though the SW tests are skipped.
 from solidworks_mcp.adapters.base import (
+    AddThreadParameters,
+    ApplyMaterialParameters,
     CircularPatternParameters,
     CreateAxisParameters,
+    CreateBomParameters,
     CreateConfigurationParameters,
     CreateCoordinateSystemParameters,
     CreateEquationCurveParameters,
@@ -3009,5 +3012,107 @@ async def test_measure_no_model_returns_error(connected_adapter) -> None:
     result = await adapter.measure(
         MeasureParameters(entities=[_edge_ref([0.0, 0.0, 0.0])])
     )
+    assert result.is_error
+    assert "No active model" in (result.error or "")
+
+
+# ---- Phase 5 manufacturing live regression ----
+#
+# Fork issue #6 / upstream phase 5: material assignment, cosmetic threads
+# and BOM tables. The material test is the issue's acceptance criterion:
+# steel on a known box must produce the analytically expected mass.
+
+
+async def test_apply_material_steel_box_mass_live(connected_adapter) -> None:
+    """Plain Carbon Steel on a 50x50x100 mm box weighs 1.95 kg (within 1%).
+
+    Volume 2.5e-4 m³ x 7800 kg/m³ = 1.95 kg — the issue #6 acceptance
+    criterion proving the material (and its density) actually applied.
+    """
+    adapter = connected_adapter
+    await _build_box(adapter)  # 50 x 50 x 100 mm
+    try:
+        result = await adapter.apply_material(
+            ApplyMaterialParameters(material="Plain Carbon Steel")
+        )
+        assert result.is_success, f"apply_material failed: {result.error}"
+        assert result.data["material"] == "Plain Carbon Steel"
+
+        mass_result = await adapter.get_mass_properties()
+        assert mass_result.is_success, f"mass properties failed: {mass_result.error}"
+        mass = mass_result.data.mass
+        assert abs(mass - 1.95) / 1.95 < 0.01, (
+            f"steel box mass {mass} kg; expected 1.95 kg +/- 1%"
+        )
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_apply_material_unknown_errors_live(connected_adapter) -> None:
+    """A material absent from the database errors instead of silently no-opping."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        result = await adapter.apply_material(
+            ApplyMaterialParameters(material="Unobtainium-9000")
+        )
+        assert result.is_error
+        assert "was not applied" in (result.error or "")
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_add_cosmetic_thread_cylinder_live(connected_adapter) -> None:
+    """A cosmetic thread lands on the cylinder's front circular edge.
+
+    Uses the standard-free mode (swCosmeticStandardNone) with an explicit
+    45 mm thread diameter on the 50 mm cylinder — standards constrain sizes
+    to catalogue values, which a metric 50 mm test cylinder does not match.
+    """
+    adapter = connected_adapter
+    await _build_cylinder(adapter)  # radius 25 mm, z in [0, 100] mm
+    try:
+        result = await adapter.add_thread(
+            AddThreadParameters(
+                edge_point=[25.0, 0.0, 0.0],
+                standard="none",
+                diameter=45.0,
+                end_type="blind",
+                depth=20.0,
+            )
+        )
+        assert result.is_success, f"add_thread failed: {result.error}"
+        assert result.data["name"], f"thread feature has no name: {result.data}"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_create_bom_and_export_csv_live(connected_adapter, tmp_path) -> None:
+    """A parts-only BOM inserts on a part document and exports to CSV."""
+    adapter = connected_adapter
+    await _build_box(adapter)
+    try:
+        bom = await adapter.create_bom(CreateBomParameters(bom_type="parts_only"))
+        assert bom.is_success, f"create_bom failed: {bom.error}"
+        assert bom.data["rows"] >= 1, bom.data
+        assert bom.data["columns"] >= 1, bom.data
+        assert bom.data["header"], bom.data
+        assert bom.data["configuration"], bom.data
+
+        out = tmp_path / "bom.csv"
+        export = await adapter.export_bom_csv(
+            CreateBomParameters(bom_type="parts_only", file_path=str(out))
+        )
+        assert export.is_success, f"export_bom_csv failed: {export.error}"
+        assert out.exists(), f"CSV not written at {out}"
+        assert out.read_text(encoding="utf-8").strip(), "CSV is empty"
+    finally:
+        await adapter.close_model(save=False)
+
+
+async def test_apply_material_no_model_returns_error(connected_adapter) -> None:
+    """apply_material without an open model errors without touching SW."""
+    adapter = connected_adapter
+    result = await adapter.apply_material(ApplyMaterialParameters(material="Brass"))
     assert result.is_error
     assert "No active model" in (result.error or "")
