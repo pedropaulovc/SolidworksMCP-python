@@ -252,8 +252,10 @@ def _create_equation_driven_curve_impl(
     """Create an equation-driven curve in the active sketch.
 
     Calls ``ISketchManager::CreateEquationSpline2``. Expressions and the
-    range are passed verbatim (lengths evaluate in metres); the rotation/
-    offset legacy parameters are pinned to zero per the API remarks.
+    range are passed verbatim -- lengths evaluate in DOCUMENT units (not
+    metres; see ``CreateEquationCurveParameters``), trig in radians; the
+    rotation/offset legacy parameters are pinned to zero per the API
+    remarks.
 
     Args:
         adapter: A ``PyWin32Adapter`` with an open sketch.
