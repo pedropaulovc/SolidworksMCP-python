@@ -17,8 +17,9 @@ tool that the toy geometry can carry:
 * ``suppress_mate`` (gear mate off -> big gear rotates back alone ->
   unsuppress), ``list_mates``, ``delete_mate``.
 * ``pattern_components_circular``: 20 instances of a dedicated small-gear
-  seed about an assembly-level reference axis, on a ring wide enough that
-  the instances clear each other (the 20-cone-gear acceptance shape).
+  seed about an assembly-level reference axis (the 20-cone-gear acceptance
+  shape), seated on a fixed base plate the shafts also butt against, on a
+  ring wide enough that the instances clear each other.
 
 Cam-follower, rack-pinion and screw mates share the same AddMate5 +
 ModifyDefinition plumbing and are covered by unit tests; their live
@@ -71,6 +72,15 @@ EXPECTED_OUTPUT_ANGLE = INPUT_ANGLE * GEAR_RATIO[0] / GEAR_RATIO[1]  # 90 deg
 # ~= 96 mm to clear each other; at 150 mm the chord between neighbours is
 # 2 * 150 * sin(9 deg) ~= 47 mm.
 PATTERN_RING_RADIUS = 150.0
+# Base plate the fixture is mounted on: wide enough to carry the ring
+# (150 + 15 = 165 mm) and thick enough to read as a plate.
+PLATE_RADIUS = 180.0
+PLATE_THICKNESS = 10.0
+# Components extrude symmetrically about z=0 (midplane): the shafts span
+# z in [-20, 20], so the plate's front face sits at z = -20 and the ring
+# discs (10 mm thick) are seated on it with their backs at z = -20.
+PLATE_Z = -(SHAFT_LENGTH / 2.0) - PLATE_THICKNESS / 2.0  # -25
+RING_SEED_Z = -(SHAFT_LENGTH / 2.0) + GEAR_THICKNESS / 2.0  # -15
 
 
 def _check(label: str, result) -> None:
@@ -141,6 +151,7 @@ async def build_demo_assembly(out_dir: Path) -> dict[str, str]:
     shaft_path = (out_dir / "mate_demo_shaft.SLDPRT").resolve()
     big_path = (out_dir / "mate_demo_gear_big.SLDPRT").resolve()
     small_path = (out_dir / "mate_demo_gear_small.SLDPRT").resolve()
+    plate_path = (out_dir / "mate_demo_plate.SLDPRT").resolve()
 
     adapter = PyWin32Adapter({})
     print("Connecting to SolidWorks ...")
@@ -162,6 +173,8 @@ async def build_demo_assembly(out_dir: Path) -> dict[str, str]:
         await _build_disc(adapter, BIG_GEAR_RADIUS, GEAR_THICKNESS, big_path)
         print("Part: small gear disc")
         await _build_disc(adapter, SMALL_GEAR_RADIUS, GEAR_THICKNESS, small_path)
+        print("Part: base plate")
+        await _build_disc(adapter, PLATE_RADIUS, PLATE_THICKNESS, plate_path)
 
         # ------------------------------------------------------------------
         # Phase 7A: components.
@@ -371,6 +384,21 @@ async def build_demo_assembly(out_dir: Path) -> dict[str, str]:
                 )
             ),
         )
+        # Everything mounts on a base plate so the fixture reads as a
+        # physical jig: the shafts butt against the plate's front face and
+        # the patterned ring discs are seated on it.
+        plate = await adapter.insert_component(
+            InsertComponentParameters(
+                file_path=str(plate_path), position=[0.0, 0.0, PLATE_Z]
+            )
+        )
+        _check("insert_component base plate", plate)
+        _check(
+            "fix_component base plate",
+            await adapter.fix_component(
+                ComponentRefParameters(name=plate.data["name"])
+            ),
+        )
         # A dedicated unmated seed sits far enough from the pattern axis
         # that the 20 instances clear each other and the gear pair
         # (pattern instances carry no mates, so the mated small gear stays
@@ -378,7 +406,7 @@ async def build_demo_assembly(out_dir: Path) -> dict[str, str]:
         ring_seed = await adapter.insert_component(
             InsertComponentParameters(
                 file_path=str(small_path),
-                position=[PATTERN_RING_RADIUS, 0.0, 0.0],
+                position=[PATTERN_RING_RADIUS, 0.0, RING_SEED_Z],
             )
         )
         _check("insert_component pattern ring seed", ring_seed)
