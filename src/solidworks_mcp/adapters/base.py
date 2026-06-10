@@ -203,7 +203,10 @@ class ExtrusionParameters(BaseModel):
 
     Attributes:
         auto_select (bool): The auto select value.
-        both_directions (bool): The both directions value.
+        both_directions (bool): Extrude mid-plane (``swEndCondMidPlane``):
+            ``depth`` is the TOTAL depth, split ``depth/2`` to each side of
+            the sketch plane (live-verified: a 10 mm both-directions cut
+            reaches only 5 mm into a body sitting on one side).
         depth (float): The depth value.
         draft_angle (float): The draft angle value.
         end_condition (str): The end condition value.
@@ -490,7 +493,13 @@ class CreateEquationCurveParameters(BaseModel):
     """Parameters for an equation-driven sketch curve.
 
     Expressions are passed verbatim to SolidWorks (same syntax as the
-    Equation Driven Curve sketch tool); lengths evaluate in **metres**.
+    Equation Driven Curve sketch tool); lengths evaluate in **document
+    units** -- NOT metres like the rest of the COM surface (live-verified
+    on SW 2026: with an IPS part template a radius expression of ``0.05``
+    yields a 0.05 in arc, not 50 mm). Trigonometric functions here take
+    **radians**, unlike the equation manager's degree-based parser (see
+    ``SetGlobalVariableParameters``). Expressions may reference equation
+    manager globals by quoted name, e.g. ``"Rb" * (cos(t) + t * sin(t))``.
 
     Attributes:
         x_expression (str): ``x(t)`` for a parametric curve; empty string for
@@ -518,6 +527,13 @@ class CreateEquationCurveParameters(BaseModel):
 
 class SetGlobalVariableParameters(BaseModel):
     """Parameters for adding or updating an equation-manager global variable.
+
+    Equation-manager parser dialect (live-verified on SW 2026):
+    trigonometric functions take **degrees** (``cos(60)`` = 0.5) and
+    inverse trig returns degrees (``atn(1)`` = 45); ``sqr`` is the
+    square ROOT (VBA-style). Length-valued results feed dimensions and
+    equation-driven curves in document units. Note the asymmetry with
+    ``CreateEquationCurveParameters`` expressions, which use radians.
 
     Attributes:
         name (str): Global variable name without quotes (e.g. ``ToothCount``).
