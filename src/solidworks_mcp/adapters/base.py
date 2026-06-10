@@ -694,6 +694,149 @@ class CreateBomParameters(BaseModel):
     file_path: str = ""
 
 
+class InsertComponentParameters(BaseModel):
+    """Parameters for inserting a component into the active assembly.
+
+    Attributes:
+        file_path (str): Path to the ``.sldprt``/``.sldasm`` file to insert.
+            The file is preloaded (``ISldWorks::OpenDoc6``) because
+            ``IAssemblyDoc::AddComponent5`` requires it in memory.
+        position (list[float]): ``[x, y, z]`` component-origin position in
+            assembly space, millimetres. Applied via an exact component
+            transform (the ``AddComponent5`` coordinates are bounding-box
+            relative and only approximate).
+        rotation (list[float]): ``[rx, ry, rz]`` rotation in degrees applied
+            about the assembly X, then Y, then Z axes.
+        configuration (str): Configuration of the inserted component; empty
+            for its active configuration.
+    """
+
+    file_path: str
+    position: list[float] = [0.0, 0.0, 0.0]
+    rotation: list[float] = [0.0, 0.0, 0.0]
+    configuration: str = ""
+
+
+class ComponentRefParameters(BaseModel):
+    """Parameters referencing one component of the active assembly.
+
+    Attributes:
+        name (str): Component name with instance suffix, e.g. ``"shaft-1"``
+            (``"sub-1/part-1"`` for a child of a subassembly). A trailing
+            ``"@assembly"`` qualifier is accepted and added automatically
+            when missing.
+    """
+
+    name: str
+
+
+class ReplaceComponentParameters(BaseModel):
+    """Parameters for replacing a component with another model.
+
+    Attributes:
+        name (str): Component to replace, e.g. ``"shaft-1"``. Must be a
+            top-level component (API limitation of ``ReplaceComponents2``).
+        file_path (str): Path to the replacement ``.sldprt``/``.sldasm``.
+            Must not have the same file name as the replaced component.
+        configuration (str): Configuration of the replacement to use; empty
+            lets SolidWorks match configuration names.
+        replace_all (bool): Replace every instance of the selected
+            component's model, not just the selected instance.
+        reattach_mates (bool): Re-attach existing mates to the replacement.
+    """
+
+    name: str
+    file_path: str
+    configuration: str = ""
+    replace_all: bool = False
+    reattach_mates: bool = True
+
+
+class MoveComponentParameters(BaseModel):
+    """Parameters for moving a component to a position in assembly space.
+
+    Attributes:
+        name (str): Component name, e.g. ``"shaft-1"``.
+        position (list[float]): ``[x, y, z]`` in millimetres — the target
+            component-origin position (``relative`` false) or a translation
+            delta (``relative`` true). The component's rotation is preserved.
+        relative (bool): Interpret ``position`` as a delta from the current
+            position instead of an absolute target.
+    """
+
+    name: str
+    position: list[float]
+    relative: bool = False
+
+
+class RotateComponentParameters(BaseModel):
+    """Parameters for rotating a component about an axis in assembly space.
+
+    Attributes:
+        name (str): Component name, e.g. ``"shaft-1"``.
+        angle (float): Rotation angle in degrees (right-hand rule about
+            ``axis_vector``).
+        axis_vector (list[float]): Direction of the rotation axis in
+            assembly space (need not be unit length).
+        axis_point (list[float]): ``[x, y, z]`` in millimetres — a point the
+            rotation axis passes through.
+    """
+
+    name: str
+    angle: float
+    axis_vector: list[float] = [0.0, 0.0, 1.0]
+    axis_point: list[float] = [0.0, 0.0, 0.0]
+
+
+class ComponentLinearPatternParameters(BaseModel):
+    """Parameters for a local linear component pattern in an assembly.
+
+    Attributes:
+        components (list[str]): Seed component names, e.g. ``["gear-1"]``.
+            Selected under mark 1 (assembly component patterns use marks
+            swapped versus part feature patterns).
+        count (int): Total number of instances, including the seeds.
+        spacing (float): Distance between instances in millimetres.
+        direction_name (str): Name of a feature usable as the direction
+            reference (reference axis, linear edge owner); selected under
+            mark 2. Takes precedence over ``direction_point``.
+        direction_point (list[float]): ``[x, y, z]`` in millimetres on the
+            direction reference (linear edge or axis); selected under mark 2.
+    """
+
+    components: list[str]
+    count: int
+    spacing: float
+    direction_name: str = ""
+    direction_point: list[float] = []
+
+
+class ComponentCircularPatternParameters(BaseModel):
+    """Parameters for a local circular component pattern in an assembly.
+
+    Attributes:
+        components (list[str]): Seed component names, e.g. ``["gear-1"]``.
+            Selected under mark 1 (assembly component patterns use marks
+            swapped versus part feature patterns).
+        count (int): Total number of instances, including the seeds.
+        angle (float): Total angular span in degrees when ``equal_spacing``
+            is true, otherwise the spacing between instances in degrees.
+        equal_spacing (bool): Distribute instances equally across ``angle``.
+        axis_name (str): Name of a reference-axis feature to rotate about;
+            selected under mark 2. Takes precedence over ``axis_point``.
+        axis_point (list[float]): ``[x, y, z]`` in millimetres on the
+            rotation-axis reference (cylindrical face, linear edge or axis);
+            selected under mark 2.
+    """
+
+    components: list[str]
+    count: int
+    angle: float = 360.0
+    equal_spacing: bool = True
+    axis_name: str = ""
+    axis_point: list[float] = []
+
+
 class MassProperties(BaseModel):
     """Mass properties information.
 
@@ -1670,6 +1813,155 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="export_bom_csv is not implemented by this adapter",
+        )
+
+    async def insert_component(
+        self, params: InsertComponentParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Insert a component into the active assembly.
+
+        Args:
+            params (InsertComponentParameters): File, position, rotation,
+                configuration.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Inserted component details or
+            error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="insert_component is not implemented by this adapter",
+        )
+
+    async def remove_component(
+        self, params: ComponentRefParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Delete a component from the active assembly.
+
+        Args:
+            params (ComponentRefParameters): Component name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Removal confirmation or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="remove_component is not implemented by this adapter",
+        )
+
+    async def replace_component(
+        self, params: ReplaceComponentParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Replace a component with another model.
+
+        Args:
+            params (ReplaceComponentParameters): Component, replacement file
+                and options.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Replacement details or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="replace_component is not implemented by this adapter",
+        )
+
+    async def move_component(
+        self, params: MoveComponentParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Move a component to a position in assembly space.
+
+        Args:
+            params (MoveComponentParameters): Component and target position.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Resulting position or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="move_component is not implemented by this adapter",
+        )
+
+    async def rotate_component(
+        self, params: RotateComponentParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Rotate a component about an axis in assembly space.
+
+        Args:
+            params (RotateComponentParameters): Component, axis and angle.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Rotation confirmation or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="rotate_component is not implemented by this adapter",
+        )
+
+    async def fix_component(
+        self, params: ComponentRefParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Fix a component (make it immovable).
+
+        Args:
+            params (ComponentRefParameters): Component name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Fixed-state confirmation or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="fix_component is not implemented by this adapter",
+        )
+
+    async def float_component(
+        self, params: ComponentRefParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Float a component (make it movable).
+
+        Args:
+            params (ComponentRefParameters): Component name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Float-state confirmation or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="float_component is not implemented by this adapter",
+        )
+
+    async def pattern_components_linear(
+        self, params: ComponentLinearPatternParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Create a local linear component pattern in the active assembly.
+
+        Args:
+            params (ComponentLinearPatternParameters): Seeds, count, spacing
+                and direction reference.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: Pattern feature or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="pattern_components_linear is not implemented by this adapter",
+        )
+
+    async def pattern_components_circular(
+        self, params: ComponentCircularPatternParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Create a local circular component pattern in the active assembly.
+
+        Args:
+            params (ComponentCircularPatternParameters): Seeds, count, angle
+                and axis reference.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: Pattern feature or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="pattern_components_circular is not implemented by this adapter",
         )
 
     @abstractmethod

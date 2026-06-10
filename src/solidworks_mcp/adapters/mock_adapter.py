@@ -22,6 +22,9 @@ from .base import (
     AddThreadParameters,
     ApplyMaterialParameters,
     CircularPatternParameters,
+    ComponentCircularPatternParameters,
+    ComponentLinearPatternParameters,
+    ComponentRefParameters,
     CreateAxisParameters,
     CreateBomParameters,
     CreateConfigurationParameters,
@@ -32,12 +35,16 @@ from .base import (
     CreateReferencePointParameters,
     DraftParameters,
     ExtrusionParameters,
+    InsertComponentParameters,
     LinearPatternParameters,
     LoftParameters,
     MassProperties,
     MeasureParameters,
     MirrorFeatureParameters,
+    MoveComponentParameters,
+    ReplaceComponentParameters,
     RevolveParameters,
+    RotateComponentParameters,
     SetGlobalVariableParameters,
     ShellParameters,
     SolidWorksAdapter,
@@ -125,6 +132,10 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         self._dimensions: dict[str, float] = {}
         self._equations: list[str] = []
         self._configurations: list[str] = ["Default"]
+        # Assembly components keyed by instance name ("part-1"); each value
+        # holds file_path/configuration/position/rotation/fixed state so the
+        # Phase 7A component tools behave statefully in mock mode.
+        self._components: dict[str, dict[str, Any]] = {}
         self._operation_count = 0
 
         # Configurable simulation delays (in seconds)
@@ -1354,6 +1365,357 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 "configuration": contents["configuration"],
             },
             execution_time=self._delays["model_operation"] / 2,
+        )
+
+    def _component_or_error(
+        self, name: str
+    ) -> tuple[str, dict[str, Any]] | AdapterResult[dict[str, Any]]:
+        """Resolve a stored mock component, or build the error result."""
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if not name.strip():
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="name is required"
+            )
+        bare = name.split("@", 1)[0]
+        component = self._components.get(bare)
+        if component is None:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Component not found: {name!r}",
+            )
+        return bare, component
+
+    async def insert_component(
+        self, params: InsertComponentParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock inserting a component into the active assembly.
+
+        Args:
+            params (InsertComponentParameters): File, pose, configuration.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Inserted component details.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if not params.file_path.strip():
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="file_path is required"
+            )
+        if len(params.position) != 3 or len(params.rotation) != 3:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="position and rotation must each be [x, y, z]",
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        stem = params.file_path.replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        instance = sum(1 for k in self._components if k.rsplit("-", 1)[0] == stem) + 1
+        name = f"{stem}-{instance}"
+        component = {
+            "file_path": params.file_path,
+            "configuration": params.configuration or "Default",
+            "position": [float(c) for c in params.position],
+            "rotation": [float(c) for c in params.rotation],
+            # SolidWorks auto-fixes the first component inserted.
+            "fixed": not self._components,
+        }
+        self._components[name] = component
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": name,
+                "file_path": params.file_path,
+                "configuration": component["configuration"],
+                "position": component["position"],
+                "rotation": component["rotation"],
+                "fixed": component["fixed"],
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def remove_component(
+        self, params: ComponentRefParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock deleting a component from the active assembly.
+
+        Args:
+            params (ComponentRefParameters): Component name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Removal confirmation.
+        """
+        resolved = self._component_or_error(params.name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, _ = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        del self._components[name]
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": name, "removed": True},
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def replace_component(
+        self, params: ReplaceComponentParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock replacing a component with another model.
+
+        Args:
+            params (ReplaceComponentParameters): Component, file and options.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Replacement summary.
+        """
+        if self._current_model and not params.file_path.strip():
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="file_path is required"
+            )
+        resolved = self._component_or_error(params.name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, component = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        component["file_path"] = params.file_path
+        if params.configuration:
+            component["configuration"] = params.configuration
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": name,
+                "file_path": params.file_path,
+                "configuration": params.configuration,
+                "replace_all": params.replace_all,
+                "reattach_mates": params.reattach_mates,
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def move_component(
+        self, params: MoveComponentParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock moving a component in assembly space.
+
+        Args:
+            params (MoveComponentParameters): Component and target position.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Resulting position.
+        """
+        if self._current_model and len(params.position) != 3:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="position must be [x, y, z] in millimetres",
+            )
+        resolved = self._component_or_error(params.name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, component = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        if params.relative:
+            component["position"] = [
+                component["position"][i] + float(params.position[i]) for i in range(3)
+            ]
+        else:
+            component["position"] = [float(c) for c in params.position]
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": name,
+                "position": list(component["position"]),
+                "relative": params.relative,
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def rotate_component(
+        self, params: RotateComponentParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock rotating a component about an axis in assembly space.
+
+        Args:
+            params (RotateComponentParameters): Component, axis and angle.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Rotation summary.
+        """
+        if self._current_model and (
+            len(params.axis_vector) != 3 or len(params.axis_point) != 3
+        ):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="axis_vector and axis_point must each be [x, y, z]",
+            )
+        if self._current_model and all(abs(c) < 1e-12 for c in params.axis_vector):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="axis_vector must be non-zero"
+            )
+        resolved = self._component_or_error(params.name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, component = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": name,
+                "angle": params.angle,
+                "axis_vector": [float(c) for c in params.axis_vector],
+                "axis_point": [float(c) for c in params.axis_point],
+                "position": list(component["position"]),
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def fix_component(
+        self, params: ComponentRefParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock fixing a component (making it immovable).
+
+        Args:
+            params (ComponentRefParameters): Component name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Resulting fixed state.
+        """
+        resolved = self._component_or_error(params.name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, component = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        component["fixed"] = True
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": name, "fixed": True},
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def float_component(
+        self, params: ComponentRefParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock floating a component (making it movable).
+
+        Args:
+            params (ComponentRefParameters): Component name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Resulting fixed state.
+        """
+        resolved = self._component_or_error(params.name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, component = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        component["fixed"] = False
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": name, "fixed": False},
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    def _validate_pattern_components(
+        self, components: list[str], count: int
+    ) -> AdapterResult[SolidWorksFeature] | None:
+        """Shared validation for the mock component patterns."""
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if not components:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="Component pattern requires at least one component",
+            )
+        if count < 1:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="count must be >= 1"
+            )
+        for name in components:
+            if name.split("@", 1)[0] not in self._components:
+                return AdapterResult(
+                    status=AdapterResultStatus.ERROR,
+                    error=f"Component not found: {name!r}",
+                )
+        return None
+
+    async def pattern_components_linear(
+        self, params: ComponentLinearPatternParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock creating a local linear component pattern.
+
+        Args:
+            params (ComponentLinearPatternParameters): Pattern definition.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The pattern feature.
+        """
+        invalid = self._validate_pattern_components(params.components, params.count)
+        if invalid is not None:
+            return invalid
+        if not params.direction_name and not params.direction_point:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="Component pattern requires direction_name or direction_point",
+            )
+        return await self._mock_feature(
+            "LocalLinearPattern",
+            {
+                "components": params.components,
+                "count": params.count,
+                "spacing": params.spacing,
+                "direction_name": params.direction_name,
+                "direction_point": params.direction_point,
+            },
+        )
+
+    async def pattern_components_circular(
+        self, params: ComponentCircularPatternParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock creating a local circular component pattern.
+
+        Args:
+            params (ComponentCircularPatternParameters): Pattern definition.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The pattern feature.
+        """
+        invalid = self._validate_pattern_components(params.components, params.count)
+        if invalid is not None:
+            return invalid
+        if not params.axis_name and not params.axis_point:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="Component pattern requires axis_name or axis_point",
+            )
+        return await self._mock_feature(
+            "LocalCircularPattern",
+            {
+                "components": params.components,
+                "count": params.count,
+                "angle": params.angle,
+                "equal_spacing": params.equal_spacing,
+                "axis_name": params.axis_name,
+                "axis_point": params.axis_point,
+            },
         )
 
     async def create_sketch(self, plane: str) -> AdapterResult[dict[str, Any]]:  # type: ignore[override]
