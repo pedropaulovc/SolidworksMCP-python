@@ -2014,13 +2014,14 @@ class PyWin32Adapter(
             # Required for both view changes and bitmap capture.
             self._attempt(lambda: self.swApp.Frame.SetFocus())
 
-            # Set view orientation if requested
+            # Set view orientation if requested. "current" captures the
+            # viewport 1:1 (like SolidWorks' own image export) so a
+            # caller-staged camera (orientation/scale/translation) survives.
             if orientation != "current" and orientation in _VIEW_CONSTANTS:
                 view_const = _VIEW_CONSTANTS[orientation]
                 self._set_view_orientation(target_doc, orientation, view_const)
-
-            # Zoom to fit so the model fills the viewport before capture
-            self._zoom_to_fit(target_doc)
+                # Zoom to fit so the model fills the viewport before capture
+                self._zoom_to_fit(target_doc)
 
             # Try screenshot methods in order: SaveBMP (sized) → SaveAs3
             saved = self._save_screenshot_with_savebmp(

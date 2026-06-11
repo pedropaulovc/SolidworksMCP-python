@@ -2104,6 +2104,43 @@ class TestPyWin32AdapterBranches:
         target_doc.ShowNamedView2.assert_called_once_with("", 1)
         target_doc.ViewZoomToFit2.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_export_image_current_preserves_viewport(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """view_orientation="current" must not reorient or zoom the view."""
+        adapter = self._build_adapter(monkeypatch)
+        output_file = tmp_path / "shot.bmp"
+
+        def _save_bmp(path, *_args):
+            output_file.write_text("image", encoding="utf-8")
+            return True
+
+        target_doc = SimpleNamespace(
+            SaveBMP=Mock(side_effect=_save_bmp),
+            ShowNamedView2=Mock(),
+            ViewZoomToFit2=Mock(),
+        )
+        adapter.currentModel = target_doc
+        adapter.swApp = SimpleNamespace(
+            ActiveDoc=target_doc,
+            ActivateDoc3=Mock(return_value=target_doc),
+            Frame=SimpleNamespace(SetFocus=Mock()),
+        )
+
+        result = await adapter.export_image(
+            {
+                "file_path": str(output_file),
+                "view_orientation": "current",
+                "width": 640,
+                "height": 480,
+            }
+        )
+
+        assert result.is_success
+        target_doc.ShowNamedView2.assert_not_called()
+        target_doc.ViewZoomToFit2.assert_not_called()
+
     def test_prepare_stl_export_data_paths(self, monkeypatch) -> None:
         """_prepare_stl_export_data should handle missing app, missing data, and success."""
         adapter = self._build_adapter(monkeypatch)
