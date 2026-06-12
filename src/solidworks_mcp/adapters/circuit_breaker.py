@@ -941,6 +941,14 @@ class CircuitBreakerAdapter(SolidWorksAdapter):
             input_dict={"sketch_name": sketch_name},
         )
 
+    async def get_over_defining_relations(self) -> AdapterResult[dict[str, Any]]:
+        """List over-defining relations through circuit breaker."""
+        return await self._execute_with_circuit_breaker(
+            "get_over_defining_relations",
+            lambda: self.adapter.get_over_defining_relations(),
+            input_dict={},
+        )
+
     async def exit_sketch(self) -> AdapterResult[None]:
         """Exit sketch through circuit breaker.
 

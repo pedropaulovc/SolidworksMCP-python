@@ -578,9 +578,13 @@ class _SketchGeometryService:
     ) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
         """Read the start and end coordinates of a sketch line or arc segment.
 
-        Accesses ``entity.GetStartPoint`` and ``entity.GetEndPoint`` (as
-        properties, not method calls).  Both must return sequences of at least
-        three numeric values.
+        Reads ``entity.GetStartPoint`` and ``entity.GetEndPoint``. On an
+        unflagged dispatch these resolve as properties (bare access returns
+        the coordinate tuple); once ``sw_type_info.flag_methods`` has touched
+        the entity — e.g. after a point ref like ``"Line_1.end"`` resolved on
+        it — they resolve as methods and bare access returns a bound method
+        instead (verified live on SW 2026, same drift class as issue #29).
+        Both resolutions are handled.
 
         Args:
             entity: SolidWorks ``ISketchLine`` or ``ISketchArc`` COM object.
@@ -589,8 +593,18 @@ class _SketchGeometryService:
             tuple[tuple, tuple] | None: ``((x1, y1, z1), (x2, y2, z2))`` in
             metres, or ``None`` when the attributes are absent or empty.
         """
-        start = self._adapter._attempt(lambda: entity.GetStartPoint, default=None)
-        end = self._adapter._attempt(lambda: entity.GetEndPoint, default=None)
+
+        def _coords(member: str) -> Any | None:
+            value = self._adapter._attempt(
+                lambda: getattr(entity, member)(), default=None
+            )
+            if value is not None:
+                return value
+            raw = self._adapter._attempt(lambda: getattr(entity, member), default=None)
+            return None if callable(raw) else raw
+
+        start = _coords("GetStartPoint")
+        end = _coords("GetEndPoint")
         if (
             isinstance(start, tuple)
             and len(start) >= 3

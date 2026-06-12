@@ -3328,6 +3328,20 @@ class TestPyWin32AdapterBranches:
             (0.0, 0.0, 0.0),
             (10.0, 0.0, 0.0),
         )
+        # After flag_methods touches a dispatch, GetStartPoint/GetEndPoint
+        # resolve as methods — bare property access would return a callable.
+        flagged_segment = SimpleNamespace(
+            GetStartPoint=lambda: (0.0, 0.0, 0.0),
+            GetEndPoint=lambda: (10.0, 0.0, 0.0),
+        )
+        assert service.read_segment_endpoints(flagged_segment) == (
+            (0.0, 0.0, 0.0),
+            (10.0, 0.0, 0.0),
+        )
+        assert (
+            service.read_segment_endpoints(SimpleNamespace(GetStartPoint=lambda: None))
+            is None
+        )
         assert service.segment_point_objects(
             SimpleNamespace(GetStartPoint2="p1", GetEndPoint2="p2")
         ) == ("p1", "p2")

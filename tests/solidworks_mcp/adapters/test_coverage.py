@@ -351,9 +351,7 @@ class TestMockAdapterSuccessPaths:
         await adapter.connect()
         await adapter.create_part()
 
-        result = await adapter.add_spline(
-            [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 1.0}]
-        )
+        result = await adapter.add_spline([{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 1.0}])
         assert result.status == AdapterResultStatus.ERROR
         assert "No active sketch" in (result.error or "")
 
@@ -426,9 +424,7 @@ class TestMockAdapterSuccessPaths:
         await adapter.create_sketch("Front")
         circle = await adapter.add_circle(0.0, 0.0, 3.0)
 
-        result = await adapter.sketch_linear_pattern(
-            [circle.data], 1.0, 0.0, 10.0, 4
-        )
+        result = await adapter.sketch_linear_pattern([circle.data], 1.0, 0.0, 10.0, 4)
         assert result.status == AdapterResultStatus.SUCCESS
         assert result.data.startswith("LinearPattern_4x10.0_")
 
@@ -451,9 +447,7 @@ class TestMockAdapterSuccessPaths:
         await adapter.create_part()
         await adapter.create_sketch("Front")
 
-        result = await adapter.sketch_linear_pattern(
-            ["Bogus_123"], 1.0, 0.0, 10.0, 3
-        )
+        result = await adapter.sketch_linear_pattern(["Bogus_123"], 1.0, 0.0, 10.0, 3)
         assert result.status == AdapterResultStatus.ERROR
         assert "Unknown sketch entity" in (result.error or "")
 
@@ -501,6 +495,26 @@ class TestMockAdapterSuccessPaths:
         assert "entity3" in (result.error or "")
 
     @pytest.mark.asyncio
+    async def test_get_over_defining_relations_mock_parity(self):
+        """Empty diagnostic payload with a sketch active; ERROR without one."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+
+        result = await adapter.get_over_defining_relations()
+        assert result.status == AdapterResultStatus.ERROR
+        assert "No active model" in (result.error or "")
+
+        await adapter.create_part()
+        result = await adapter.get_over_defining_relations()
+        assert result.status == AdapterResultStatus.ERROR
+        assert "No active sketch" in (result.error or "")
+
+        await adapter.create_sketch("Front")
+        result = await adapter.get_over_defining_relations()
+        assert result.status == AdapterResultStatus.SUCCESS
+        assert result.data == {"count": 0, "relations": []}
+
+    @pytest.mark.asyncio
     async def test_sketch_linear_pattern_input_validation(self):
         """Empty entities / count<2 / spacing<=0 / zero direction → ERROR."""
         adapter = MockSolidWorksAdapter({})
@@ -515,23 +529,17 @@ class TestMockAdapterSuccessPaths:
         assert "at least one entity" in (result.error or "")
 
         # count < 2
-        result = await adapter.sketch_linear_pattern(
-            [circle.data], 1.0, 0.0, 10.0, 1
-        )
+        result = await adapter.sketch_linear_pattern([circle.data], 1.0, 0.0, 10.0, 1)
         assert result.status == AdapterResultStatus.ERROR
         assert "count >= 2" in (result.error or "")
 
         # spacing <= 0
-        result = await adapter.sketch_linear_pattern(
-            [circle.data], 1.0, 0.0, 0.0, 3
-        )
+        result = await adapter.sketch_linear_pattern([circle.data], 1.0, 0.0, 0.0, 3)
         assert result.status == AdapterResultStatus.ERROR
         assert "spacing > 0" in (result.error or "")
 
         # zero direction vector
-        result = await adapter.sketch_linear_pattern(
-            [circle.data], 0.0, 0.0, 10.0, 3
-        )
+        result = await adapter.sketch_linear_pattern([circle.data], 0.0, 0.0, 10.0, 3)
         assert result.status == AdapterResultStatus.ERROR
         assert "non-zero direction" in (result.error or "")
 
@@ -780,13 +788,9 @@ class TestRealCircularPatternImpl:
 
         def _handle(_name, fn):
             try:
-                return AdapterResult(
-                    status=AdapterResultStatus.SUCCESS, data=fn()
-                )
+                return AdapterResult(status=AdapterResultStatus.SUCCESS, data=fn())
             except Exception as exc:
-                return AdapterResult(
-                    status=AdapterResultStatus.ERROR, error=str(exc)
-                )
+                return AdapterResult(status=AdapterResultStatus.ERROR, error=str(exc))
 
         def _attempt(fn, default=None):
             try:
@@ -927,9 +931,7 @@ class TestRealCircularPatternImpl:
         bare_seed.GetCenterPoint = Mock(return_value=None)
         adapter._sketch_entities["Line_1"] = bare_seed
 
-        result = sketch_ops._sketch_circular_pattern_impl(
-            adapter, ["Line_1"], 360.0, 6
-        )
+        result = sketch_ops._sketch_circular_pattern_impl(adapter, ["Line_1"], 360.0, 6)
 
         assert result.status == AdapterResultStatus.ERROR
         assert "Line_1" in (result.error or "")
@@ -954,9 +956,7 @@ class TestRealCircularPatternImpl:
         # ``add_*`` writer never stashed a centre.
         adapter._sketch_entities["Slot_1"] = (Mock(), Mock(), Mock(), Mock())
 
-        result = sketch_ops._sketch_circular_pattern_impl(
-            adapter, ["Slot_1"], 360.0, 6
-        )
+        result = sketch_ops._sketch_circular_pattern_impl(adapter, ["Slot_1"], 360.0, 6)
 
         assert result.status == AdapterResultStatus.ERROR
         # Error must name the offending entity and the accepted seed types.
@@ -1167,6 +1167,7 @@ class TestCircuitBreakerCoverage:
         )
         inner.add_sketch_dimension = AsyncMock(return_value=string_result)
         inner.check_sketch_fully_defined = AsyncMock(return_value=dict_result)
+        inner.get_over_defining_relations = AsyncMock(return_value=dict_result)
         inner.execute_macro = AsyncMock(return_value=macro_result)
         inner.export_image = AsyncMock(return_value=export_result)
         inner.export_file = AsyncMock(return_value=file_result)
@@ -1189,6 +1190,7 @@ class TestCircuitBreakerCoverage:
         arc_result = await cb.add_arc(0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
         dim_result = await cb.add_sketch_dimension("Line1", None, "linear", 5.0)
         sketch_result = await cb.check_sketch_fully_defined("Sketch1")
+        over_defining_result = await cb.get_over_defining_relations()
         image_result = await cb.export_image({"output": "preview.png"})
         export_file_result = await cb.export_file("model.step", "step")
 
@@ -1202,6 +1204,7 @@ class TestCircuitBreakerCoverage:
         assert arc_result.status == AdapterResultStatus.SUCCESS
         assert dim_result is string_result
         assert sketch_result is dict_result
+        assert over_defining_result is dict_result
         assert image_result is export_result
         assert export_file_result is file_result
         cb._invoke_with_optional_args.assert_any_call(inner.create_part, "MyPart", "mm")
@@ -1524,6 +1527,12 @@ class TestConnectionPoolAdapterCoverage:
                     data={"fully_defined": True},
                 )
             ),
+            get_over_defining_relations=AsyncMock(
+                return_value=AdapterResult(
+                    status=AdapterResultStatus.SUCCESS,
+                    data={"count": 0, "relations": []},
+                )
+            ),
             execute_macro=AsyncMock(
                 return_value=AdapterResult(
                     status=AdapterResultStatus.SUCCESS,
@@ -1556,6 +1565,7 @@ class TestConnectionPoolAdapterCoverage:
         arc_result = await pool.add_arc(0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
         dim_result = await pool.add_sketch_dimension("Line1", None, "linear", 2.5)
         sketch_result = await pool.check_sketch_fully_defined("Sketch1")
+        over_defining_result = await pool.get_over_defining_relations()
         image_result = await pool.export_image({"output": "preview.png"})
         export_file_result = await pool.export_file("model.step", "step")
 
@@ -1565,6 +1575,7 @@ class TestConnectionPoolAdapterCoverage:
         assert arc_result.data == "Arc1"
         assert dim_result.data == "Dim1"
         assert sketch_result.data["fully_defined"] is True
+        assert over_defining_result.data == {"count": 0, "relations": []}
         assert image_result.data["path"] == "preview.png"
         assert export_file_result.status == AdapterResultStatus.SUCCESS
 
@@ -1672,7 +1683,9 @@ class TestMockAdapterPhase2Features:
 
     @pytest.mark.asyncio
     async def test_mirror_feature_guard_and_success(self):
-        params = MirrorFeatureParameters(plane="Right Plane", features=["Boss-Extrude1"])
+        params = MirrorFeatureParameters(
+            plane="Right Plane", features=["Boss-Extrude1"]
+        )
         guard = await MockSolidWorksAdapter({}).mirror_feature(params)
         assert guard.status == AdapterResultStatus.ERROR
 

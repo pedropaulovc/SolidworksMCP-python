@@ -160,7 +160,9 @@ def _resolve_entity_ref(adapter: Any, ref: str) -> Any:
         )
     entity = adapter._sketch_entities.get(base)
     if entity is None:
-        raise Exception(f"Unknown sketch entity '{base}' in '{ref}'. {_UNKNOWN_ENTITY_HINT}")
+        raise Exception(
+            f"Unknown sketch entity '{base}' in '{ref}'. {_UNKNOWN_ENTITY_HINT}"
+        )
     if isinstance(entity, (list, tuple)):
         raise Exception(
             f"'{base}' registers as a group of segments (polygon/rectangle) — "
@@ -187,6 +189,7 @@ def _resolve_entity_ref(adapter: Any, ref: str) -> Any:
             "need a line/arc/spline)."
         )
     return point
+
 
 # swConstrainedStatus_e values (SolidWorks.Interop.swconst) returned by
 # ``ISketch::GetConstrainedStatus`` — the authoritative sketch definition
@@ -368,6 +371,9 @@ class SolidWorksSketchMixin:
         self, sketch_name: str | None = None
     ) -> AdapterResult[dict[str, Any]]:
         return _check_sketch_fully_defined_impl(self, sketch_name)
+
+    async def get_over_defining_relations(self) -> AdapterResult[dict[str, Any]]:
+        return _get_over_defining_relations_impl(self)
 
 
 def _create_sketch_impl(adapter: Any, plane: str) -> AdapterResult[str]:
@@ -1260,6 +1266,71 @@ def _add_sketch_constraint_impl(
     )
 
 
+# Dimension types that measure between two sketch POINTS (point refs like
+# "Circle_1.center" / "Line_2.start" / "Line_2.end", or "origin"). These are
+# the driving-dimension building blocks that anchor geometry semantically
+# instead of with "fix" relations.
+_POINT_DISTANCE_TYPES: frozenset[str] = frozenset(
+    {"horizontal_distance", "vertical_distance", "distance"}
+)
+
+
+def _point_pair_dimension_placement(
+    p1: tuple[float, float, float],
+    p2: tuple[float, float, float],
+    dim_type: str,
+    constants: dict[str, int],
+) -> tuple[float, float, float, int]:
+    """Compute the dimension-text placement for a point-pair dimension.
+
+    Text sits at the pair's midpoint, pushed perpendicular to the measured
+    direction so it doesn't land on the geometry: below for horizontal
+    dimensions, to the right for vertical, along the left-hand normal for
+    aligned ("distance"). Coordinates are in metres (COM units).
+
+    Returns:
+        tuple[float, float, float, int]: ``(x, y, z, direction)`` with
+        ``direction`` one of the ``swSmartDimensionDirection*`` constants.
+    """
+    mid_x = (p1[0] + p2[0]) / 2.0
+    mid_y = (p1[1] + p2[1]) / 2.0
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    span = max(abs(dx), abs(dy), 0.01)
+    offset = max(0.005, 0.25 * span)
+
+    if dim_type == "horizontal_distance":
+        return (
+            mid_x,
+            mid_y - offset,
+            0.0,
+            constants["swSmartDimensionDirectionDown"],
+        )
+    if dim_type == "vertical_distance":
+        return (
+            mid_x + offset,
+            mid_y,
+            0.0,
+            constants["swSmartDimensionDirectionRight"],
+        )
+    # Aligned: push along the left-hand normal of p1->p2.
+    length = math.hypot(dx, dy) or 1.0
+    nx, ny = -dy / length, dx / length
+    if abs(nx) >= abs(ny):
+        direction = constants[
+            "swSmartDimensionDirectionRight"
+            if nx >= 0
+            else "swSmartDimensionDirectionLeft"
+        ]
+    else:
+        direction = constants[
+            "swSmartDimensionDirectionUp"
+            if ny >= 0
+            else "swSmartDimensionDirectionDown"
+        ]
+    return (mid_x + nx * offset, mid_y + ny * offset, 0.0, direction)
+
+
 def _add_sketch_dimension_impl(
     adapter: Any,
     entity1: str,
@@ -1267,9 +1338,10 @@ def _add_sketch_dimension_impl(
     dimension_type: str,
     value: float,
 ) -> AdapterResult[str]:
-    """Add a driven dimension to one or two registered sketch entities.
+    """Add a dimension to one or two registered sketch entities.
 
-        Supports linear, angular, radial, and diameter dimensions:
+    Supports linear, angular, radial, diameter, and point-distance
+    dimensions:
 
     * **linear** — places a horizontal or vertical smart dimension on a single
       entity.  The text-placement point is computed by
@@ -1281,6 +1353,13 @@ def _add_sketch_dimension_impl(
     * **radial** / **diameter** — places a radius or diameter dimension on a
       selected sketch arc or circle using ``IModelDoc2.AddRadialDimension2`` or
       ``IModelDoc2.AddDiameterDimension2``.
+    * **horizontal_distance** / **vertical_distance** / **distance** — place a
+      driving dimension between two sketch POINTS via
+      ``IModelDoc2.AddHorizontalDimension2`` / ``AddVerticalDimension2`` /
+      ``AddDimension2`` (aligned). Both entities are required and must be
+      point refs (``"Circle_1.center"``, ``"Line_2.start"``, ``"Line_2.end"``)
+      or ``"origin"`` — the semantic anchor that replaces ``fix`` relations
+      (e.g. dimension a circle's centre from the origin).
 
     SolidWorks can otherwise enter the interactive ``Modify`` approval flow
     during sketch dimension creation. The adapter keeps the relevant
@@ -1289,19 +1368,22 @@ def _add_sketch_dimension_impl(
     radial/diameter APIs here because that path is more reliable in unattended
     COM sessions.
 
-    Dimensional values for **linear** dimensions are in **millimetres**;
-    for **angular** dimensions they are in **degrees**.
+    Dimensional values for **linear** and point-distance dimensions are in
+    **millimetres**; for **angular** dimensions they are in **degrees**.
 
     Args:
         adapter: A ``PyWin32Adapter`` with an open sketch and a valid
             ``currentModel`` and ``swApp``.
-        entity1: Registered entity ID of the primary sketch entity.
-        entity2: Registered entity ID of a secondary sketch entity (required
-            for angular dimensions), or ``None``.
-        dimension_type: ``"linear"``, ``"angular"``, ``"radial"``, or
-            ``"diameter"`` (case-insensitive).
-        value: Dimension value. Millimetres for linear, radial, and diameter;
-            degrees for angular.
+        entity1: Registered entity ID of the primary sketch entity, or a
+            point ref / ``"origin"`` for point-distance types.
+        entity2: Registered entity ID or point ref of a secondary sketch
+            entity (required for angular and point-distance dimensions), or
+            ``None``.
+        dimension_type: ``"linear"``, ``"angular"``, ``"radial"``,
+            ``"diameter"``, ``"horizontal_distance"``, ``"vertical_distance"``,
+            or ``"distance"`` (case-insensitive).
+        value: Dimension value. Millimetres for linear, radial, diameter, and
+            point-distance; degrees for angular.
 
     Returns:
         AdapterResult[str]: On success, ``data`` is the registered entity ID
@@ -1371,19 +1453,8 @@ def _add_sketch_dimension_impl(
         if not adapter.currentModel:
             return f"Dimension_{int(time.time() * 1000) % 10000}"
 
-        entity1_obj = adapter._sketch_entities.get(entity1)
-        if entity1_obj is None:
-            raise Exception(
-                f"Unknown sketch entity '{entity1}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
-            )
-
-        entity2_obj = None
-        if entity2:
-            entity2_obj = adapter._sketch_entities.get(entity2)
-            if entity2_obj is None:
-                raise Exception(
-                    f"Unknown sketch entity '{entity2}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
-                )
+        entity1_obj = _resolve_entity_ref(adapter, entity1)
+        entity2_obj = _resolve_entity_ref(adapter, entity2) if entity2 else None
 
         dim_type = (dimension_type or "linear").strip().lower()
         placement = None
@@ -1393,6 +1464,24 @@ def _add_sketch_dimension_impl(
             placement = adapter._single_line_dimension_placement(entity1_obj)
         elif dim_type in {"radial", "diameter"}:
             placement = _radial_dimension_placement()
+        elif dim_type in _POINT_DISTANCE_TYPES:
+            if entity2_obj is None:
+                raise Exception(
+                    f"Dimension type '{dim_type}' requires two point refs "
+                    f'(e.g. "Circle_1.center" and "origin")'
+                )
+            p1 = adapter._point_xyz(entity1_obj)
+            p2 = adapter._point_xyz(entity2_obj)
+            if p1 is None or p2 is None:
+                bad = entity1 if p1 is None else entity2
+                raise Exception(
+                    f"Dimension type '{dim_type}' requires two point refs; "
+                    f"'{bad}' did not resolve to a sketch point. Use "
+                    f'"<EntityId>.center/.start/.end" or "origin".'
+                )
+            placement = _point_pair_dimension_placement(
+                p1, p2, dim_type, adapter.constants
+            )
 
         if placement is None:
             raise Exception(
@@ -1475,6 +1564,41 @@ def _add_sketch_dimension_impl(
                     ),
                     default=None,
                 )
+            elif dim_type == "horizontal_distance":
+                display_dim = adapter._attempt(
+                    lambda: adapter.currentModel.AddHorizontalDimension2(
+                        text_x, text_y, text_z
+                    ),
+                    default=None,
+                ) or adapter._attempt(
+                    lambda: adapter.currentModel.Extension.AddDimension(
+                        text_x, text_y, text_z, direction
+                    ),
+                    default=None,
+                )
+            elif dim_type == "vertical_distance":
+                display_dim = adapter._attempt(
+                    lambda: adapter.currentModel.AddVerticalDimension2(
+                        text_x, text_y, text_z
+                    ),
+                    default=None,
+                ) or adapter._attempt(
+                    lambda: adapter.currentModel.Extension.AddDimension(
+                        text_x, text_y, text_z, direction
+                    ),
+                    default=None,
+                )
+            elif dim_type == "distance":
+                # Aligned point-pair dim: swSmartDimensionDirection_e has no
+                # aligned member, so Extension.AddDimension cannot create one
+                # between two points (returns None — verified live on
+                # SW 2026). AddDimension2 places the classic smart dimension
+                # on the selection, which for two points with the text pushed
+                # along the pair's normal is the aligned distance.
+                display_dim = adapter._attempt(
+                    lambda: adapter.currentModel.AddDimension2(text_x, text_y, text_z),
+                    default=None,
+                )
             else:
                 # Use a single deterministic AddDimension call for non-angular
                 # dimensions that require extension-line direction.
@@ -1485,33 +1609,35 @@ def _add_sketch_dimension_impl(
                     default=None,
                 )
 
-            if not display_dim:
-                raise Exception("SolidWorks failed to create sketch dimension")
-
-            if dim_type == "angular":
-                value_si = value * _math_dim.pi / 180.0
-            else:
-                value_si = value / 1000.0
-
-            dim_obj = (
-                adapter._attempt(lambda: display_dim.GetDimension2(0), default=None)
-                or adapter._attempt(lambda: display_dim.GetDimension(), default=None)
-                or display_dim
+        if not display_dim:
+            raise Exception(
+                f"SolidWorks failed to create '{dim_type}' sketch dimension"
             )
+
+        if dim_type == "angular":
+            value_si = value * _math_dim.pi / 180.0
+        else:
+            value_si = value / 1000.0
+
+        dim_obj = (
+            adapter._attempt(lambda: display_dim.GetDimension2(0), default=None)
+            or adapter._attempt(lambda: display_dim.GetDimension(), default=None)
+            or display_dim
+        )
+        if (
+            adapter._attempt(
+                lambda: dim_obj.SetSystemValue3(value_si, 1, None), default=None
+            )
+            is None
+        ):
             if (
                 adapter._attempt(
-                    lambda: dim_obj.SetSystemValue3(value_si, 1, None), default=None
+                    lambda: dim_obj.SetSystemValue2(value_si, 1), default=None
                 )
                 is None
             ):
-                if (
-                    adapter._attempt(
-                        lambda: dim_obj.SetSystemValue2(value_si, 1), default=None
-                    )
-                    is None
-                ):
-                    if hasattr(dim_obj, "SystemValue"):
-                        dim_obj.SystemValue = value_si
+                if hasattr(dim_obj, "SystemValue"):
+                    dim_obj.SystemValue = value_si
 
         return cast(
             AdapterResult[str],
@@ -2508,6 +2634,7 @@ def _check_sketch_fully_defined_impl(
                     lambda: _sw_type_info.flag_methods(sketch_obj, "ISketch"),
                     default=0,
                 )
+
             # Late-bound dispatches sometimes resolve ``GetConstrainedStatus``
             # as a property instead of a method (verified live on SW 2026:
             # ``GetActiveSketch2`` objects fetched after relations exist on
@@ -2593,4 +2720,116 @@ def _check_sketch_fully_defined_impl(
         adapter._handle_com_operation(
             "check_sketch_fully_defined", _get_sketch_payload
         ),
+    )
+
+
+# Reverse of RELATION_NAME_MAP for diagnostics — maps swConstraintType_e
+# values back to the names accepted by add_sketch_constraint.
+_RELATION_TYPE_NAMES: dict[int, str] = {v: k for k, v in RELATION_NAME_MAP.items()}
+
+# swSketchRelationFilterType_e.swOverDefining
+_SW_OVER_DEFINING_FILTER = 2
+
+
+def _get_over_defining_relations_impl(adapter: Any) -> AdapterResult[dict[str, Any]]:
+    """List the over-defining relations of the active sketch.
+
+    Calls ``ISketchRelationManager.GetRelations(swOverDefining)`` on the
+    active sketch and maps each relation's ``GetRelationType()`` back to the
+    name accepted by ``add_sketch_constraint`` (``None`` for types outside
+    ``RELATION_NAME_MAP``). This is the triage tool for over-defined
+    sketches: it tells you which semantic relation or dimension to drop.
+
+    Args:
+        adapter: A ``PyWin32Adapter`` with an active sketch.
+
+    Returns:
+        AdapterResult[dict[str, Any]]: On success, ``data`` is:
+
+        .. code-block:: python
+
+            {
+                "count": 1,
+                "relations": [
+                    {"relation_type": 9, "relation_name": "coincident"},
+                ],
+            }
+
+        ``count == 0`` with an empty list means the sketch has no
+        over-defining relations. On failure, ``status`` is ``ERROR``.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+
+    def _list_operation() -> dict[str, Any]:
+        try:
+            from .. import sw_type_info as _sw_type_info
+        except ImportError:
+            _sw_type_info = None  # type: ignore[assignment]
+        if _sw_type_info is not None:
+            adapter._attempt(
+                lambda: _sw_type_info.flag_methods(adapter.currentModel, "IModelDoc2"),
+                default=0,
+            )
+
+        active_sketch = adapter._attempt(
+            lambda: adapter.currentModel.GetActiveSketch2(), default=None
+        ) or adapter._attempt(
+            lambda: adapter.swApp.ActiveDoc.GetActiveSketch2(), default=None
+        )
+        if active_sketch is None:
+            raise Exception(
+                "No active sketch on the model — create_sketch first or "
+                "open the existing sketch for edit."
+            )
+        if _sw_type_info is not None:
+            adapter._attempt(
+                lambda: _sw_type_info.flag_methods(active_sketch, "ISketch"),
+                default=0,
+            )
+
+        relmgr = adapter._attempt(lambda: active_sketch.RelationManager, default=None)
+        if relmgr is None:
+            raise Exception("Active sketch has no RelationManager")
+        if _sw_type_info is not None:
+            adapter._attempt(
+                lambda: _sw_type_info.flag_methods(relmgr, "ISketchRelationManager"),
+                default=0,
+            )
+
+        raw = adapter._attempt(
+            lambda: relmgr.GetRelations(_SW_OVER_DEFINING_FILTER), default=None
+        )
+        relations: list[dict[str, Any]] = []
+        for relation in raw or ():
+            if relation is None:  # API docs: array members may be NULL
+                continue
+            if _sw_type_info is not None:
+                adapter._attempt(
+                    lambda r=relation: _sw_type_info.flag_methods(r, "ISketchRelation"),
+                    default=0,
+                )
+
+            def _relation_type(r: Any = relation) -> Any:
+                member = getattr(r, "GetRelationType", None)
+                return member() if callable(member) else member
+
+            raw_type = adapter._attempt(_relation_type, default=None)
+            type_int = int(raw_type) if isinstance(raw_type, (int, float)) else None
+            relations.append(
+                {
+                    "relation_type": type_int,
+                    "relation_name": (
+                        _RELATION_TYPE_NAMES.get(type_int)
+                        if type_int is not None
+                        else None
+                    ),
+                }
+            )
+
+        return {"count": len(relations), "relations": relations}
+
+    return cast(
+        AdapterResult[dict[str, Any]],
+        adapter._handle_com_operation("get_over_defining_relations", _list_operation),
     )
