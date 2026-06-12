@@ -11,6 +11,17 @@ Python-port harmonic-analyzer tool-surface expansion. These phases were shipped
 without changelog entries; recorded here retroactively.
 
 ### Added
+- **Sketch-point addressability** — entity refs in `add_sketch_constraint`
+  now accept point refs (`"Circle_1.center"`, `"Line_2.start"`,
+  `"Line_2.end"`) and the reserved `"origin"` (the sketch origin's
+  EXTSKETCHPOINT, selected via `SelectByID2("Point1@Origin", ...)` with the
+  typed null callout and cached per sketch). Resolution is lazy — the
+  ISketchPoint dispatch is fetched from the live segment at call time, so
+  refs survive registry resets and `merge` relations (which destroy the
+  absorbed point's dispatch). New relations in `RELATION_NAME_MAP`:
+  `midpoint` (12), `horizontal_points` (25), `vertical_points` (26),
+  `coradial` (28), `merge` (42), and three-entity `intersection` (56).
+  Enables fully defining sketches with semantic relations instead of `fix`.
 - **Phase 2 — part-level feature primitives** (#26): `add_chamfer`,
   `mirror_feature`, `circular_pattern_feature`, `linear_pattern_feature`,
   `shell`, `draft`. `rib` and `hole_wizard` deferred to a follow-up.

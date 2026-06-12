@@ -16,22 +16,177 @@ from ..com_variant import null_callout
 # without adding the relation. ISketchRelationManager.AddRelation takes
 # these integer enum values and works reliably.
 RELATION_NAME_MAP: dict[str, int] = {
-    "horizontal": 4,
+    "horizontal": 4,  # works on lines AND between two points (probed live)
     "vertical": 5,
     "tangent": 6,
     "parallel": 7,
     "perpendicular": 8,
-    "coincident": 9,
+    "coincident": 9,  # accepts point refs, e.g. ("Circle_1.center", "origin")
     "concentric": 10,
     "symmetric": 11,  # swConstraintType_SYMMETRIC — requires entity3 (centerline)
+    "midpoint": 12,  # swConstraintType_ATMIDDLE — point + segment
     "equal": 14,  # swConstraintType_SAMELENGTH
     "fix": 17,  # swConstraintType_FIXED
+    "horizontal_points": 25,  # swConstraintType_HORIZPOINTS — two points
+    "vertical_points": 26,  # swConstraintType_VERTPOINTS — two points
     "collinear": 27,  # swConstraintType_COLINEAR (single-l spelling)
+    "coradial": 28,  # swConstraintType_CORADIAL — two arcs/circles
+    "merge": 42,  # swConstraintType_MERGEPOINTS — two points; the absorbed
+    # point's COM dispatch dies ("disconnected from its clients"), so point
+    # refs must be re-resolved after a merge — which lazy resolution does.
+    "intersection": 56,  # swConstraintType_INTERSECTION — point + two segments
 }
 
-# Relations that take a third entity (the centerline of symmetry for now).
-# All other relations reject a non-null ``entity3``.
-_THREE_ENTITY_RELATIONS: frozenset[str] = frozenset({"symmetric"})
+# Relations that take a third entity: the centerline of symmetry for
+# ``symmetric``; the second segment for ``intersection`` (point at the
+# intersection of two segments). All other relations reject a non-null
+# ``entity3``.
+_THREE_ENTITY_RELATIONS: frozenset[str] = frozenset({"symmetric", "intersection"})
+
+# Point refs: ``"<EntityID>.<suffix>"`` resolves a sketch point belonging to
+# a registered segment, and the reserved ref ``"origin"`` resolves the sketch
+# origin's external sketch point. Resolution is lazy — the ISketchPoint
+# dispatch is fetched from the live segment handle at constraint/dimension
+# time and never stored, so refs cannot go stale across sketch-registry
+# resets or a ``merge`` relation (which destroys the absorbed point's
+# dispatch — probed live on SW 2026).
+POINT_REF_SUFFIXES: dict[str, str] = {
+    "center": "GetCenterPoint2",  # circles, arcs, ellipses
+    "start": "GetStartPoint2",  # lines, arcs, splines (circumference point
+    "end": "GetEndPoint2",  # on full circles — rarely what you want)
+}
+ORIGIN_REF = "origin"
+
+_UNKNOWN_ENTITY_HINT = (
+    "Use IDs returned by add_line/add_arc/add_circle/add_spline/"
+    "add_centerline, point refs like 'Circle_1.center' / 'Line_2.start' / "
+    "'Line_2.end', or 'origin' for the sketch origin."
+)
+
+
+def _resolve_origin_point(adapter: Any) -> Any:
+    """Resolve (and cache) the sketch origin's external sketch point.
+
+    Selects ``"Point1@Origin"`` as ``EXTSKETCHPOINT`` and recovers the
+    dispatch from the selection manager. The ``Callout`` argument must be
+    the typed null from :func:`null_callout` — a bare ``None`` makes
+    ``SelectByID2`` return ``False`` for every name (probed live on
+    SW 2026). Falls back to an empty-name location select at (0, 0, 0).
+
+    The dispatch is cached on ``adapter._sketch_origin_point`` and cleared
+    by the per-sketch registry reset, so each sketch re-selects its own
+    origin point.
+    """
+    cached = getattr(adapter, "_sketch_origin_point", None)
+    if cached is not None:
+        return cached
+
+    model = adapter.currentModel
+    if model is None:
+        raise Exception("No active model — cannot resolve the sketch origin")
+
+    try:
+        from .. import sw_type_info as _sw_type_info
+    except ImportError:
+        _sw_type_info = None  # type: ignore[assignment]
+    if _sw_type_info is not None:
+        adapter._attempt(
+            lambda: _sw_type_info.flag_methods(model, "IModelDoc2"), default=0
+        )
+
+    ext = adapter._attempt(lambda: model.Extension, default=None)
+    sel_mgr = adapter._attempt(lambda: model.SelectionManager, default=None)
+    if ext is None or sel_mgr is None:
+        raise Exception("Active model has no Extension/SelectionManager")
+    if _sw_type_info is not None:
+        adapter._attempt(
+            lambda: _sw_type_info.flag_methods(ext, "IModelDocExtension"), default=0
+        )
+        adapter._attempt(
+            lambda: _sw_type_info.flag_methods(sel_mgr, "ISelectionMgr"), default=0
+        )
+
+    origin_obj = None
+    for name in ("Point1@Origin", ""):  # "" = select by location (0,0,0)
+        adapter._attempt(lambda: model.ClearSelection2(True))
+        selected = adapter._attempt(
+            lambda n=name: bool(
+                ext.SelectByID2(
+                    n, "EXTSKETCHPOINT", 0.0, 0.0, 0.0, False, 0, null_callout(), 0
+                )
+            ),
+            default=False,
+        )
+        if not selected:
+            continue
+        origin_obj = adapter._attempt(
+            lambda: sel_mgr.GetSelectedObject6(1, -1), default=None
+        )
+        adapter._attempt(lambda: model.ClearSelection2(True))
+        if origin_obj is not None:
+            break
+    if origin_obj is None:
+        raise Exception(
+            "Could not select the sketch origin ('Point1@Origin' as "
+            "EXTSKETCHPOINT) — is a sketch active on a part document?"
+        )
+    adapter._sketch_origin_point = origin_obj
+    return origin_obj
+
+
+def _resolve_entity_ref(adapter: Any, ref: str) -> Any:
+    """Resolve a registry ID, a ``"<ID>.<suffix>"`` point ref, or ``"origin"``.
+
+    Plain IDs return the registered segment dispatch unchanged. Point refs
+    fetch the ISketchPoint freshly from the live segment (method-flagged
+    call — probed to resolve as a method, not a property, on SW 2026).
+    """
+    if ref == ORIGIN_REF:
+        return _resolve_origin_point(adapter)
+
+    if "." not in ref:
+        entity = adapter._sketch_entities.get(ref)
+        if entity is None:
+            raise Exception(f"Unknown sketch entity '{ref}'. {_UNKNOWN_ENTITY_HINT}")
+        return entity
+
+    base, _, suffix = ref.rpartition(".")
+    accessor = POINT_REF_SUFFIXES.get(suffix)
+    if accessor is None:
+        valid = ", ".join(sorted(POINT_REF_SUFFIXES))
+        raise Exception(
+            f"Unknown point suffix '.{suffix}' in '{ref}'. Valid suffixes: "
+            f"{valid}; or use 'origin' for the sketch origin."
+        )
+    entity = adapter._sketch_entities.get(base)
+    if entity is None:
+        raise Exception(f"Unknown sketch entity '{base}' in '{ref}'. {_UNKNOWN_ENTITY_HINT}")
+    if isinstance(entity, (list, tuple)):
+        raise Exception(
+            f"'{base}' registers as a group of segments (polygon/rectangle) — "
+            f"it has no single '.{suffix}' point. Address one of its segments "
+            "instead."
+        )
+
+    try:
+        from .. import sw_type_info as _sw_type_info
+    except ImportError:
+        _sw_type_info = None  # type: ignore[assignment]
+    if _sw_type_info is not None:
+        adapter._attempt(
+            lambda: _sw_type_info.flag_methods(
+                entity, "ISketchArc", "ISketchLine", "ISketchEllipse", "ISketchSpline"
+            ),
+            default=0,
+        )
+    point = adapter._attempt(lambda: getattr(entity, accessor)(), default=None)
+    if point is None:
+        raise Exception(
+            f"Could not resolve point '{ref}' — '{base}' has no {accessor} "
+            "dispatch ('.center' needs a circle/arc/ellipse; '.start'/'.end' "
+            "need a line/arc/spline)."
+        )
+    return point
 
 # swConstrainedStatus_e values (SolidWorks.Interop.swconst) returned by
 # ``ISketch::GetConstrainedStatus`` — the authoritative sketch definition
@@ -961,9 +1116,12 @@ def _add_sketch_constraint_impl(
         adapter: A ``PyWin32Adapter`` with an open sketch and a valid
             ``currentModel``.
         entity1: Registered entity ID of the primary sketch entity (from a
-            prior ``add_line`` / ``add_circle`` call).
-        entity2: Registered entity ID of the secondary sketch entity, or
-            ``None`` for single-entity relations (horizontal, vertical, fix).
+            prior ``add_line`` / ``add_circle`` call), a point ref like
+            ``"Circle_1.center"`` / ``"Line_2.start"`` / ``"Line_2.end"``,
+            or ``"origin"`` for the sketch origin.
+        entity2: Registered entity ID or point ref of the secondary sketch
+            entity, or ``None`` for single-entity relations (horizontal,
+            vertical, fix).
         relation_type: Constraint type string (see above).
         entity3: Registered ID of a third entity. Only meaningful for
             ``"symmetric"`` — pass the centerline ID (from ``add_centerline``)
@@ -995,35 +1153,22 @@ def _add_sketch_constraint_impl(
             if entity2 is None or entity3 is None:
                 raise Exception(
                     f"Relation '{relation_type}' requires entity1, entity2, "
-                    "and entity3 (the centerline of symmetry)"
+                    "and entity3 ('symmetric': the centerline of symmetry; "
+                    "'intersection': the second segment)"
                 )
         elif entity3 is not None:
             raise Exception(
                 f"Relation '{relation_type}' does not accept entity3 — only "
-                "'symmetric' takes a third entity (the centerline)"
+                "'symmetric' and 'intersection' take a third entity"
             )
 
-        entity1_obj = adapter._sketch_entities.get(entity1)
-        if entity1_obj is None:
-            raise Exception(
-                f"Unknown sketch entity '{entity1}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
-            )
-
-        entities = [entity1_obj]
+        # Each ref may be a plain registry ID, a "<ID>.<suffix>" point ref,
+        # or "origin" — _resolve_entity_ref raises with a targeted message.
+        entities = [_resolve_entity_ref(adapter, entity1)]
         if entity2:
-            entity2_obj = adapter._sketch_entities.get(entity2)
-            if entity2_obj is None:
-                raise Exception(
-                    f"Unknown sketch entity '{entity2}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
-                )
-            entities.append(entity2_obj)
+            entities.append(_resolve_entity_ref(adapter, entity2))
         if entity3:
-            entity3_obj = adapter._sketch_entities.get(entity3)
-            if entity3_obj is None:
-                raise Exception(
-                    f"Unknown sketch entity '{entity3}'. Use IDs returned by add_line/add_arc/add_circle/add_spline/add_centerline."
-                )
-            entities.append(entity3_obj)
+            entities.append(_resolve_entity_ref(adapter, entity3))
 
         # Flag IModelDoc2 + ISketch + ISketchRelationManager so late-binding
         # resolves GetActiveSketch2, RelationManager, and AddRelation as

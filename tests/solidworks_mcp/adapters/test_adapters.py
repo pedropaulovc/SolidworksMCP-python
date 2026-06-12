@@ -3295,6 +3295,25 @@ class TestPyWin32AdapterBranches:
 
         assert adapter._sketch_geometry.set_point_xyz(point, 1.0, 2.0, 3.0) is expected
 
+    def test_sketch_geometry_point_method_call_and_origin_reset(
+        self, monkeypatch
+    ) -> None:
+        """segment_point_objects prefers flagged method calls (probed live on
+        SW 2026) and reset_registry drops the cached origin dispatch."""
+        adapter = self._build_adapter(monkeypatch)
+        service = adapter._sketch_geometry
+
+        start = SimpleNamespace(X=0.0, Y=0.0, Z=0.0)
+        end = SimpleNamespace(X=1.0, Y=0.0, Z=0.0)
+        segment = SimpleNamespace(
+            GetStartPoint2=lambda: start, GetEndPoint2=lambda: end
+        )
+        assert service.segment_point_objects(segment) == (start, end)
+
+        adapter._sketch_origin_point = object()
+        service.reset_registry()
+        assert adapter._sketch_origin_point is None
+
     def test_sketch_geometry_segment_vertex_and_placement_paths(
         self, monkeypatch
     ) -> None:
