@@ -246,28 +246,45 @@ class AddDimensionInput(BaseModel):
 class AddRelationInput(BaseModel):
     """Input schema for adding a geometric relation.
 
+    Entity refs accept plain registered IDs (``"Line_1"``), point refs
+    (``"Circle_1.center"``, ``"Line_2.start"``, ``"Line_2.end"``), and the
+    reserved ``"origin"`` for the sketch origin — so sketches can be fully
+    defined with semantic relations (e.g. coincident centre-to-origin)
+    instead of ``fix``.
+
     Attributes:
         entity1 (str): The entity1 value.
         entity2 (str | None): The entity2 value.
-        entity3 (str | None): Third entity ID — only used by the ``symmetric``
-            relation (the centerline of symmetry). All other relation types
-            reject a non-null ``entity3``.
+        entity3 (str | None): Third entity ID — required by ``symmetric``
+            (the centerline of symmetry) and ``intersection`` (the second
+            segment). All other relation types reject a non-null ``entity3``.
         relation_type (str): The relation type value.
     """
 
-    entity1: str = Field(description="First entity name or ID")
+    entity1: str = Field(
+        description=(
+            "First entity ID, point ref ('Circle_1.center', 'Line_2.start', "
+            "'Line_2.end'), or 'origin'"
+        )
+    )
     entity2: str | None = Field(
-        default=None, description="Second entity name or ID (if required)"
+        default=None,
+        description="Second entity ID, point ref, or 'origin' (if required)",
     )
     entity3: str | None = Field(
         default=None,
         description=(
             "Third entity ID. Required for 'symmetric' (the centerline of "
-            "symmetry); must be null for all other relations."
+            "symmetry) and 'intersection' (the second segment); must be null "
+            "for all other relations."
         ),
     )
     relation_type: str = Field(
-        description="Relation type (parallel, perpendicular, tangent, coincident, etc.)"
+        description=(
+            "Relation type (parallel, perpendicular, tangent, coincident, "
+            "midpoint, merge, horizontal_points, vertical_points, coradial, "
+            "intersection, etc.)"
+        )
     )
 
 

@@ -621,6 +621,131 @@ def test_add_sketch_constraint_unknown_entity3_returns_error() -> None:
     assert "Unknown sketch entity 'CL_99'" in (result.error or "")
 
 
+def test_relation_name_map_point_relations() -> None:
+    """The swConstraintType_e values added for point anchoring."""
+    assert sketch.RELATION_NAME_MAP["midpoint"] == 12
+    assert sketch.RELATION_NAME_MAP["horizontal_points"] == 25
+    assert sketch.RELATION_NAME_MAP["vertical_points"] == 26
+    assert sketch.RELATION_NAME_MAP["coradial"] == 28
+    assert sketch.RELATION_NAME_MAP["merge"] == 42
+    assert sketch.RELATION_NAME_MAP["intersection"] == 56
+    assert "intersection" in sketch._THREE_ENTITY_RELATIONS
+
+
+def _make_point_ref_adapter() -> tuple[_FakeSketchAdapter, Mock, object, object]:
+    """Constraint-path fake with a circle (centre point) and a selectable origin."""
+    adapter, add_relation, _sk = _make_constraint_adapter()
+    center_point = SimpleNamespace(X=0.0, Y=0.0, Z=0.0)
+    origin_point = SimpleNamespace(X=0.0, Y=0.0, Z=0.0)
+    adapter._sketch_entities["Circle_1"] = SimpleNamespace(
+        GetCenterPoint2=lambda: center_point
+    )
+    adapter._sketch_entities["Polygon_2"] = (SimpleNamespace(), SimpleNamespace())
+    model = adapter.currentModel
+    model.ClearSelection2 = lambda _all: True
+    model.Extension = SimpleNamespace(
+        SelectByID2=Mock(return_value=True),
+    )
+    model.SelectionManager = SimpleNamespace(
+        GetSelectedObject6=lambda _idx, _mark: origin_point,
+    )
+    return adapter, add_relation, center_point, origin_point
+
+
+def test_add_sketch_constraint_point_ref_coincident_to_origin() -> None:
+    adapter, add_relation, center_point, origin_point = _make_point_ref_adapter()
+
+    result = sketch._add_sketch_constraint_impl(
+        adapter, "Circle_1.center", "origin", "coincident"
+    )
+
+    assert result.status == AdapterResultStatus.SUCCESS
+    ents_arg, rt_arg = add_relation.call_args.args
+    assert rt_arg == 9  # swConstraintType_COINCIDENT
+    entities_seq = getattr(ents_arg, "value", ents_arg)
+    assert list(entities_seq) == [center_point, origin_point]
+
+
+def test_origin_resolution_is_cached_per_sketch() -> None:
+    adapter, _add_relation, _center, origin_point = _make_point_ref_adapter()
+    select_mock = adapter.currentModel.Extension.SelectByID2
+
+    first = sketch._resolve_origin_point(adapter)
+    second = sketch._resolve_origin_point(adapter)
+
+    assert first is origin_point and second is origin_point
+    assert select_mock.call_count == 1
+    assert adapter._sketch_origin_point is origin_point
+
+
+def test_add_sketch_constraint_unknown_point_suffix() -> None:
+    adapter, *_ = _make_point_ref_adapter()
+    result = sketch._add_sketch_constraint_impl(
+        adapter, "Circle_1.middle", "origin", "coincident"
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "Unknown point suffix '.middle'" in (result.error or "")
+
+
+def test_add_sketch_constraint_point_ref_unknown_base() -> None:
+    adapter, *_ = _make_point_ref_adapter()
+    result = sketch._add_sketch_constraint_impl(
+        adapter, "Circle_99.center", "origin", "coincident"
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "Unknown sketch entity 'Circle_99'" in (result.error or "")
+
+
+def test_add_sketch_constraint_point_ref_on_group_entity() -> None:
+    adapter, *_ = _make_point_ref_adapter()
+    result = sketch._add_sketch_constraint_impl(
+        adapter, "Polygon_2.center", "origin", "coincident"
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "group of segments" in (result.error or "")
+
+
+def test_add_sketch_constraint_point_accessor_missing() -> None:
+    adapter, *_ = _make_point_ref_adapter()
+    # Line_1 is a bare SimpleNamespace with no GetCenterPoint2 dispatch.
+    result = sketch._add_sketch_constraint_impl(
+        adapter, "Line_1.center", "origin", "coincident"
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "Could not resolve point 'Line_1.center'" in (result.error or "")
+
+
+def test_origin_resolution_failure_is_clear() -> None:
+    adapter, *_ = _make_point_ref_adapter()
+    adapter.currentModel.Extension.SelectByID2 = Mock(return_value=False)
+    adapter._sketch_origin_point = None
+    result = sketch._add_sketch_constraint_impl(
+        adapter, "Circle_1.center", "origin", "coincident"
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "Could not select the sketch origin" in (result.error or "")
+
+
+def test_line_endpoint_refs_resolve_start_and_end() -> None:
+    adapter, add_relation, *_ = _make_point_ref_adapter()
+    start_point = SimpleNamespace(X=0.0, Y=0.0, Z=0.0)
+    end_point = SimpleNamespace(X=1.0, Y=0.0, Z=0.0)
+    adapter._sketch_entities["Line_7"] = SimpleNamespace(
+        GetStartPoint2=lambda: start_point,
+        GetEndPoint2=lambda: end_point,
+    )
+
+    result = sketch._add_sketch_constraint_impl(
+        adapter, "Line_7.start", "Line_7.end", "merge"
+    )
+
+    assert result.status == AdapterResultStatus.SUCCESS
+    ents_arg, rt_arg = add_relation.call_args.args
+    assert rt_arg == 42  # swConstraintType_MERGEPOINTS
+    entities_seq = getattr(ents_arg, "value", ents_arg)
+    assert list(entities_seq) == [start_point, end_point]
+
+
 def test_exit_sketch_no_model_returns_warning() -> None:
     """Without a ``currentModel`` nothing can be in sketch-edit mode; return
     WARNING so defensive-cleanup callers don't see spurious errors."""

@@ -458,6 +458,49 @@ class TestMockAdapterSuccessPaths:
         assert "Unknown sketch entity" in (result.error or "")
 
     @pytest.mark.asyncio
+    async def test_add_sketch_constraint_accepts_point_refs_and_origin(self):
+        """Mock parity with the real resolver: '<ID>.<suffix>' and 'origin'."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        circle = await adapter.add_circle(10.0, 5.0, 3.0)
+
+        result = await adapter.add_sketch_constraint(
+            f"{circle.data}.center", "origin", "coincident"
+        )
+        assert result.status == AdapterResultStatus.SUCCESS
+
+        result = await adapter.add_sketch_constraint(
+            "Bogus_9.center", "origin", "coincident"
+        )
+        assert result.status == AdapterResultStatus.ERROR
+        assert "Unknown sketch entity" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_add_sketch_constraint_new_point_relation_names(self):
+        """midpoint/merge/horizontal_points/etc. validate through the mock."""
+        adapter = MockSolidWorksAdapter({})
+        await adapter.connect()
+        await adapter.create_part()
+        await adapter.create_sketch("Front")
+        line = await adapter.add_line(0.0, 0.0, 10.0, 0.0)
+        other = await adapter.add_line(10.0, 0.0, 10.0, 5.0)
+
+        for relation in ("merge", "horizontal_points", "vertical_points"):
+            result = await adapter.add_sketch_constraint(
+                f"{line.data}.end", f"{other.data}.start", relation
+            )
+            assert result.status == AdapterResultStatus.SUCCESS, relation
+
+        # intersection is three-entity: missing entity3 must error.
+        result = await adapter.add_sketch_constraint(
+            f"{line.data}.end", line.data, "intersection"
+        )
+        assert result.status == AdapterResultStatus.ERROR
+        assert "entity3" in (result.error or "")
+
+    @pytest.mark.asyncio
     async def test_sketch_linear_pattern_input_validation(self):
         """Empty entities / count<2 / spacing<=0 / zero direction → ERROR."""
         adapter = MockSolidWorksAdapter({})

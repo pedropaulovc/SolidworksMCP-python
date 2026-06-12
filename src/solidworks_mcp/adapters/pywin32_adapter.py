@@ -382,11 +382,13 @@ class _SketchGeometryService:
         previous sketch do not bleed into the current session.
 
         Side Effects:
-            Clears ``adapter._sketch_entities`` and sets
+            Clears ``adapter._sketch_entities``, drops the cached
+            ``adapter._sketch_origin_point``, and sets
             ``adapter._sketch_entity_counter`` to ``0``.
         """
         self._adapter._sketch_entities.clear()
         self._adapter._sketch_entity_centers.clear()
+        self._adapter._sketch_origin_point = None
         self._adapter._sketch_entity_counter = 0
 
     def register_entity(self, prefix: str, entity: Any) -> str:
@@ -613,11 +615,28 @@ class _SketchGeometryService:
 
         Returns:
             tuple[Any | None, Any | None]: ``(start_point_obj, end_point_obj)``;
-            either element may be ``None`` if the attribute is absent.
+            either element may be ``None`` if the accessor is absent.
         """
-        start = self._adapter._attempt(lambda: entity.GetStartPoint2, default=None)
-        end = self._adapter._attempt(lambda: entity.GetEndPoint2, default=None)
-        return (start, end)
+        self._adapter._attempt(
+            lambda: sw_type_info.flag_methods(
+                entity, "ISketchArc", "ISketchLine", "ISketchSpline"
+            ),
+            default=0,
+        )
+
+        def _point(member: str) -> Any | None:
+            # Flagged method call first (the resolution probed live on
+            # SW 2026); bare property access kept as the legacy fallback
+            # for unflagged dispatches.
+            value = self._adapter._attempt(
+                lambda: getattr(entity, member)(), default=None
+            )
+            if value is not None:
+                return value
+            raw = self._adapter._attempt(lambda: getattr(entity, member), default=None)
+            return None if callable(raw) else raw
+
+        return (_point("GetStartPoint2"), _point("GetEndPoint2"))
 
     def shared_segment_vertex(
         self, entity1: Any, entity2: Any
@@ -1428,6 +1447,11 @@ class PyWin32Adapter(
         # ``sketch_circular_pattern`` reads this to derive the seed-to-axis
         # offset for polygon seeds.
         self._sketch_entity_centers: dict[str, tuple[float, float]] = {}
+        # Cached origin EXTSKETCHPOINT dispatch for the active sketch,
+        # resolved lazily by the "origin" entity ref (see
+        # solidworks.sketch._resolve_origin_point). Per-sketch: cleared by
+        # ``reset_registry``.
+        self._sketch_origin_point: Any | None = None
         self._sketch_entity_counter = 0
         self._com_initialized = False
 

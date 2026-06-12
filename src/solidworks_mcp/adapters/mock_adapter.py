@@ -56,7 +56,12 @@ from .base import (
     SweepParameters,
 )
 from .solidworks.assembly import _validate_mechanical_values
-from .solidworks.sketch import RELATION_NAME_MAP
+from .solidworks.sketch import (
+    _THREE_ENTITY_RELATIONS,
+    ORIGIN_REF,
+    POINT_REF_SUFFIXES,
+    RELATION_NAME_MAP,
+)
 
 
 class _BoolCallable:
@@ -2593,13 +2598,14 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             )
 
         # Arity validation — mirror the real adapter
-        if rt_norm == "symmetric":
+        if rt_norm in _THREE_ENTITY_RELATIONS:
             if entity2 is None or entity3 is None:
                 return AdapterResult(
                     status=AdapterResultStatus.ERROR,
                     error=(
                         f"Relation '{relation_type}' requires entity1, "
-                        "entity2, and entity3 (the centerline of symmetry)"
+                        "entity2, and entity3 ('symmetric': the centerline "
+                        "of symmetry; 'intersection': the second segment)"
                     ),
                 )
         elif entity3 is not None:
@@ -2607,20 +2613,27 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 status=AdapterResultStatus.ERROR,
                 error=(
                     f"Relation '{relation_type}' does not accept entity3 — "
-                    "only 'symmetric' takes a third entity (the centerline)"
+                    "only 'symmetric' and 'intersection' take a third entity"
                 ),
             )
 
-        # Validate entity IDs against the in-process sketch-entity registry
+        # Validate entity refs against the in-process sketch-entity registry
         # so the mock surfaces the same "Unknown sketch entity" error as the
-        # real adapter (which checks adapter._sketch_entities).
+        # real adapter (which resolves via _resolve_entity_ref): plain IDs,
+        # "<ID>.<suffix>" point refs, and the reserved "origin" ref.
         for ent in (entity1, entity2, entity3):
-            if ent is not None and ent not in self._sketch_entity_ids:
+            if ent is None or ent == ORIGIN_REF:
+                continue
+            base, _, suffix = ent.rpartition(".")
+            if base and suffix in POINT_REF_SUFFIXES:
+                ent = base
+            if ent not in self._sketch_entity_ids:
                 return AdapterResult(
                     status=AdapterResultStatus.ERROR,
                     error=(
                         f"Unknown sketch entity '{ent}'. Use IDs returned by "
-                        "add_line/add_arc/add_circle/add_spline/add_centerline."
+                        "add_line/add_arc/add_circle/add_spline/add_centerline, "
+                        "point refs like 'Circle_1.center', or 'origin'."
                     ),
                 )
 
