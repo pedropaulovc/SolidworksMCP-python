@@ -2707,6 +2707,33 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             execution_time=self._delays["sketch_operation"] / 3,
         )
 
+    async def get_over_defining_relations(self) -> AdapterResult[dict[str, Any]]:
+        """Mock listing of over-defining relations — always an empty list.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: ``{"count": 0, "relations": []}``
+            when a sketch is active; ``ERROR`` otherwise.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="No active model",
+            )
+        if not self._current_sketch:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="No active sketch",
+            )
+
+        await asyncio.sleep(self._delays["sketch_operation"] / 3)
+        self._operation_count += 1
+
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"count": 0, "relations": []},
+            execution_time=self._delays["sketch_operation"] / 3,
+        )
+
     async def get_mass_properties(self) -> AdapterResult[MassProperties]:
         """Mock getting mass properties.
 

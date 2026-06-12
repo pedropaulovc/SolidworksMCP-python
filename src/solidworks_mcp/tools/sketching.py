@@ -226,6 +226,13 @@ class AddSplineInput(BaseModel):
 class AddDimensionInput(BaseModel):
     """Input schema for adding a dimension to sketch.
 
+    Point-distance types (``horizontal_distance``, ``vertical_distance``,
+    ``distance``) measure between two sketch POINTS and require both
+    entities to be point refs (``"Circle_1.center"``, ``"Line_2.start"``,
+    ``"Line_2.end"``) or ``"origin"`` — the driving-dimension building
+    blocks that anchor geometry semantically instead of with ``fix``
+    relations (e.g. dimension a circle's centre from the origin).
+
     Attributes:
         dimension_type (str): The dimension type value.
         entity1 (str): The entity1 value.
@@ -233,14 +240,28 @@ class AddDimensionInput(BaseModel):
         value (float): The value value.
     """
 
-    entity1: str = Field(description="First entity name or ID")
+    entity1: str = Field(
+        description=(
+            "First entity ID; for point-distance types a point ref "
+            "('Circle_1.center', 'Line_2.start', 'Line_2.end') or 'origin'"
+        )
+    )
     entity2: str | None = Field(
-        default=None, description="Second entity name or ID (for distance dimensions)"
+        default=None,
+        description=(
+            "Second entity ID or point ref (required for angular and "
+            "point-distance dimensions)"
+        ),
     )
     dimension_type: str = Field(
-        default="linear", description="Dimension type (linear, radial, angular, etc.)"
+        default="linear",
+        description=(
+            "Dimension type: linear, angular, radial, diameter, "
+            "horizontal_distance, vertical_distance, or distance (the last "
+            "three measure between two points)"
+        ),
     )
-    value: float = Field(description="Dimension value in mm or degrees")
+    value: float = Field(description="Dimension value in mm (degrees for angular)")
 
 
 class AddRelationInput(BaseModel):
@@ -743,6 +764,48 @@ async def register_sketching_tools(
             }
 
     @mcp.tool()
+    async def get_over_defining_relations() -> dict[str, Any]:
+        """List the over-defining relations of the active sketch.
+
+        The triage companion to check_sketch_fully_defined: when a sketch is
+        over-defined, this names which relations conflict (mapped back to the
+        names accepted by add_sketch_constraint) so you know which semantic
+        relation or dimension to drop.
+
+        Returns:
+            dict[str, Any]: ``relations`` is a list of
+            ``{"relation_type": int, "relation_name": str | None}``; an empty
+            list means nothing over-defines the sketch.
+        """
+        try:
+            result = await adapter.get_over_defining_relations()
+
+            if not result.is_success:
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Failed to list over-defining relations: {result.error}"
+                    ),
+                }
+
+            payload = result.data or {}
+            count = payload.get("count", 0)
+            return {
+                "status": "success",
+                "message": f"Found {count} over-defining relation(s)",
+                "count": count,
+                "relations": payload.get("relations", []),
+                "execution_time": result.execution_time,
+            }
+
+        except Exception as e:
+            logger.error(f"Error in get_over_defining_relations tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
     async def add_arc(input_data: AddArcInput) -> dict[str, Any]:
         """Add an arc to the current sketch.
 
@@ -1190,6 +1253,15 @@ async def register_sketching_tools(
                                 "value": 6.0
                             })
 
+                            # Anchor that circle's centre 25mm right of the
+                            # origin (semantic alternative to a 'fix' relation)
+                            result = await add_sketch_dimension({
+                                "entity1": "Circle1.center",
+                                "entity2": "origin",
+                                "dimension_type": "horizontal_distance",
+                                "value": 25.0
+                            })
+
                             if result["status"] == "success":
                                 dim = result["dimension"]
                                 print(f"Applied {dim['value']}mm {dim['type']} dimension")
@@ -1199,10 +1271,14 @@ async def register_sketching_tools(
                         Note:
                             - Requires an active sketch with existing entities
                             - Dimensions drive entity size and control parametric behavior
-                            - Over-dimensioning can cause constraint conflicts
+                            - Over-dimensioning can cause constraint conflicts (triage with
+                              get_over_defining_relations)
                             - Essential for manufacturing precision and design intent
                             - Radial and diameter dimensions use SolidWorks-specific APIs to avoid
                               falling back to the interactive Smart Dimension approval flow
+                            - horizontal_distance / vertical_distance / distance measure between
+                              two sketch points: pass point refs ('Circle_1.center',
+                              'Line_2.start', 'Line_2.end') or 'origin' for both entities
         """
         try:
             input_data = _normalize_input(input_data, AddDimensionInput)

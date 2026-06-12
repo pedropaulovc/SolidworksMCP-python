@@ -74,6 +74,15 @@ class _FakeSketchAdapter:
         value = getattr(obj, attr_name)
         return value() if callable(value) else value
 
+    def _point_xyz(self, point_obj: object):
+        if (
+            hasattr(point_obj, "X")
+            and hasattr(point_obj, "Y")
+            and hasattr(point_obj, "Z")
+        ):
+            return (float(point_obj.X), float(point_obj.Y), float(point_obj.Z))
+        return None
+
 
 def test_create_sketch_requires_active_model() -> None:
     adapter = _FakeSketchAdapter()
@@ -873,6 +882,9 @@ def test_add_sketch_dimension_radial_diameter_and_selection_errors() -> None:
     diameter = sketch._add_sketch_dimension_impl(
         adapter, "Arc_1", None, "diameter", 6.0
     )
+    # No shared vertex between the segments -> the angular dimension cannot
+    # be created, and the hoisted display_dim check now reports it instead of
+    # registering a None entity.
     angular = sketch._add_sketch_dimension_impl(
         adapter, "Arc_1", "Line_2", "angular", 45.0
     )
@@ -882,7 +894,8 @@ def test_add_sketch_dimension_radial_diameter_and_selection_errors() -> None:
 
     assert radial.is_success
     assert diameter.is_success
-    assert angular.is_success
+    assert angular.status == AdapterResultStatus.ERROR
+    assert "failed to create 'angular' sketch dimension" in (angular.error or "")
     assert bad_secondary.status == AdapterResultStatus.ERROR
     assert "Failed to select secondary entity" in (bad_secondary.error or "")
 
@@ -960,6 +973,191 @@ def test_add_sketch_dimension_returns_generated_id_when_model_missing() -> None:
     result = sketch._add_sketch_dimension_impl(adapter, "Line_1", None, "linear", 12.0)
     assert result.is_success
     assert result.data.startswith("Dimension_")
+
+
+def test_point_pair_dimension_placement_horizontal_offsets_below_midpoint() -> None:
+    constants = _FakeSketchAdapter().constants
+    x, y, z, direction = sketch._point_pair_dimension_placement(
+        (0.025, 0.010, 0.0), (0.0, 0.0, 0.0), "horizontal_distance", constants
+    )
+    assert (x, y, z) == (0.0125, 0.005 - 0.00625, 0.0)
+    assert direction == constants["swSmartDimensionDirectionDown"]
+
+
+def test_point_pair_dimension_placement_vertical_offsets_right_of_midpoint() -> None:
+    constants = _FakeSketchAdapter().constants
+    x, y, z, direction = sketch._point_pair_dimension_placement(
+        (0.01, 0.05, 0.0), (0.0, 0.0, 0.0), "vertical_distance", constants
+    )
+    assert (x, y, z) == (0.005 + 0.0125, 0.025, 0.0)
+    assert direction == constants["swSmartDimensionDirectionRight"]
+
+
+def test_point_pair_dimension_placement_aligned_uses_left_normal() -> None:
+    constants = _FakeSketchAdapter().constants
+    x, y, z, direction = sketch._point_pair_dimension_placement(
+        (0.0, 0.0, 0.0), (0.03, 0.04, 0.0), "distance", constants
+    )
+    # Left normal of (0.03, 0.04) is (-0.8, 0.6); offset 0.01.
+    assert abs(x - 0.007) < 1e-12 and abs(y - 0.026) < 1e-12 and z == 0.0
+    assert direction == constants["swSmartDimensionDirectionLeft"]
+
+
+def test_point_pair_dimension_placement_enforces_minimum_offset() -> None:
+    constants = _FakeSketchAdapter().constants
+    x, y, _z, _direction = sketch._point_pair_dimension_placement(
+        (0.001, 0.0, 0.0), (0.0, 0.0, 0.0), "horizontal_distance", constants
+    )
+    assert y == -0.005  # 0.25 * span would be far smaller
+
+
+def _make_point_distance_adapter() -> tuple[_FakeSketchAdapter, SimpleNamespace, Mock]:
+    """Fake wired for the point-distance dimension path.
+
+    Returns the adapter, the model fake, and the SetSystemValue3 mock that
+    captures the metres value the impl sets on the new dimension.
+    """
+    adapter = _FakeSketchAdapter()
+    adapter.currentSketchManager = object()
+    center_point = SimpleNamespace(X=0.025, Y=0.010, Z=0.0)
+    origin_point = SimpleNamespace(X=0.0, Y=0.0, Z=0.0)
+    adapter._sketch_entities["Circle_1"] = SimpleNamespace(
+        GetCenterPoint2=lambda: center_point
+    )
+    adapter._sketch_entities["Line_9"] = SimpleNamespace()
+
+    set_value = Mock(return_value=True)
+    display_dim = SimpleNamespace(
+        GetDimension2=lambda *_a: SimpleNamespace(SetSystemValue3=set_value)
+    )
+    model = SimpleNamespace(
+        ClearSelection2=lambda *_args: True,
+        AddHorizontalDimension2=Mock(return_value=display_dim),
+        AddVerticalDimension2=Mock(return_value=None),  # forces the fallback
+        AddDimension2=Mock(return_value=display_dim),
+        Extension=SimpleNamespace(
+            AddDimension=Mock(return_value=display_dim),
+            SelectByID2=Mock(return_value=True),
+        ),
+        SelectionManager=SimpleNamespace(
+            GetSelectedObject6=lambda _idx, _mark: origin_point,
+        ),
+    )
+    adapter.currentModel = model
+    return adapter, model, set_value
+
+
+def test_add_sketch_dimension_horizontal_distance_center_to_origin() -> None:
+    adapter, model, set_value = _make_point_distance_adapter()
+
+    result = sketch._add_sketch_dimension_impl(
+        adapter, "Circle_1.center", "origin", "horizontal_distance", 25.0
+    )
+
+    assert result.is_success, f"unexpected: {result.error}"
+    text_x, text_y, _text_z = model.AddHorizontalDimension2.call_args.args
+    assert (text_x, text_y) == (0.0125, 0.005 - 0.00625)
+    set_value.assert_called_once_with(0.025, 1, None)
+
+
+def test_add_sketch_dimension_vertical_distance_falls_back_to_add_dimension() -> None:
+    adapter, model, set_value = _make_point_distance_adapter()
+
+    result = sketch._add_sketch_dimension_impl(
+        adapter, "Circle_1.center", "origin", "vertical_distance", 10.0
+    )
+
+    assert result.is_success, f"unexpected: {result.error}"
+    model.AddVerticalDimension2.assert_called_once()
+    model.Extension.AddDimension.assert_called_once()
+    set_value.assert_called_once_with(0.010, 1, None)
+
+
+def test_add_sketch_dimension_aligned_distance_uses_add_dimension2() -> None:
+    """swSmartDimensionDirection_e has no aligned member, so the aligned
+    point-pair dim must go through IModelDoc2.AddDimension2 — not
+    Extension.AddDimension (which returns None for this selection live)."""
+    adapter, model, set_value = _make_point_distance_adapter()
+
+    result = sketch._add_sketch_dimension_impl(
+        adapter, "Circle_1.center", "origin", "distance", 30.0
+    )
+
+    assert result.is_success, f"unexpected: {result.error}"
+    model.AddDimension2.assert_called_once()
+    model.Extension.AddDimension.assert_not_called()
+    set_value.assert_called_once_with(0.030, 1, None)
+
+
+def test_add_sketch_dimension_point_distance_requires_entity2() -> None:
+    adapter, *_ = _make_point_distance_adapter()
+    result = sketch._add_sketch_dimension_impl(
+        adapter, "Circle_1.center", None, "horizontal_distance", 25.0
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "requires two point refs" in (result.error or "")
+
+
+def test_add_sketch_dimension_point_distance_rejects_non_point_entities() -> None:
+    adapter, *_ = _make_point_distance_adapter()
+    result = sketch._add_sketch_dimension_impl(
+        adapter, "Line_9", "origin", "distance", 25.0
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    msg = result.error or ""
+    assert "'Line_9' did not resolve to a sketch point" in msg
+
+
+def test_get_over_defining_relations_requires_model_and_sketch() -> None:
+    adapter = _FakeSketchAdapter()
+    no_model = sketch._get_over_defining_relations_impl(adapter)
+    assert no_model.status == AdapterResultStatus.ERROR
+    assert no_model.error == "No active model"
+
+    adapter.currentModel = SimpleNamespace(GetActiveSketch2=lambda: None)
+    no_sketch = sketch._get_over_defining_relations_impl(adapter)
+    assert no_sketch.status == AdapterResultStatus.ERROR
+    assert "No active sketch on the model" in (no_sketch.error or "")
+
+
+def test_get_over_defining_relations_maps_types_to_names() -> None:
+    adapter = _FakeSketchAdapter()
+    relations = [
+        SimpleNamespace(GetRelationType=lambda: 9),  # coincident
+        None,  # API docs: array members may be NULL
+        SimpleNamespace(GetRelationType=17),  # non-callable property resolution
+        SimpleNamespace(GetRelationType=lambda: 999),  # outside the name map
+    ]
+    relmgr = SimpleNamespace(GetRelations=Mock(return_value=relations))
+    adapter.currentModel = SimpleNamespace(
+        GetActiveSketch2=lambda: SimpleNamespace(RelationManager=relmgr),
+    )
+
+    result = sketch._get_over_defining_relations_impl(adapter)
+
+    assert result.is_success, f"unexpected: {result.error}"
+    relmgr.GetRelations.assert_called_once_with(2)  # swOverDefining
+    assert result.data == {
+        "count": 3,
+        "relations": [
+            {"relation_type": 9, "relation_name": "coincident"},
+            {"relation_type": 17, "relation_name": "fix"},
+            {"relation_type": 999, "relation_name": None},
+        ],
+    }
+
+
+def test_get_over_defining_relations_empty_sketch() -> None:
+    adapter = _FakeSketchAdapter()
+    relmgr = SimpleNamespace(GetRelations=lambda _filter: None)
+    adapter.currentModel = SimpleNamespace(
+        GetActiveSketch2=lambda: SimpleNamespace(RelationManager=relmgr),
+    )
+
+    result = sketch._get_over_defining_relations_impl(adapter)
+
+    assert result.is_success
+    assert result.data == {"count": 0, "relations": []}
 
 
 def test_check_sketch_fully_defined_prefers_get_constrained_status() -> None:

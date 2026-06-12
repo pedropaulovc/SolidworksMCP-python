@@ -11,6 +11,20 @@ Python-port harmonic-analyzer tool-surface expansion. These phases were shipped
 without changelog entries; recorded here retroactively.
 
 ### Added
+- **Point-to-point driving dimensions** — `add_sketch_dimension` gains
+  `horizontal_distance`, `vertical_distance`, and `distance` types that
+  measure between two sketch points (point refs or `"origin"`), created via
+  `AddHorizontalDimension2` / `AddVerticalDimension2` / `AddDimension2`
+  (`swSmartDimensionDirection_e` has no aligned member, so
+  `Extension.AddDimension` cannot create an aligned point-pair dim —
+  verified live) with deterministic midpoint-plus-offset text placement.
+  Together with point-ref relations these anchor geometry semantically
+  (e.g. circle centre dimensioned from the origin) instead of with `fix`.
+- **`get_over_defining_relations`** — new adapter method + MCP tool listing
+  the active sketch's over-defining relations
+  (`ISketchRelationManager.GetRelations(swOverDefining)`), each mapped back
+  to the `add_sketch_constraint` relation name. The triage companion to
+  `check_sketch_fully_defined` for over-defined sketches.
 - **Sketch-point addressability** — entity refs in `add_sketch_constraint`
   now accept point refs (`"Circle_1.center"`, `"Line_2.start"`,
   `"Line_2.end"`) and the reserved `"origin"` (the sketch origin's
@@ -34,6 +48,21 @@ without changelog entries; recorded here retroactively.
   `sketch_offset`, plus rectangle and polygon seeds for the sketch patterns.
 
 ### Fixed
+- **Segment endpoint reads broke after method-flagging** —
+  `read_segment_endpoints` accessed `GetStartPoint`/`GetEndPoint` as bare
+  properties; once `sw_type_info.flag_methods` touched a line dispatch
+  (which point-ref resolution does), those names resolve as bound methods
+  and the read returned a callable instead of coordinates, killing linear
+  and angular dimension placement on that entity. Now tries the method call
+  first with a property-access fallback (same pattern as
+  `segment_point_objects`).
+- **Angular sketch dimensions never received their value** — the
+  display-dimension null check and the `SetSystemValue3` value-setting block
+  lived inside the non-angular branch (guarded by a dead
+  `dim_type == "angular"` re-test), so angular dimensions were created at
+  whatever angle the geometry happened to have and a failed angular creation
+  registered a `None` entity instead of erroring. Both are hoisted so every
+  dimension type shares them.
 - **SelectByID2 optional `Callout` marshalling** (#26) — the pywin32/Python
   counterpart of the v3.1.0 TypeScript fix below. Late binding marshals a bare
   Python `None` for the optional `Callout` (`ICallout`) argument as `VT_NULL`,

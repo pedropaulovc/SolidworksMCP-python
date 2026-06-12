@@ -878,6 +878,13 @@ class ConnectionPoolAdapter(SolidWorksAdapter):
             lambda adapter: adapter.check_sketch_fully_defined(sketch_name),
         )
 
+    async def get_over_defining_relations(self) -> AdapterResult[dict[str, Any]]:
+        """List over-defining relations using pool."""
+        return await self._execute_with_pool(
+            "get_over_defining_relations",
+            lambda adapter: adapter.get_over_defining_relations(),
+        )
+
     async def exit_sketch(self) -> AdapterResult[None]:
         """Exit sketch using pool.
 

@@ -1437,6 +1437,18 @@ class SolidWorksAdapter(ABC):
             error="check_sketch_fully_defined is not implemented by this adapter",
         )
 
+    async def get_over_defining_relations(self) -> AdapterResult[dict[str, Any]]:
+        """List the over-defining relations of the active sketch.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: ``{"count": int, "relations":
+            [{"relation_type": int, "relation_name": str | None}, ...]}``.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="get_over_defining_relations is not implemented by this adapter",
+        )
+
     async def sketch_linear_pattern(
         self,
         entities: list[str],
