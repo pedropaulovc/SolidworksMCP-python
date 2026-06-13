@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from solidworks_mcp.adapters.base import (
     AdapterResult,
     AdapterResultStatus,
     MateEntityRef,
+    MotionDamperParameters,
     MotionExportParameters,
+    MotionForceParameters,
     MotionGravityParameters,
     MotionMotorParameters,
+    MotionSpringParameters,
     MotionStudyParameters,
     MotionStudyRefParameters,
     MotionTimeParameters,
@@ -51,7 +56,8 @@ class _FakeStudy:
 
     def CreateDefinition(self, feature_id):  # noqa: N802
         self.definitions.append(feature_id)
-        return _FakeFeatureData()
+        self.last_definition = _FakeFeatureData()
+        return self.last_definition
 
     def CreateFeature(self, data):  # noqa: N802
         feature = _FakeFeature(f"Feature{len(self.created_features) + 1}")
@@ -74,9 +80,13 @@ class _FakeFeatureData:
         self.Axis = None
         self.Strength = None
         self.constant_speed: float | None = None
+        self.endpoints: tuple | None = None
 
     def ConstantSpeedMotor(self, speed):  # noqa: N802
         self.constant_speed = float(speed)
+
+    def SetEndPoints(self, p1, p2):  # noqa: N802
+        self.endpoints = (p1, p2)
 
 
 class _FakeFeature:
@@ -117,6 +127,13 @@ class _FakeSelectionManager:
 
     def GetSelectedObject6(self, mark, which):  # noqa: N802
         return self._selected
+
+    def GetSelectedObjectsComponent3(self, mark, which):  # noqa: N802
+        return _FakeComponentRef()
+
+
+class _FakeComponentRef:
+    Name2 = "spinner-1"
 
 
 class _FakeExtension:
@@ -416,3 +433,142 @@ async def test_ensure_motion_addin_loads():
     result = await adapter.ensure_motion_addin()
     assert result.status is AdapterResultStatus.SUCCESS
     assert adapter.swApp.loaded == ["SOLIDWORKS Motion"]
+
+
+def _two_endpoints():
+    return [
+        MateEntityRef(entity_type="VERTEX", point=[0.0, 0.0, 0.0]),
+        MateEntityRef(entity_type="VERTEX", point=[0.0, 30.0, 0.0]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_add_motion_spring_linear_sets_k_and_free_length():
+    study = _FakeStudy()
+    adapter, _ = _adapter_with_study(study)
+    adapter._active_motion_study = study.Name
+    result = await adapter.add_motion_spring(
+        MotionSpringParameters(
+            spring_type="linear",
+            endpoints=_two_endpoints(),
+            spring_constant=1500.0,
+            free_length=25.0,
+            damping_constant=4.0,
+        )
+    )
+    assert result.status is AdapterResultStatus.SUCCESS
+    assert study.definitions == [81]  # linear motion spring feature id
+    data = study.last_definition
+    assert data.endpoints is not None  # SetEndPoints called
+    assert data.SpringConstant == 1500.0
+    assert data.FreeLength == pytest.approx(0.025)  # 25 mm -> 0.025 m
+    assert data.HasDamper is True
+    assert data.DampingConstant == 4.0
+
+
+@pytest.mark.asyncio
+async def test_add_motion_spring_torsional_sets_free_angle():
+    study = _FakeStudy()
+    adapter, _ = _adapter_with_study(study)
+    adapter._active_motion_study = study.Name
+    result = await adapter.add_motion_spring(
+        MotionSpringParameters(
+            spring_type="torsional",
+            endpoints=_two_endpoints(),
+            spring_constant=2.5,
+            free_angle=90.0,
+        )
+    )
+    assert result.status is AdapterResultStatus.SUCCESS
+    assert study.definitions == [82]  # torsional motion spring feature id
+    assert study.last_definition.FreeAngle == pytest.approx(math.pi / 2)
+
+
+@pytest.mark.asyncio
+async def test_add_motion_spring_unknown_type_errors():
+    adapter, _ = _adapter_with_study(_FakeStudy())
+    result = await adapter.add_motion_spring(
+        MotionSpringParameters(
+            spring_type="coil", endpoints=_two_endpoints(), spring_constant=1.0
+        )
+    )
+    assert result.status is AdapterResultStatus.ERROR
+    assert "Unknown spring_type" in result.error
+
+
+@pytest.mark.asyncio
+async def test_add_motion_spring_requires_two_endpoints():
+    adapter, _ = _adapter_with_study(_FakeStudy())
+    result = await adapter.add_motion_spring(
+        MotionSpringParameters(
+            endpoints=[MateEntityRef(entity_type="VERTEX", point=[0, 0, 0])],
+            spring_constant=1.0,
+        )
+    )
+    assert result.status is AdapterResultStatus.ERROR
+    assert "exactly two endpoints" in result.error
+
+
+@pytest.mark.asyncio
+async def test_add_motion_damper_sets_constant():
+    study = _FakeStudy()
+    adapter, _ = _adapter_with_study(study)
+    adapter._active_motion_study = study.Name
+    result = await adapter.add_motion_damper(
+        MotionDamperParameters(endpoints=_two_endpoints(), damping_constant=7.0)
+    )
+    assert result.status is AdapterResultStatus.SUCCESS
+    assert study.definitions == [83]  # linear damper feature id
+    assert study.last_definition.DampingConstant == 7.0
+
+
+@pytest.mark.asyncio
+async def test_add_motion_force_constant_value_and_action():
+    study = _FakeStudy()
+    adapter, _ = _adapter_with_study(study)
+    adapter._active_motion_study = study.Name
+    result = await adapter.add_motion_force(
+        MotionForceParameters(
+            force_type="linear_force",
+            action=MateEntityRef(entity_type="FACE", point=[1.0, 1.0, 1.0]),
+            magnitude=9.81,
+        )
+    )
+    assert result.status is AdapterResultStatus.SUCCESS
+    assert study.definitions == [75]  # linear force feature id
+    data = study.last_definition
+    assert data.ActionType == 0  # action only
+    assert data.FunctionConstantValue == 9.81
+    assert data.ActionLocation is not None
+
+
+@pytest.mark.asyncio
+async def test_add_motion_force_torque_uses_torque_feature():
+    study = _FakeStudy()
+    adapter, _ = _adapter_with_study(study)
+    adapter._active_motion_study = study.Name
+    result = await adapter.add_motion_force(
+        MotionForceParameters(
+            force_type="torque",
+            action=MateEntityRef(entity_type="AXIS", name="Axis1@x@asm"),
+            magnitude=1.2,
+            action_only=False,
+        )
+    )
+    assert result.status is AdapterResultStatus.SUCCESS
+    assert study.definitions == [76]  # torque feature id
+    assert study.last_definition.ActionType == 1  # action and reaction
+
+
+@pytest.mark.asyncio
+async def test_add_motion_force_unknown_type_errors():
+    adapter, _ = _adapter_with_study(_FakeStudy())
+    result = await adapter.add_motion_force(
+        MotionForceParameters(
+            force_type="drag",
+            action=MateEntityRef(entity_type="FACE", point=[0, 0, 0]),
+            magnitude=1.0,
+        )
+    )
+    assert result.status is AdapterResultStatus.ERROR
+    assert "Unknown force_type" in result.error

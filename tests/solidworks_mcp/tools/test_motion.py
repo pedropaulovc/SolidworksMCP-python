@@ -6,6 +6,9 @@ import pytest
 
 from solidworks_mcp.tools.motion import (
     AddGravityInput,
+    AddMotionDamperInput,
+    AddMotionForceInput,
+    AddMotionSpringInput,
     AddMotorInput,
     CreateMotionStudyInput,
     ExportMotionAviInput,
@@ -30,7 +33,7 @@ class TestMotionTools:
     async def test_register_motion_tools(self, mcp_server, mock_adapter, mock_config):
         """All motion tools register under their expected names."""
         count = await register_motion_tools(mcp_server, mock_adapter, mock_config)
-        assert count == 8
+        assert count == 11
         names = {tool.name for tool in await mcp_server.list_tools()}
         assert {
             "create_motion_study",
@@ -41,6 +44,9 @@ class TestMotionTools:
             "set_motion_time",
             "export_motion_avi",
             "list_motion_studies",
+            "add_motion_spring",
+            "add_motion_damper",
+            "add_motion_force",
         } <= names
 
     @pytest.mark.asyncio
@@ -108,6 +114,60 @@ class TestMotionTools:
         fn = await _tool(mcp_server, "ensure_motion_addin")
         result = await fn()
         assert result["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_add_spring_damper_force_against_mock(
+        self, mcp_server, mock_adapter, mock_config
+    ):
+        """Spring, damper and force elements all add on the mock."""
+        await register_motion_tools(mcp_server, mock_adapter, mock_config)
+        await mock_adapter.create_assembly()
+        await (await _tool(mcp_server, "create_motion_study"))(CreateMotionStudyInput())
+        endpoints = [
+            MotionEntityInput(entity_type="VERTEX", point=[0.0, 0.0, 0.0]),
+            MotionEntityInput(entity_type="VERTEX", point=[0.0, 30.0, 0.0]),
+        ]
+        spring = await (await _tool(mcp_server, "add_motion_spring"))(
+            AddMotionSpringInput(
+                endpoints=endpoints, spring_constant=1500.0, free_length=25.0
+            )
+        )
+        assert spring["status"] == "success"
+        assert spring["spring"]["spring_constant"] == 1500.0
+        damper = await (await _tool(mcp_server, "add_motion_damper"))(
+            AddMotionDamperInput(endpoints=endpoints, damping_constant=5.0)
+        )
+        assert damper["status"] == "success"
+        force = await (await _tool(mcp_server, "add_motion_force"))(
+            AddMotionForceInput(
+                action=MotionEntityInput(entity_type="FACE", point=[1.0, 1.0, 1.0]),
+                magnitude=9.81,
+            )
+        )
+        assert force["status"] == "success"
+        assert force["force"]["magnitude"] == 9.81
+
+    @pytest.mark.asyncio
+    async def test_add_motion_spring_error_path(
+        self, mcp_server, mock_adapter, mock_config
+    ):
+        """A spring adapter error surfaces as a tool error payload."""
+        await register_motion_tools(mcp_server, mock_adapter, mock_config)
+        mock_adapter.add_motion_spring = AsyncMock(
+            return_value=Mock(is_success=False, error="no study")
+        )
+        fn = await _tool(mcp_server, "add_motion_spring")
+        result = await fn(
+            AddMotionSpringInput(
+                endpoints=[
+                    MotionEntityInput(entity_type="VERTEX", point=[0, 0, 0]),
+                    MotionEntityInput(entity_type="VERTEX", point=[0, 1, 0]),
+                ],
+                spring_constant=1.0,
+            )
+        )
+        assert result["status"] == "error"
+        assert "no study" in result["message"]
 
     @pytest.mark.asyncio
     async def test_create_motion_study_error_path(
