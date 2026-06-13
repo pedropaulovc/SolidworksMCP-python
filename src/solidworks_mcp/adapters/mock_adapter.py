@@ -43,9 +43,12 @@ from .base import (
     MateRefParameters,
     MeasureParameters,
     MirrorFeatureParameters,
+    MotionDamperParameters,
     MotionExportParameters,
+    MotionForceParameters,
     MotionGravityParameters,
     MotionMotorParameters,
+    MotionSpringParameters,
     MotionStudyParameters,
     MotionStudyRefParameters,
     MotionTimeParameters,
@@ -2211,6 +2214,144 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             for name, study in self._motion_studies.items()
         ]
         return AdapterResult(status=AdapterResultStatus.SUCCESS, data=studies)
+
+    _MOTION_SPRING_TYPES = ("linear", "torsional")
+    _MOTION_DAMPER_TYPES = ("linear", "torsional")
+    _MOTION_FORCE_TYPES = ("linear_force", "torque")
+
+    async def add_motion_spring(
+        self, params: MotionSpringParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock adding a spring force element to a motion study.
+
+        Args:
+            params (MotionSpringParameters): Spring type, endpoints, k, L0.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created spring feature.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if params.spring_type not in self._MOTION_SPRING_TYPES:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown spring_type: {params.spring_type!r} "
+                f"(expected one of {sorted(self._MOTION_SPRING_TYPES)})",
+            )
+        if len(params.endpoints) != 2:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="a spring needs exactly two endpoints",
+            )
+        resolved = self._resolve_motion_study(params.study_name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        _, study = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        springs = study.setdefault("springs", [])
+        name = f"{params.spring_type.title()}Spring{len(springs) + 1}"
+        springs.append({"name": name, "spring_constant": params.spring_constant})
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": name,
+                "spring_type": params.spring_type,
+                "spring_constant": float(params.spring_constant),
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def add_motion_damper(
+        self, params: MotionDamperParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock adding a damper force element to a motion study.
+
+        Args:
+            params (MotionDamperParameters): Damper type, endpoints, c.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created damper feature.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if params.damper_type not in self._MOTION_DAMPER_TYPES:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown damper_type: {params.damper_type!r} "
+                f"(expected one of {sorted(self._MOTION_DAMPER_TYPES)})",
+            )
+        if len(params.endpoints) != 2:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="a damper needs exactly two endpoints",
+            )
+        resolved = self._resolve_motion_study(params.study_name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        _, study = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        dampers = study.setdefault("dampers", [])
+        name = f"{params.damper_type.title()}Damper{len(dampers) + 1}"
+        dampers.append({"name": name, "damping_constant": params.damping_constant})
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": name,
+                "damper_type": params.damper_type,
+                "damping_constant": float(params.damping_constant),
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def add_motion_force(
+        self, params: MotionForceParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock adding an applied force/torque to a motion study.
+
+        Args:
+            params (MotionForceParameters): Force type, location, magnitude.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created force feature.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if params.force_type not in self._MOTION_FORCE_TYPES:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown force_type: {params.force_type!r} "
+                f"(expected one of {sorted(self._MOTION_FORCE_TYPES)})",
+            )
+        resolved = self._resolve_motion_study(params.study_name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        _, study = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        forces = study.setdefault("forces", [])
+        stem = "Torque" if params.force_type == "torque" else "Force"
+        name = f"{stem}{len(forces) + 1}"
+        forces.append({"name": name, "magnitude": params.magnitude})
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": name,
+                "force_type": params.force_type,
+                "magnitude": float(params.magnitude),
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
 
     async def create_sketch(self, plane: str) -> AdapterResult[dict[str, Any]]:  # type: ignore[override]
         """Mock creating a sketch.

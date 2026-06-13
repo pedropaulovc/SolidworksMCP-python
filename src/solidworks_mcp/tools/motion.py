@@ -2,13 +2,11 @@
 
 Expose the SOLIDWORKS Motion-study lifecycle as MCP tools: create/activate a
 study and set its analysis type, ensure the SOLIDWORKS Motion add-in is
-loaded, add a rotary/linear constant-speed motor and gravity, solve the
-study, scrub to a point in time, export the animation to AVI, and list the
-document's studies.
+loaded, add a rotary/linear constant-speed motor and gravity, add spring,
+damper and force feature elements, solve the study, scrub to a point in time,
+export the animation to AVI, and list the document's studies.
 
-These wrap :class:`SolidWorksMotionMixin` on the adapter. Spring/damper/force
-feature elements ship in a follow-up change; this module covers the study
-lifecycle, motor, gravity, solve, scrub and export.
+These wrap :class:`SolidWorksMotionMixin` on the adapter.
 """
 
 from typing import Any
@@ -19,15 +17,25 @@ from pydantic import BaseModel, Field
 
 from ..adapters.base import (
     MateEntityRef,
+    MotionDamperParameters,
     MotionExportParameters,
+    MotionForceParameters,
     MotionGravityParameters,
     MotionMotorParameters,
+    MotionSpringParameters,
     MotionStudyParameters,
     MotionStudyRefParameters,
     MotionTimeParameters,
     SolidWorksAdapter,
 )
 from .modeling import _normalize_input
+
+
+def _entity_ref(entity: "MotionEntityInput") -> MateEntityRef:
+    """Build a MateEntityRef from a tool-layer MotionEntityInput."""
+    return MateEntityRef(
+        entity_type=entity.entity_type, name=entity.name, point=entity.point
+    )
 
 
 class MotionEntityInput(BaseModel):
@@ -215,6 +223,119 @@ class ExportMotionAviInput(BaseModel):
     study_name: str = Field(
         default="",
         description="Target study name; empty targets the active study",
+    )
+
+
+class AddMotionSpringInput(BaseModel):
+    """Input schema for adding a spring force element to a motion study.
+
+    Attributes:
+        spring_type (str): ``"linear"`` or ``"torsional"``.
+        endpoints (list[MotionEntityInput]): The two endpoint entities.
+        spring_constant (float): Stiffness k — N/m (linear) or N·m/rad
+            (torsional), SI.
+        free_length (float | None): Linear rest length in mm; null keeps the
+            modeled distance. Ignored for torsional springs.
+        free_angle (float | None): Torsional rest angle in degrees; null
+            keeps the modeled angle. Ignored for linear springs.
+        damping_constant (float): When > 0, enables the spring's damper
+            (N·s/m).
+        coil_diameter (float): Optional cosmetic mean coil diameter (mm).
+        wire_diameter (float): Optional cosmetic wire diameter (mm).
+        number_of_coils (float): Optional cosmetic active coil count.
+        reverse (bool): Reverse the spring direction.
+        study_name (str): Target study name; empty targets the active study.
+    """
+
+    spring_type: str = Field(default="linear", description="'linear' or 'torsional'")
+    endpoints: list[MotionEntityInput] = Field(
+        description="The two endpoint entities (faces/edges/vertices)"
+    )
+    spring_constant: float = Field(
+        description="Stiffness k — N/m (linear) or N·m/rad (torsional), SI"
+    )
+    free_length: float | None = Field(
+        default=None,
+        description="Linear spring rest length in mm; null keeps the modeled "
+        "distance (ignored for torsional)",
+    )
+    free_angle: float | None = Field(
+        default=None,
+        description="Torsional spring rest angle in degrees; null keeps the "
+        "modeled angle (ignored for linear)",
+    )
+    damping_constant: float = Field(
+        default=0.0,
+        description="When > 0, enables the spring's damper (N·s/m)",
+    )
+    coil_diameter: float = Field(
+        default=0.0, description="Optional cosmetic mean coil diameter (mm)"
+    )
+    wire_diameter: float = Field(
+        default=0.0, description="Optional cosmetic wire diameter (mm)"
+    )
+    number_of_coils: float = Field(
+        default=0.0, description="Optional cosmetic active coil count"
+    )
+    reverse: bool = Field(default=False, description="Reverse the spring direction")
+    study_name: str = Field(
+        default="", description="Target study name; empty targets the active study"
+    )
+
+
+class AddMotionDamperInput(BaseModel):
+    """Input schema for adding a damper force element to a motion study.
+
+    Attributes:
+        damper_type (str): ``"linear"`` or ``"torsional"``.
+        endpoints (list[MotionEntityInput]): The two endpoint entities.
+        damping_constant (float): Damping coefficient — N·s/m (linear) or
+            N·m·s/rad (torsional), SI.
+        study_name (str): Target study name; empty targets the active study.
+    """
+
+    damper_type: str = Field(default="linear", description="'linear' or 'torsional'")
+    endpoints: list[MotionEntityInput] = Field(
+        description="The two endpoint entities (faces/edges/vertices)"
+    )
+    damping_constant: float = Field(
+        description="Damping coefficient — N·s/m (linear) or N·m·s/rad (torsional), SI"
+    )
+    study_name: str = Field(
+        default="", description="Target study name; empty targets the active study"
+    )
+
+
+class AddMotionForceInput(BaseModel):
+    """Input schema for adding an applied force/torque to a motion study.
+
+    Attributes:
+        force_type (str): ``"linear_force"`` or ``"torque"``.
+        action (MotionEntityInput): Action-location entity (and torque axis).
+        magnitude (float): Constant magnitude — N (force) or N·m (torque), SI.
+        action_only (bool): Apply to one component (True) or an
+            action-and-reaction pair (False).
+        reverse (bool): Reverse the force direction.
+        study_name (str): Target study name; empty targets the active study.
+    """
+
+    force_type: str = Field(
+        default="linear_force", description="'linear_force' or 'torque'"
+    )
+    action: MotionEntityInput = Field(
+        description="Action-location face/edge/vertex (and axis for a torque)"
+    )
+    magnitude: float = Field(
+        description="Constant magnitude — N (force) or N·m (torque), SI"
+    )
+    action_only: bool = Field(
+        default=True,
+        description="Apply to one component (True) or an action-and-reaction "
+        "pair (False)",
+    )
+    reverse: bool = Field(default=False, description="Reverse the force direction")
+    study_name: str = Field(
+        default="", description="Target study name; empty targets the active study"
     )
 
 
@@ -557,5 +678,167 @@ async def register_motion_tools(
             logger.error(f"Error in list_motion_studies tool: {e}")
             return {"status": "error", "message": f"Unexpected error: {str(e)}"}
 
-    tool_count = 8  # Number of tools registered
+    @mcp.tool()
+    async def add_motion_spring(input_data: AddMotionSpringInput) -> dict[str, Any]:
+        """Add a spring force element between two endpoints in a study.
+
+        A real MotionAnalysis force element (not cosmetic coil geometry): it
+        applies a force/torque proportional to its stretch from the free
+        length/angle, which the solver balances. Stiffness is SI; lengths are
+        millimetres.
+
+        Args:
+            input_data (AddMotionSpringInput): Spring type, endpoints, k, L0.
+
+        Returns:
+            dict[str, Any]: Status and created spring details.
+
+        Example:
+            ```python
+            result = await add_motion_spring({
+                "spring_type": "linear",
+                "endpoints": [
+                    {"entity_type": "VERTEX", "point": [10, 20, 0]},
+                    {"entity_type": "VERTEX", "point": [10, 50, 0]},
+                ],
+                "spring_constant": 1500.0,
+                "free_length": 25.0,
+            })
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, AddMotionSpringInput)
+            result = await adapter.add_motion_spring(
+                MotionSpringParameters(
+                    spring_type=input_data.spring_type,
+                    endpoints=[_entity_ref(e) for e in input_data.endpoints],
+                    spring_constant=input_data.spring_constant,
+                    free_length=input_data.free_length,
+                    free_angle=input_data.free_angle,
+                    damping_constant=input_data.damping_constant,
+                    coil_diameter=input_data.coil_diameter,
+                    wire_diameter=input_data.wire_diameter,
+                    number_of_coils=input_data.number_of_coils,
+                    reverse=input_data.reverse,
+                    study_name=input_data.study_name,
+                )
+            )
+            if result.is_success:
+                payload = result.data or {}
+                return {
+                    "status": "success",
+                    "message": f"Added spring: {payload.get('name')}",
+                    "spring": payload,
+                    "execution_time": result.execution_time,
+                }
+            return {
+                "status": "error",
+                "message": f"Failed to add spring: {result.error}",
+            }
+        except Exception as e:
+            logger.error(f"Error in add_motion_spring tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def add_motion_damper(input_data: AddMotionDamperInput) -> dict[str, Any]:
+        """Add a damper force element between two endpoints in a study.
+
+        Applies a resistive force/torque proportional to the relative
+        velocity of its endpoints. Damping coefficient is SI.
+
+        Args:
+            input_data (AddMotionDamperInput): Damper type, endpoints, c.
+
+        Returns:
+            dict[str, Any]: Status and created damper details.
+
+        Example:
+            ```python
+            result = await add_motion_damper({
+                "damper_type": "linear",
+                "endpoints": [
+                    {"entity_type": "VERTEX", "point": [10, 20, 0]},
+                    {"entity_type": "VERTEX", "point": [10, 50, 0]},
+                ],
+                "damping_constant": 5.0,
+            })
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, AddMotionDamperInput)
+            result = await adapter.add_motion_damper(
+                MotionDamperParameters(
+                    damper_type=input_data.damper_type,
+                    endpoints=[_entity_ref(e) for e in input_data.endpoints],
+                    damping_constant=input_data.damping_constant,
+                    study_name=input_data.study_name,
+                )
+            )
+            if result.is_success:
+                payload = result.data or {}
+                return {
+                    "status": "success",
+                    "message": f"Added damper: {payload.get('name')}",
+                    "damper": payload,
+                    "execution_time": result.execution_time,
+                }
+            return {
+                "status": "error",
+                "message": f"Failed to add damper: {result.error}",
+            }
+        except Exception as e:
+            logger.error(f"Error in add_motion_damper tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def add_motion_force(input_data: AddMotionForceInput) -> dict[str, Any]:
+        """Add a constant applied force/torque at a location on a component.
+
+        Applies a constant-magnitude action force (linear) or torque about an
+        axis at a location on a component. Magnitude is SI.
+
+        Args:
+            input_data (AddMotionForceInput): Force type, location, magnitude.
+
+        Returns:
+            dict[str, Any]: Status and created force details.
+
+        Example:
+            ```python
+            result = await add_motion_force({
+                "force_type": "linear_force",
+                "action": {"entity_type": "FACE", "point": [10, 20, 0]},
+                "magnitude": 9.81,
+            })
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, AddMotionForceInput)
+            result = await adapter.add_motion_force(
+                MotionForceParameters(
+                    force_type=input_data.force_type,
+                    action=_entity_ref(input_data.action),
+                    magnitude=input_data.magnitude,
+                    action_only=input_data.action_only,
+                    reverse=input_data.reverse,
+                    study_name=input_data.study_name,
+                )
+            )
+            if result.is_success:
+                payload = result.data or {}
+                return {
+                    "status": "success",
+                    "message": f"Added force: {payload.get('name')}",
+                    "force": payload,
+                    "execution_time": result.execution_time,
+                }
+            return {
+                "status": "error",
+                "message": f"Failed to add force: {result.error}",
+            }
+        except Exception as e:
+            logger.error(f"Error in add_motion_force tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    tool_count = 11  # Number of tools registered
     return tool_count

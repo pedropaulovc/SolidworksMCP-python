@@ -1035,6 +1035,98 @@ class MotionExportParameters(BaseModel):
     study_name: str = ""
 
 
+class MotionSpringParameters(BaseModel):
+    """Parameters for adding a spring force element to a motion study.
+
+    A motion spring applies a force (linear) or torque (torsional) between
+    two endpoints proportional to its stretch from the free length/angle.
+    Unlike the cosmetic helical part geometry, this is a real force element
+    the MotionAnalysis solver balances.
+
+    Attributes:
+        spring_type (str): ``"linear"`` or ``"torsional"``.
+        endpoints (list[MateEntityRef]): The two endpoint entities (faces,
+            edges or vertices), selected by name or pick point.
+        spring_constant (float): Stiffness k — N/m for a linear spring,
+            N·m/rad for a torsional spring (SI, passed verbatim).
+        free_length (float | None): Linear spring rest length in millimetres
+            (the spring exerts no force at this length); ``None`` keeps the
+            modeled initial distance. Ignored for torsional springs.
+        free_angle (float | None): Torsional spring rest angle in degrees;
+            ``None`` keeps the modeled initial angle. Ignored for linear.
+        damping_constant (float): When > 0, enables the spring's damper and
+            sets its damping coefficient (N·s/m); 0 leaves the damper off.
+        coil_diameter (float): Optional cosmetic mean coil diameter in mm
+            (set when > 0).
+        wire_diameter (float): Optional cosmetic wire diameter in mm
+            (set when > 0).
+        number_of_coils (float): Optional cosmetic active coil count
+            (set when > 0).
+        reverse (bool): Reverse the spring direction.
+        study_name (str): Target study name; empty targets the active study.
+    """
+
+    spring_type: str = "linear"
+    endpoints: list[MateEntityRef]
+    spring_constant: float
+    free_length: float | None = None
+    free_angle: float | None = None
+    damping_constant: float = 0.0
+    coil_diameter: float = 0.0
+    wire_diameter: float = 0.0
+    number_of_coils: float = 0.0
+    reverse: bool = False
+    study_name: str = ""
+
+
+class MotionDamperParameters(BaseModel):
+    """Parameters for adding a damper force element to a motion study.
+
+    A damper applies a resistive force (linear) or torque (torsional)
+    between two endpoints proportional to their relative velocity.
+
+    Attributes:
+        damper_type (str): ``"linear"`` or ``"torsional"``.
+        endpoints (list[MateEntityRef]): The two endpoint entities, selected
+            by name or pick point.
+        damping_constant (float): Damping coefficient — N·s/m for a linear
+            damper, N·m·s/rad for a torsional damper (SI, passed verbatim).
+        study_name (str): Target study name; empty targets the active study.
+    """
+
+    damper_type: str = "linear"
+    endpoints: list[MateEntityRef]
+    damping_constant: float
+    study_name: str = ""
+
+
+class MotionForceParameters(BaseModel):
+    """Parameters for adding an applied force/torque to a motion study.
+
+    Applies a constant-magnitude action force (linear) or torque about an
+    axis (torsional) at a location on a component.
+
+    Attributes:
+        force_type (str): ``"linear_force"`` or ``"torque"``.
+        action (MateEntityRef): The face/edge/vertex giving the force's
+            action location (and, for a torque, its axis), selected by name
+            or pick point.
+        magnitude (float): Constant magnitude — newtons for a linear force,
+            newton-metres for a torque (SI, passed verbatim).
+        action_only (bool): ``True`` applies the force to one component only;
+            ``False`` applies an action-and-reaction pair.
+        reverse (bool): Reverse the force direction.
+        study_name (str): Target study name; empty targets the active study.
+    """
+
+    force_type: str = "linear_force"
+    action: MateEntityRef
+    magnitude: float
+    action_only: bool = True
+    reverse: bool = False
+    study_name: str = ""
+
+
 class MassProperties(BaseModel):
     """Mass properties information.
 
@@ -2351,6 +2443,54 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="list_motion_studies is not implemented by this adapter",
+        )
+
+    async def add_motion_spring(
+        self, params: MotionSpringParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Add a spring force element to a motion study.
+
+        Args:
+            params (MotionSpringParameters): Spring type, endpoints, k, L0.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created spring feature or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="add_motion_spring is not implemented by this adapter",
+        )
+
+    async def add_motion_damper(
+        self, params: MotionDamperParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Add a damper force element to a motion study.
+
+        Args:
+            params (MotionDamperParameters): Damper type, endpoints, c.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created damper feature or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="add_motion_damper is not implemented by this adapter",
+        )
+
+    async def add_motion_force(
+        self, params: MotionForceParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Add an applied force/torque to a motion study.
+
+        Args:
+            params (MotionForceParameters): Force type, location, magnitude.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created force feature or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="add_motion_force is not implemented by this adapter",
         )
 
     @abstractmethod

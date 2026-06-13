@@ -1,4 +1,4 @@
-r"""Live end-to-end demo for the Motion-study core surface (PR-M1).
+r"""Live end-to-end demo for the Motion-study surface (PR-M1 core + PR-M2 elements).
 
 Builds a throwaway one-revolute spinner from scratch and drives it with a
 constant-speed rotary motor in a SOLIDWORKS Motion (MotionAnalysis) study,
@@ -12,11 +12,18 @@ Geometry (mirrors ``demo_assembly_mates.py``'s throwaway-part style):
 * a **spinner** disc mated ``concentric`` (coaxial) + ``coincident`` (front
   planes) to the shaft — exactly the one rotational DOF a motor can drive.
 
+Each disc also carries one **rim reference point** (datum point on the front
+circular edge) used as a force-element endpoint.
+
 Then: ``ensure_motion_addin`` → ``create_motion_study`` (motion_analysis) →
-``add_motor`` (rotary, on the spinner axis) → ``calculate_motion`` →
-``set_motion_time`` at several times (reading the spin each time) →
-``export_motion_avi``. The acceptance check is that the measured spin rate
-matches the commanded ``speed`` RPM within tolerance.
+``add_motor`` (rotary, on the spinner axis) → the PR-M2 force elements
+(``add_motion_spring`` + ``add_motion_damper`` between the two rim points,
+``add_motion_force`` on the spinner face) → ``add_gravity`` →
+``calculate_motion`` → ``set_motion_time`` at several times (reading the spin
+each time) → ``export_motion_avi``. The kinematic motor overrides the spin DOF,
+so the spring/damper/force here exercise the PR-M2 add path against a live
+solve rather than changing the spin profile. The acceptance check is that the
+measured spin rate still matches the commanded ``speed`` RPM within tolerance.
 
 Run with the project virtualenv on a Windows box with SOLIDWORKS open and
 the SOLIDWORKS Motion add-in available::
@@ -38,12 +45,16 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from solidworks_mcp.adapters.base import (  # noqa: E402
     AddMateParameters,
     CreateAxisParameters,
+    CreateReferencePointParameters,
     ExtrusionParameters,
     InsertComponentParameters,
     MateEntityRef,
+    MotionDamperParameters,
     MotionExportParameters,
+    MotionForceParameters,
     MotionGravityParameters,
     MotionMotorParameters,
+    MotionSpringParameters,
     MotionStudyParameters,
     MotionStudyRefParameters,
     MotionTimeParameters,
@@ -109,6 +120,19 @@ async def _build_disc(adapter, radius: float, thickness: float, path: Path) -> N
         "create_axis (cylindrical_face)",
         await adapter.create_axis(
             CreateAxisParameters(mode="cylindrical_face", face_point=[radius, 0.0, 0.0])
+        ),
+    )
+    # One rim reference point on the front circular edge (z = +thickness/2),
+    # used as a spring/damper endpoint in the assembly ("Point1@<instance>").
+    _check(
+        "create_reference_point (rim datum point)",
+        await adapter.create_reference_point(
+            CreateReferencePointParameters(
+                mode="along_curve",
+                edge_point=[radius, 0.0, thickness / 2.0],
+                along="evenly",
+                count=1,
+            )
         ),
     )
     _check(f"save_file -> {path.name}", await adapter.save_file(str(path)))
@@ -210,6 +234,51 @@ async def build_demo(out_dir: Path) -> dict[str, str]:
                 )
             ),
         )
+        # PR-M2 force elements between the two rim datum points (and a force
+        # on the spinner cylinder face). The motor is kinematic so these do
+        # not change the spin profile — they exercise the add path live.
+        print("Motion: spring + damper + force elements (PR-M2)")
+        rim_points = [
+            MateEntityRef(entity_type="DATUMPOINT", name=f"Point1@{spinner_name}"),
+            MateEntityRef(entity_type="DATUMPOINT", name=f"Point1@{shaft_name}"),
+        ]
+        _check(
+            "add_motion_spring (linear, k=200 N/m)",
+            await adapter.add_motion_spring(
+                MotionSpringParameters(
+                    spring_type="linear",
+                    endpoints=rim_points,
+                    spring_constant=200.0,
+                    free_length=20.0,
+                    study_name=study_name,
+                )
+            ),
+        )
+        _check(
+            "add_motion_damper (linear, c=0.5 N·s/m)",
+            await adapter.add_motion_damper(
+                MotionDamperParameters(
+                    damper_type="linear",
+                    endpoints=rim_points,
+                    damping_constant=0.5,
+                    study_name=study_name,
+                )
+            ),
+        )
+        _check(
+            "add_motion_force (constant 1 N on spinner face)",
+            await adapter.add_motion_force(
+                MotionForceParameters(
+                    force_type="linear_force",
+                    action=MateEntityRef(
+                        entity_type="FACE", point=[SPINNER_RADIUS, 0.0, 0.0]
+                    ),
+                    magnitude=1.0,
+                    study_name=study_name,
+                )
+            ),
+        )
+
         # Gravity is incidental here (the motor is kinematic) but exercises
         # the add_gravity path live.
         _check(

@@ -11,14 +11,16 @@ solve (``IMotionStudy::Calculate``), scrub to a time
 (``IMotionStudy::SetTime`` — moves the components so callers can read each
 one's transform) and export the animation (``IMotionStudy::SaveToAVI``).
 
-Spring/damper/force feature elements layer on top of this core in a
-follow-up change; this module ships the study lifecycle, motor, gravity,
-solve, scrub and export.
+It also adds the spring, damper and force feature elements the
+MotionAnalysis solver balances (each via ``CreateDefinition`` → set
+``ISimulation{Spring,Damper,Force}FeatureData`` members → ``CreateFeature``).
 
-Units: gravity strength is SI (m/s², the API's unit); motor speed is
-passed verbatim to ``ConstantSpeedMotor`` (RPM for a rotary motor, mm/s
-for a linear motor — converted to m/s for the linear case); entity pick
-points are millimetres (converted by the shared selection helper).
+Units: gravity strength and the spring constant are SI (m/s², N/m — the
+API's units, passed verbatim); motor speed is passed verbatim to
+``ConstantSpeedMotor`` (RPM for a rotary motor, mm/s for a linear motor —
+converted to m/s for the linear case); spring free length and coil
+dimensions and entity pick points are millimetres (converted to metres);
+spring free angle is degrees (converted to radians).
 
 The Motion interfaces live in the SwMotionStudy type library, not
 sldworks.tlb, so ``sw_type_info.flag_methods`` does not cover them. Their
@@ -29,15 +31,19 @@ instead of mis-resolving them as properties.
 
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 from typing import Any, cast
 
 from ..base import (
     AdapterResult,
     AdapterResultStatus,
+    MotionDamperParameters,
     MotionExportParameters,
+    MotionForceParameters,
     MotionGravityParameters,
     MotionMotorParameters,
+    MotionSpringParameters,
     MotionStudyParameters,
     MotionStudyRefParameters,
     MotionTimeParameters,
@@ -66,10 +72,27 @@ _STUDY_TYPES = {
 
 # swFeatureNameID_e (read live from the registered type library)
 _FEAT_GRAVITY = 74
+_FEAT_LINEAR_FORCE = 75
+_FEAT_TORQUE = 76
 _FEAT_LINEAR_MOTOR = 77
 _FEAT_ROTARY_MOTOR = 78
+_FEAT_LINEAR_MOTION_SPRING = 81
+_FEAT_TORSIONAL_MOTION_SPRING = 82
+_FEAT_LINEAR_DAMPER = 83
+_FEAT_TORSIONAL_DAMPER = 84
 
 _MOTOR_FEATURE = {"rotary": _FEAT_ROTARY_MOTOR, "linear": _FEAT_LINEAR_MOTOR}
+_SPRING_FEATURE = {
+    "linear": _FEAT_LINEAR_MOTION_SPRING,
+    "torsional": _FEAT_TORSIONAL_MOTION_SPRING,
+}
+_DAMPER_FEATURE = {"linear": _FEAT_LINEAR_DAMPER, "torsional": _FEAT_TORSIONAL_DAMPER}
+_FORCE_FEATURE = {"linear_force": _FEAT_LINEAR_FORCE, "torque": _FEAT_TORQUE}
+
+# swSimulationForceFunctionType_e / swSimulationForceActionType_e
+_FORCE_FUNCTION_CONSTANT = 0
+_FORCE_ACTION_ONLY = 0
+_FORCE_ACTION_AND_REACTION = 1
 
 # swSimulationGravityAxis_e
 _GRAVITY_AXES = {"x": 0, "y": 1, "z": 2}
@@ -89,6 +112,7 @@ _MOTION_METHODS = (
     "SetTime",
     "ConstantSpeedMotor",
     "SaveToAVI",
+    "SetEndPoints",
 )
 
 
@@ -130,6 +154,21 @@ class SolidWorksMotionMixin:
 
     async def list_motion_studies(self) -> AdapterResult[list[dict[str, Any]]]:
         return _list_motion_studies_impl(self)
+
+    async def add_motion_spring(
+        self, params: MotionSpringParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        return _add_motion_spring_impl(self, params)
+
+    async def add_motion_damper(
+        self, params: MotionDamperParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        return _add_motion_damper_impl(self, params)
+
+    async def add_motion_force(
+        self, params: MotionForceParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        return _add_motion_force_impl(self, params)
 
 
 def _flag_motion_methods(obj: Any) -> None:
@@ -212,19 +251,49 @@ def _resolve_study(adapter: Any, mgr: Any, name: str) -> Any:
     return study
 
 
-def _selected_object(adapter: Any) -> Any:
-    """Return the first selected object via the selection manager.
+def _selected_object(adapter: Any, mark: int = 1) -> Any:
+    """Return a selected object (by mark) via the selection manager.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
+        mark: Selection mark to read back.
 
     Returns:
         Any: The selected COM dispatch or ``None``.
     """
     return adapter._attempt(
-        lambda: adapter.currentModel.SelectionManager.GetSelectedObject6(1, -1),
+        lambda: adapter.currentModel.SelectionManager.GetSelectedObject6(mark, -1),
         default=None,
     )
+
+
+def _select_two_endpoints(adapter: Any, endpoints: Any) -> tuple[Any, Any]:
+    """Select two force-element endpoints under marks 1 and 2.
+
+    Mirrors the Add Spring / Add Damper examples: each endpoint is selected
+    with append so both stay in the selection list, then read back by mark
+    for ``SetEndPoints``.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        endpoints: A two-element sequence of ``MateEntityRef``.
+
+    Returns:
+        tuple[Any, Any]: The two selected COM dispatches.
+
+    Raises:
+        Exception: When either endpoint cannot be selected.
+    """
+    adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True))
+    for index, ref in enumerate(endpoints):
+        if not _select_mate_entity(adapter, ref, index + 1):
+            located = ref.name or ref.point
+            raise Exception(f"Failed to select endpoint {index + 1} ({located!r})")
+    first = _selected_object(adapter, 1)
+    second = _selected_object(adapter, 2)
+    if first is None or second is None:
+        raise Exception("Endpoint selection returned null")
+    return first, second
 
 
 def _create_motion_study_impl(
@@ -640,4 +709,241 @@ def _list_motion_studies_impl(adapter: Any) -> AdapterResult[list[dict[str, Any]
     return cast(
         AdapterResult[list[dict[str, Any]]],
         adapter._handle_com_operation("list_motion_studies", _operation),
+    )
+
+
+def _add_motion_spring_impl(
+    adapter: Any, params: MotionSpringParameters
+) -> AdapterResult[dict[str, Any]]:
+    """Add a spring force element between two endpoints.
+
+    Mirrors the SolidWorks Add Spring flow: create the spring feature data,
+    select and set the two endpoints, set the stiffness/free-length (and
+    optional coil geometry and damper), then create the feature. Lengths are
+    millimetres (converted to the API's metres); the spring constant is SI
+    and passed verbatim.
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Spring type, endpoints, stiffness and rest length.
+
+    Returns:
+        AdapterResult[dict[str, Any]]: Created spring feature or error.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    feature_id = _SPRING_FEATURE.get(params.spring_type)
+    if feature_id is None:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown spring_type: {params.spring_type!r} "
+            f"(expected one of {sorted(_SPRING_FEATURE)})",
+        )
+    if len(params.endpoints) != 2:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="a spring needs exactly two endpoints",
+        )
+
+    def _operation() -> dict[str, Any]:
+        mgr = _motion_manager(adapter)
+        if mgr is None:
+            raise Exception("MotionManager unavailable")
+        study = _resolve_study(adapter, mgr, params.study_name)
+        data = adapter._attempt(
+            lambda: study.CreateDefinition(feature_id), default=None
+        )
+        if data is None:
+            raise Exception("CreateDefinition failed for spring")
+
+        first, second = _select_two_endpoints(adapter, params.endpoints)
+        adapter._attempt(lambda: data.SetEndPoints(first, second))
+
+        adapter._attempt(
+            lambda: setattr(data, "SpringConstant", float(params.spring_constant))
+        )
+        if params.spring_type == "linear" and params.free_length is not None:
+            adapter._attempt(
+                lambda: setattr(data, "FreeLength", float(params.free_length) / 1000.0)
+            )
+        if params.spring_type == "torsional" and params.free_angle is not None:
+            adapter._attempt(
+                lambda: setattr(data, "FreeAngle", math.radians(params.free_angle))
+            )
+        if params.coil_diameter > 0:
+            adapter._attempt(
+                lambda: setattr(data, "CoilDiameter", params.coil_diameter / 1000.0)
+            )
+        if params.wire_diameter > 0:
+            adapter._attempt(
+                lambda: setattr(data, "WireDiameter", params.wire_diameter / 1000.0)
+            )
+        if params.number_of_coils > 0:
+            adapter._attempt(
+                lambda: setattr(data, "NumberOfCoils", float(params.number_of_coils))
+            )
+        if params.damping_constant > 0:
+            adapter._attempt(lambda: setattr(data, "HasDamper", True))
+            adapter._attempt(
+                lambda: setattr(data, "DampingConstant", float(params.damping_constant))
+            )
+        if params.reverse:
+            adapter._attempt(lambda: setattr(data, "ReverseDirection", True))
+
+        feature = adapter._attempt(lambda: study.CreateFeature(data), default=None)
+        if feature is None:
+            raise Exception("CreateFeature failed for spring")
+        adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True))
+        return {
+            "name": str(adapter._attempt(lambda: feature.Name, default="") or ""),
+            "spring_type": params.spring_type,
+            "spring_constant": float(params.spring_constant),
+        }
+
+    return cast(
+        AdapterResult[dict[str, Any]],
+        adapter._handle_com_operation("add_motion_spring", _operation),
+    )
+
+
+def _add_motion_damper_impl(
+    adapter: Any, params: MotionDamperParameters
+) -> AdapterResult[dict[str, Any]]:
+    """Add a damper force element between two endpoints.
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Damper type, endpoints and damping coefficient.
+
+    Returns:
+        AdapterResult[dict[str, Any]]: Created damper feature or error.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    feature_id = _DAMPER_FEATURE.get(params.damper_type)
+    if feature_id is None:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown damper_type: {params.damper_type!r} "
+            f"(expected one of {sorted(_DAMPER_FEATURE)})",
+        )
+    if len(params.endpoints) != 2:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="a damper needs exactly two endpoints",
+        )
+
+    def _operation() -> dict[str, Any]:
+        mgr = _motion_manager(adapter)
+        if mgr is None:
+            raise Exception("MotionManager unavailable")
+        study = _resolve_study(adapter, mgr, params.study_name)
+        data = adapter._attempt(
+            lambda: study.CreateDefinition(feature_id), default=None
+        )
+        if data is None:
+            raise Exception("CreateDefinition failed for damper")
+        first, second = _select_two_endpoints(adapter, params.endpoints)
+        adapter._attempt(lambda: data.SetEndPoints(first, second))
+        adapter._attempt(
+            lambda: setattr(data, "DampingConstant", float(params.damping_constant))
+        )
+        feature = adapter._attempt(lambda: study.CreateFeature(data), default=None)
+        if feature is None:
+            raise Exception("CreateFeature failed for damper")
+        adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True))
+        return {
+            "name": str(adapter._attempt(lambda: feature.Name, default="") or ""),
+            "damper_type": params.damper_type,
+            "damping_constant": float(params.damping_constant),
+        }
+
+    return cast(
+        AdapterResult[dict[str, Any]],
+        adapter._handle_com_operation("add_motion_damper", _operation),
+    )
+
+
+def _add_motion_force_impl(
+    adapter: Any, params: MotionForceParameters
+) -> AdapterResult[dict[str, Any]]:
+    """Add a constant applied force/torque at a location on a component.
+
+    Mirrors the SolidWorks Create Force flow: create the force feature data,
+    set the action type, select the action-location geometry and set it (plus
+    the owning component as the reference), set a constant function value,
+    then create the feature. Magnitude is SI and passed verbatim.
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Force type, action location and magnitude.
+
+    Returns:
+        AdapterResult[dict[str, Any]]: Created force feature or error.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    feature_id = _FORCE_FEATURE.get(params.force_type)
+    if feature_id is None:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown force_type: {params.force_type!r} "
+            f"(expected one of {sorted(_FORCE_FEATURE)})",
+        )
+
+    def _operation() -> dict[str, Any]:
+        mgr = _motion_manager(adapter)
+        if mgr is None:
+            raise Exception("MotionManager unavailable")
+        study = _resolve_study(adapter, mgr, params.study_name)
+        data = adapter._attempt(
+            lambda: study.CreateDefinition(feature_id), default=None
+        )
+        if data is None:
+            raise Exception("CreateDefinition failed for force")
+
+        action_type = (
+            _FORCE_ACTION_ONLY if params.action_only else _FORCE_ACTION_AND_REACTION
+        )
+        adapter._attempt(lambda: setattr(data, "ActionType", action_type))
+
+        adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True))
+        if not _select_mate_entity(adapter, params.action, 1):
+            located = params.action.name or params.action.point
+            raise Exception(f"Failed to select force action location ({located!r})")
+        selection = _selected_object(adapter, 1)
+        if selection is None:
+            raise Exception("Force action-location selection returned null")
+        adapter._attempt(lambda: setattr(data, "ActionLocation", selection))
+        comp = adapter._attempt(
+            lambda: adapter.currentModel.SelectionManager.GetSelectedObjectsComponent3(
+                1, -1
+            ),
+            default=None,
+        )
+        if comp is not None:
+            adapter._attempt(lambda: setattr(data, "ReferenceComponent", comp))
+
+        adapter._attempt(
+            lambda: setattr(data, "ForceFunctionType", _FORCE_FUNCTION_CONSTANT)
+        )
+        adapter._attempt(
+            lambda: setattr(data, "FunctionConstantValue", float(params.magnitude))
+        )
+        if params.reverse:
+            adapter._attempt(lambda: setattr(data, "ReverseDirection", True))
+
+        feature = adapter._attempt(lambda: study.CreateFeature(data), default=None)
+        if feature is None:
+            raise Exception("CreateFeature failed for force")
+        adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True))
+        return {
+            "name": str(adapter._attempt(lambda: feature.Name, default="") or ""),
+            "force_type": params.force_type,
+            "magnitude": float(params.magnitude),
+        }
+
+    return cast(
+        AdapterResult[dict[str, Any]],
+        adapter._handle_com_operation("add_motion_force", _operation),
     )
