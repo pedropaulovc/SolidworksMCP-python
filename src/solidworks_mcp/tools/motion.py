@@ -34,7 +34,10 @@ from .modeling import _normalize_input
 def _entity_ref(entity: "MotionEntityInput") -> MateEntityRef:
     """Build a MateEntityRef from a tool-layer MotionEntityInput."""
     return MateEntityRef(
-        entity_type=entity.entity_type, name=entity.name, point=entity.point
+        entity_type=entity.entity_type,
+        name=entity.name,
+        point=entity.point,
+        component=entity.component,
     )
 
 
@@ -49,6 +52,8 @@ class MotionEntityInput(BaseModel):
             locating by point.
         point (list[float]): ``[x, y, z]`` in millimetres on the entity
             (view-dependent pick); empty when locating by name.
+        component (str): Optional component whose geometry the entity belongs
+            to; resolves a cylindrical face via ``GetCorrespondingEntity``.
     """
 
     entity_type: str = Field(
@@ -60,14 +65,25 @@ class MotionEntityInput(BaseModel):
         description=(
             "Entity name — inside a component use 'Axis1@shaft-1' (the "
             "assembly qualifier is appended automatically); empty when "
-            "locating by point"
+            "locating by point or component"
         ),
     )
     point: list[float] = Field(
         default=[],
         description=(
             "[x, y, z] in millimetres on the entity (view-dependent pick); "
-            "empty when locating by name"
+            "empty when locating by name; with 'component' it disambiguates "
+            "which cylindrical face (nearest axis wins)"
+        ),
+    )
+    component: str = Field(
+        default="",
+        description=(
+            "Optional component, e.g. 'drive-train-1/crankshaft-1'. Picks the "
+            "component's largest cylindrical face (whose axis drives a rotary "
+            "motor) and maps it into assembly context via "
+            "GetCorrespondingEntity — the robust way to reference a part "
+            "nested in a flexible subassembly"
         ),
     )
 
@@ -82,8 +98,8 @@ class MotionEntityInput(BaseModel):
         """
         if not self.entity_type.strip():
             raise ValueError("entity_type is required")
-        if not self.name.strip() and not self.point:
-            raise ValueError("the motor entity needs a name or a point")
+        if not self.name.strip() and not self.point and not self.component.strip():
+            raise ValueError("the motor entity needs a name, a point, or a component")
         if self.point and len(self.point) != 3:
             raise ValueError("point must be [x, y, z] in millimetres")
 
@@ -467,11 +483,7 @@ async def register_motion_tools(
             result = await adapter.add_motor(
                 MotionMotorParameters(
                     motor_type=input_data.motor_type,
-                    entity=MateEntityRef(
-                        entity_type=input_data.entity.entity_type,
-                        name=input_data.entity.name,
-                        point=input_data.entity.point,
-                    ),
+                    entity=_entity_ref(input_data.entity),
                     speed=input_data.speed,
                     reverse=input_data.reverse,
                     component=input_data.component,

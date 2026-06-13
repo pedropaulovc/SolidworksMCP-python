@@ -23,6 +23,7 @@ from ..adapters.base import (
     MoveComponentParameters,
     ReplaceComponentParameters,
     RotateComponentParameters,
+    SetComponentSolvingParameters,
     SolidWorksAdapter,
     SuppressMateParameters,
 )
@@ -581,12 +582,60 @@ class SuppressMateInput(MateRefInput):
     Attributes:
         name (str): Mate feature name.
         suppress (bool): True to suppress, False to unsuppress.
+        component (str): Optional subassembly component owning the mate.
     """
 
     suppress: bool = Field(
         default=True,
         description="True to suppress the mate, False to unsuppress it",
     )
+    component: str = Field(
+        default="",
+        description=(
+            "Optional component whose subassembly document owns the mate, "
+            "e.g. 'drive-train-1'. Set this to suppress a mate that lives "
+            "inside a (flexible) subassembly — e.g. a driving-dimension mate "
+            "freeing a DOF for a motion study; its name is the standalone "
+            "name in the sub. The subassembly is not saved."
+        ),
+    )
+
+
+class SetComponentSolvingInput(BaseModel):
+    """Input schema for setting a subassembly's solve mode.
+
+    Attributes:
+        name (str): Component name with instance suffix.
+        solving (str): 'flexible' or 'rigid'.
+    """
+
+    name: str = Field(
+        description=(
+            "Component name with instance suffix, e.g. 'drive-train-1' "
+            "('sub-1/inner-1' for a nested child)"
+        )
+    )
+    solving: str = Field(
+        default="flexible",
+        description=(
+            "'flexible' solves the subassembly's internal mates with the "
+            "parent (its parts move within their DOF — required for a parent "
+            "motor or cross-assembly mate to drive parts inside it); 'rigid' "
+            "treats it as one solid. A fixed subassembly cannot be flexible — "
+            "float it first."
+        ),
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        """Validate the component name and solve mode.
+
+        Raises:
+            ValueError: When the name is empty or the mode is unknown.
+        """
+        if not self.name.strip():
+            raise ValueError("name is required")
+        if self.solving not in ("rigid", "flexible"):
+            raise ValueError("solving must be 'rigid' or 'flexible'")
 
 
 async def register_assembly_tools(
@@ -1199,6 +1248,7 @@ async def register_assembly_tools(
                 SuppressMateParameters(
                     name=input_data.name,
                     suppress=input_data.suppress,
+                    component=input_data.component,
                 )
             )
             if result.is_success:
@@ -1218,5 +1268,56 @@ async def register_assembly_tools(
             logger.error(f"Error in suppress_mate tool: {e}")
             return {"status": "error", "message": f"Unexpected error: {str(e)}"}
 
-    tool_count = 13  # Number of tools registered
+    @mcp.tool()
+    async def set_component_solving(
+        input_data: SetComponentSolvingInput,
+    ) -> dict[str, Any]:
+        """Set a subassembly component's solve mode (flexible or rigid).
+
+        A flexible subassembly's internal mates solve together with the parent,
+        so its parts move within their degrees of freedom — required for a
+        parent-assembly motor or cross-assembly mate to drive parts inside it
+        (e.g. a motion study). A fixed subassembly cannot be made flexible;
+        float and ground it first.
+
+        Args:
+            input_data (SetComponentSolvingInput): Component name and mode.
+
+        Returns:
+            dict[str, Any]: Status and resulting solve mode.
+
+        Example:
+            ```python
+            result = await set_component_solving({
+                "name": "drive-train-1",
+                "solving": "flexible",
+            })
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, SetComponentSolvingInput)
+            result = await adapter.set_component_solving(
+                SetComponentSolvingParameters(
+                    name=input_data.name,
+                    solving=input_data.solving,
+                )
+            )
+            if result.is_success:
+                payload = result.data or {}
+                return {
+                    "status": "success",
+                    "message": f"Set {payload.get('name')} solving: "
+                    f"{payload.get('solving')}",
+                    "component": payload,
+                    "execution_time": result.execution_time,
+                }
+            return {
+                "status": "error",
+                "message": f"Failed to set solve mode: {result.error}",
+            }
+        except Exception as e:
+            logger.error(f"Error in set_component_solving tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    tool_count = 14  # Number of tools registered
     return tool_count

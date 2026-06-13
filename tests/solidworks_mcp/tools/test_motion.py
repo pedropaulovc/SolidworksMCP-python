@@ -205,8 +205,12 @@ class TestMotionEntityInputValidation:
     """Validation rules on the motor-entity locator."""
 
     def test_requires_name_or_point(self):
-        with pytest.raises(ValueError, match="needs a name or a point"):
+        with pytest.raises(ValueError, match="needs a name, a point, or a component"):
             MotionEntityInput(entity_type="AXIS")
+
+    def test_component_alone_is_valid(self):
+        ref = MotionEntityInput(entity_type="FACE", component="sub-1/shaft-1")
+        assert ref.component == "sub-1/shaft-1"
 
     def test_point_must_be_xyz(self):
         with pytest.raises(ValueError, match="\\[x, y, z\\]"):

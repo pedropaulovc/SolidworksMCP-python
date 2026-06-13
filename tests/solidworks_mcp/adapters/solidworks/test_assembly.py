@@ -20,6 +20,7 @@ from solidworks_mcp.adapters.base import (
     MoveComponentParameters,
     ReplaceComponentParameters,
     RotateComponentParameters,
+    SetComponentSolvingParameters,
     SuppressMateParameters,
 )
 from solidworks_mcp.adapters.mock_adapter import MockSolidWorksAdapter
@@ -1233,7 +1234,7 @@ def test_suppress_mate_success_applies_all_configurations() -> None:
 
     assert result.is_success
     assert mate.suppression_calls == [(0, 2)]  # suppress, all configurations
-    assert result.data == {"name": "Distance1", "suppressed": True}
+    assert result.data == {"name": "Distance1", "suppressed": True, "component": ""}
 
 
 def test_unsuppress_mate_success() -> None:
@@ -1246,7 +1247,7 @@ def test_unsuppress_mate_success() -> None:
 
     assert result.is_success
     assert mate.suppression_calls == [(1, 2)]
-    assert result.data == {"name": "Distance1", "suppressed": False}
+    assert result.data == {"name": "Distance1", "suppressed": False, "component": ""}
 
 
 def test_suppress_mate_state_not_applied_errors() -> None:
@@ -1271,6 +1272,262 @@ def test_suppress_mate_unknown_errors() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sub-scoped suppression + flexibility (PR-M4)
+# ---------------------------------------------------------------------------
+
+
+class _SubComponent:
+    """A component whose GetModelDoc2 returns a (sub-assembly) model doc."""
+
+    def __init__(self, name, sub_model) -> None:
+        self.Name2 = name
+        self._sub_model = sub_model
+
+    def GetModelDoc2(self):  # noqa: N802
+        return self._sub_model
+
+
+def test_suppress_mate_in_subassembly_resolves_in_sub_doc() -> None:
+    # The driver mate lives only in the sub's model doc, not the top level.
+    driver = _FakeMate("Distance34", type_name="MateDistanceDim")
+    sub_model = _MateModel(mates=[driver])
+    top = _FakeAssemblyModel(
+        components={"drive-train-1": _SubComponent("drive-train-1", sub_model)}
+    )
+    adapter = _adapter_with(top)
+
+    result = assembly_module._suppress_mate_impl(
+        adapter,
+        SuppressMateParameters(
+            name="Distance34", suppress=True, component="drive-train-1"
+        ),
+    )
+    assert result.is_success
+    assert driver.suppression_calls == [(0, 2)]  # suppressed in the sub doc
+    assert result.data == {
+        "name": "Distance34",
+        "suppressed": True,
+        "component": "drive-train-1",
+    }
+
+
+def test_suppress_mate_in_subassembly_missing_component_errors() -> None:
+    adapter = _adapter_with(_FakeAssemblyModel(components={}))
+    result = assembly_module._suppress_mate_impl(
+        adapter,
+        SuppressMateParameters(name="Distance34", component="ghost-1"),
+    )
+    assert result.is_error
+    assert "Component not found" in (result.error or "")
+
+
+def test_suppress_mate_in_subassembly_mate_missing_errors() -> None:
+    sub_model = _MateModel(mates=[])
+    top = _FakeAssemblyModel(
+        components={"drive-train-1": _SubComponent("drive-train-1", sub_model)}
+    )
+    adapter = _adapter_with(top)
+    result = assembly_module._suppress_mate_impl(
+        adapter,
+        SuppressMateParameters(name="Distance34", component="drive-train-1"),
+    )
+    assert result.is_error
+    assert "in 'drive-train-1'" in (result.error or "")
+
+
+class _SolvingComponent(_FakeComponent):
+    def __init__(self, name="drive-train-1", solving=0) -> None:
+        super().__init__(name=name)
+        self.Solving = solving
+
+
+class _SolvingModel(_FakeAssemblyModel):
+    """Assembly model whose CompConfigProperties5 flips the component's Solving."""
+
+    def __init__(self, components=None, takes=True) -> None:
+        super().__init__(components=components)
+        self.takes = takes
+        self.config_calls: list[tuple] = []
+
+    def CompConfigProperties5(  # noqa: N802
+        self, status, solving, named, suppression, config, preview, lightweight
+    ):
+        self.config_calls.append((status, solving))
+        if self.takes:
+            for comp in self._components.values():
+                comp.Solving = solving
+        return True
+
+
+def test_set_component_solving_flexible_success() -> None:
+    comp = _SolvingComponent(solving=0)
+    model = _SolvingModel(components={"drive-train-1": comp})
+    adapter = _adapter_with(model)
+
+    result = assembly_module._set_component_solving_impl(
+        adapter,
+        assembly_module.SetComponentSolvingParameters(
+            name="drive-train-1", solving="flexible"
+        ),
+    )
+    assert result.is_success
+    assert result.data == {"name": "drive-train-1", "solving": "flexible"}
+    assert model.config_calls == [(2, 1)]  # fully resolved, flexible
+
+
+def test_set_component_solving_unknown_mode_errors() -> None:
+    model = _SolvingModel(components={"drive-train-1": _SolvingComponent()})
+    adapter = _adapter_with(model)
+    result = assembly_module._set_component_solving_impl(
+        adapter,
+        assembly_module.SetComponentSolvingParameters(
+            name="drive-train-1", solving="squishy"
+        ),
+    )
+    assert result.is_error
+    assert "Unknown solving mode" in (result.error or "")
+
+
+def test_set_component_solving_refusal_reports_readback() -> None:
+    comp = _SolvingComponent(solving=0)
+    model = _SolvingModel(components={"drive-train-1": comp}, takes=False)
+    adapter = _adapter_with(model)
+    result = assembly_module._set_component_solving_impl(
+        adapter,
+        assembly_module.SetComponentSolvingParameters(
+            name="drive-train-1", solving="flexible"
+        ),
+    )
+    assert result.is_error
+    assert "did not take" in (result.error or "")
+    assert "float it first" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Component cylindrical-face resolution (PR-M4 motor entity)
+# ---------------------------------------------------------------------------
+
+
+class _FakeSurface:
+    def __init__(self, cyl) -> None:
+        self._cyl = cyl  # None => not a cylinder
+
+    def IsCylinder(self):  # noqa: N802
+        return self._cyl is not None
+
+    @property
+    def CylinderParams(self):  # noqa: N802
+        return self._cyl
+
+
+class _FakeFace:
+    def __init__(self, surface, area) -> None:
+        self._surface = surface
+        self._area = area
+        self._next = None
+
+    def GetSurface(self):  # noqa: N802
+        return self._surface
+
+    def GetArea(self):  # noqa: N802
+        return self._area
+
+    def GetNextFace(self):  # noqa: N802
+        return self._next
+
+
+class _FakeBody:
+    def __init__(self, faces) -> None:
+        self._faces = list(faces)
+        for face, succ in zip(self._faces, self._faces[1:], strict=False):
+            face._next = succ
+        if self._faces:
+            self._faces[-1]._next = None
+
+    def GetFirstFace(self):  # noqa: N802
+        return self._faces[0] if self._faces else None
+
+
+class _FacePartComponent:
+    def __init__(self, name, bodies) -> None:
+        self.Name2 = name
+        self._bodies = bodies
+        self.corresponded: list[object] = []
+
+    def GetModelDoc2(self):  # noqa: N802
+        return SimpleNamespace(GetBodies2=lambda body_type, visible: self._bodies)
+
+    def GetCorrespondingEntity(self, face):  # noqa: N802
+        self.corresponded.append(face)
+        return ("assembly-face", face)
+
+
+def test_component_cylindrical_face_picks_largest_area() -> None:
+    small = _FakeFace(_FakeSurface([0, 0, 0, 0, 1, 0, 0.0025]), area=1.0)
+    big = _FakeFace(_FakeSurface([0, 0, 0, 0, 1, 0, 0.0047]), area=9.0)
+    flat = _FakeFace(_FakeSurface(None), area=99.0)  # ignored (not a cylinder)
+    comp = _FacePartComponent("drive-train-1/crankshaft-1", [_FakeBody([small, flat, big])])
+    top = _FakeAssemblyModel(components={"drive-train-1/crankshaft-1": comp})
+    adapter = _adapter_with(top)
+
+    result = assembly_module._component_cylindrical_face(
+        adapter, "drive-train-1/crankshaft-1"
+    )
+    assert result == ("assembly-face", big)
+    assert comp.corresponded == [big]
+
+
+def test_component_cylindrical_face_disambiguates_by_point() -> None:
+    # Two equal-area cylinders on parallel axes; the point sits on the second.
+    near_origin = _FakeFace(_FakeSurface([0, 0, 0, 0, 0, 1, 0.003]), area=5.0)
+    offset = _FakeFace(_FakeSurface([0.1, 0, 0, 0, 0, 1, 0.003]), area=5.0)
+    comp = _FacePartComponent("sub-1/shaft-1", [_FakeBody([near_origin, offset])])
+    top = _FakeAssemblyModel(components={"sub-1/shaft-1": comp})
+    adapter = _adapter_with(top)
+
+    result = assembly_module._component_cylindrical_face(
+        adapter, "sub-1/shaft-1", point=[100.0, 0.0, 0.0]
+    )
+    assert result == ("assembly-face", offset)
+
+
+class _NestedModel(_FakeAssemblyModel):
+    """Assembly whose GetComponentByName resolves only top-level instances.
+
+    Nested 'sub-1/part-1' must come from the GetComponents(False) Name2 scan,
+    mirroring the SolidWorks versions where GetComponentByName returns None for
+    a nested path.
+    """
+
+    def __init__(self, top=None, nested=None) -> None:
+        super().__init__(components=top or {})
+        self._all = list((top or {}).values()) + list(nested or [])
+
+    def GetComponents(self, top_only):  # noqa: N802
+        return [] if top_only else self._all
+
+
+def test_get_component_falls_back_to_name2_scan_for_nested() -> None:
+    nested = _FakeComponent(name="drive-train-1/crankshaft-1")
+    model = _NestedModel(top={"drive-train-1": _FakeComponent("drive-train-1")},
+                         nested=[nested])
+    adapter = _adapter_with(model)
+
+    found = assembly_module._get_component(adapter, "drive-train-1/crankshaft-1")
+    assert found is nested
+
+
+def test_component_cylindrical_face_no_cylinder_returns_none() -> None:
+    flat = _FakeFace(_FakeSurface(None), area=10.0)
+    comp = _FacePartComponent("sub-1/block-1", [_FakeBody([flat])])
+    top = _FakeAssemblyModel(components={"sub-1/block-1": comp})
+    adapter = _adapter_with(top)
+    assert (
+        assembly_module._component_cylindrical_face(adapter, "sub-1/block-1") is None
+    )
+
+
+# ---------------------------------------------------------------------------
 # Mock adapter parity (Phase 7B)
 # ---------------------------------------------------------------------------
 
@@ -1282,6 +1539,61 @@ async def _connected_mock() -> MockSolidWorksAdapter:
     await adapter.connect()
     await adapter.create_part()
     return adapter
+
+
+async def _assembly_mock_with_component() -> tuple[MockSolidWorksAdapter, str]:
+    adapter = MockSolidWorksAdapter(
+        {"mock_connect_delay": 0, "mock_model_delay": 0, "mock_sketch_delay": 0}
+    )
+    await adapter.connect()
+    await adapter.create_assembly()
+    inserted = await adapter.insert_component(
+        InsertComponentParameters(file_path="C:/parts/drive-train.sldasm")
+    )
+    return adapter, inserted.data["name"]
+
+
+@pytest.mark.asyncio
+async def test_mock_set_component_solving_float_then_flexible() -> None:
+    adapter, name = await _assembly_mock_with_component()
+    # A freshly inserted component is fixed; flexible is refused until floated.
+    refused = await adapter.set_component_solving(
+        SetComponentSolvingParameters(name=name, solving="flexible")
+    )
+    assert refused.is_error
+    assert "float it first" in (refused.error or "")
+
+    await adapter.float_component(ComponentRefParameters(name=name))
+    flexed = await adapter.set_component_solving(
+        SetComponentSolvingParameters(name=name, solving="flexible")
+    )
+    assert flexed.is_success
+    assert flexed.data == {"name": name, "solving": "flexible"}
+
+
+@pytest.mark.asyncio
+async def test_mock_set_component_solving_unknown_mode_errors() -> None:
+    adapter, name = await _assembly_mock_with_component()
+    result = await adapter.set_component_solving(
+        SetComponentSolvingParameters(name=name, solving="rigidish")
+    )
+    assert result.is_error
+    assert "Unknown solving mode" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_mock_suppress_mate_in_subassembly_records_component() -> None:
+    adapter, name = await _assembly_mock_with_component()
+    result = await adapter.suppress_mate(
+        SuppressMateParameters(name="Distance34", suppress=True, component=name)
+    )
+    assert result.is_success
+    assert result.data == {
+        "name": "Distance34",
+        "suppressed": True,
+        "component": name,
+    }
+    assert adapter._sub_suppressed_mates[(name, "Distance34")] is True
 
 
 @pytest.mark.asyncio
@@ -1354,7 +1666,11 @@ async def test_mock_delete_and_suppress_mate_round_trip() -> None:
     suppressed = await adapter.suppress_mate(
         SuppressMateParameters(name="Tangent1", suppress=True)
     )
-    assert suppressed.data == {"name": "Tangent1", "suppressed": True}
+    assert suppressed.data == {
+        "name": "Tangent1",
+        "suppressed": True,
+        "component": "",
+    }
     listed = await adapter.list_mates()
     assert listed.data[0]["suppressed"] is True
 

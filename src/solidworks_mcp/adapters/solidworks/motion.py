@@ -51,7 +51,7 @@ from ..base import (
     MotionStudyRefParameters,
     MotionTimeParameters,
 )
-from .assembly import _select_mate_entity
+from .assembly import _component_cylindrical_face, _select_mate_entity
 
 try:
     import pythoncom  # noqa: F401
@@ -506,12 +506,12 @@ def _add_motor_impl(
             raise Exception("CreateDefinition failed for motor")
 
         adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True))
-        if not _select_mate_entity(adapter, params.entity, 1):
-            located = params.entity.name or params.entity.point
-            raise Exception(f"Failed to select motor entity ({located!r})")
-        selection = _selected_object(adapter)
+        selection = _resolve_motor_entity(adapter, params.entity)
         if selection is None:
-            raise Exception("Motor location/direction selection returned null")
+            located = (
+                params.entity.component or params.entity.name or params.entity.point
+            )
+            raise Exception(f"Failed to resolve motor entity ({located!r})")
         adapter._attempt(lambda: setattr(data, "DirectionReference", selection))
         adapter._attempt(lambda: setattr(data, "Location", selection))
 
@@ -543,6 +543,30 @@ def _add_motor_impl(
         AdapterResult[dict[str, Any]],
         adapter._handle_com_operation("add_motor", _operation),
     )
+
+
+def _resolve_motor_entity(adapter: Any, ref: Any) -> Any:
+    """Resolve the Location/DirectionReference entity for a motor.
+
+    For a part nested in a flexible subassembly (``ref.component`` set), map a
+    cylindrical face into assembly context via ``GetCorrespondingEntity`` and
+    return the dispatch DIRECTLY — its ``Select4`` returns false there but the
+    entity is still valid as a motor reference, and a hand-built selection
+    string would mis-resolve to the top level. Otherwise select by name/point
+    and read the selection back (the documented motor-dialog flow).
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        ref: A ``MateEntityRef``.
+
+    Returns:
+        Any: The entity dispatch to use for the motor, or ``None``.
+    """
+    if ref.component:
+        return _component_cylindrical_face(adapter, ref.component, ref.point or None)
+    if not _select_mate_entity(adapter, ref, 1):
+        return None
+    return _selected_object(adapter)
 
 
 def _resolve_component(adapter: Any, name: str) -> Any:
