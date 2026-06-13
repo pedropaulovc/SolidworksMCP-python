@@ -1024,15 +1024,19 @@ class MotionTimeParameters(BaseModel):
 
 
 class MotionExportParameters(BaseModel):
-    """Parameters for exporting a motion study animation to AVI.
+    """Parameters for exporting a motion study animation to a video file.
 
     Attributes:
-        file_path (str): Output ``.avi`` path.
+        file_path (str): Output video path; the suffix picks the container —
+            ``.mp4`` (recommended), ``.mkv`` or ``.flv``. ``.avi`` is rejected
+            (SOLIDWORKS only writes it via the interactive codec dialog).
         study_name (str): Target study name; empty targets the active study.
+        frames_per_second (float): Animation frame rate written to the file.
     """
 
     file_path: str
     study_name: str = ""
+    frames_per_second: float = 25.0
 
 
 class MotionSpringParameters(BaseModel):
@@ -2418,10 +2422,13 @@ class SolidWorksAdapter(ABC):
             error="set_motion_time is not implemented by this adapter",
         )
 
-    async def export_motion_avi(
+    async def export_motion_video(
         self, params: MotionExportParameters
     ) -> AdapterResult[dict[str, Any]]:
-        """Export a motion study animation to an AVI file.
+        """Export a motion study animation to a single-file H.264 video.
+
+        The container is chosen by the output path suffix (``.mp4``/``.mkv``/
+        ``.flv``); ``.avi`` is not available headlessly.
 
         Args:
             params (MotionExportParameters): Output path and study name.
@@ -2431,7 +2438,7 @@ class SolidWorksAdapter(ABC):
         """
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
-            error="export_motion_avi is not implemented by this adapter",
+            error="export_motion_video is not implemented by this adapter",
         )
 
     async def list_motion_studies(self) -> AdapterResult[list[dict[str, Any]]]:

@@ -11,7 +11,7 @@ from solidworks_mcp.tools.motion import (
     AddMotionSpringInput,
     AddMotorInput,
     CreateMotionStudyInput,
-    ExportMotionAviInput,
+    ExportMotionVideoInput,
     MotionEntityInput,
     MotionStudyRefInput,
     SetMotionTimeInput,
@@ -42,7 +42,7 @@ class TestMotionTools:
             "add_gravity",
             "calculate_motion",
             "set_motion_time",
-            "export_motion_avi",
+            "export_motion_video",
             "list_motion_studies",
             "add_motion_spring",
             "add_motion_damper",
@@ -99,8 +99,8 @@ class TestMotionTools:
             SetMotionTimeInput(time=1.5)
         )
         assert t["status"] == "success"
-        avi = await (await _tool(mcp_server, "export_motion_avi"))(
-            ExportMotionAviInput(file_path="C:/out/op.avi")
+        avi = await (await _tool(mcp_server, "export_motion_video"))(
+            ExportMotionVideoInput(file_path="C:/out/op.mp4")
         )
         assert avi["status"] == "success"
         listed = await (await _tool(mcp_server, "list_motion_studies"))()
