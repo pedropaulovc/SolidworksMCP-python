@@ -5,6 +5,7 @@ from .features import SolidWorksFeaturesMixin
 from .io import SolidWorksIOMixin
 from .manufacturing import SolidWorksManufacturingMixin
 from .measure import SolidWorksMeasureMixin
+from .motion import SolidWorksMotionMixin
 from .parametrics import SolidWorksParametricsMixin
 from .reference_geometry import SolidWorksReferenceGeometryMixin
 from .selection import SolidWorksSelectionMixin
@@ -16,6 +17,7 @@ __all__ = [
     "SolidWorksIOMixin",
     "SolidWorksManufacturingMixin",
     "SolidWorksMeasureMixin",
+    "SolidWorksMotionMixin",
     "SolidWorksParametricsMixin",
     "SolidWorksReferenceGeometryMixin",
     "SolidWorksSelectionMixin",
