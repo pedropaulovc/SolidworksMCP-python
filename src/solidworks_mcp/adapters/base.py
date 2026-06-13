@@ -938,6 +938,103 @@ class SuppressMateParameters(BaseModel):
     suppress: bool = True
 
 
+class MotionStudyParameters(BaseModel):
+    """Parameters for creating (or re-selecting) a motion study.
+
+    Attributes:
+        name (str): Study name. Empty creates a new study and uses the
+            SolidWorks-assigned name (returned in the result).
+        study_type (str): ``"animation"``, ``"physical_simulation"``
+            (Basic Motion) or ``"motion_analysis"`` (SOLIDWORKS Motion —
+            the only type that solves spring/force/gravity dynamics;
+            requires the SOLIDWORKS Motion add-in).
+        duration (float): Study duration in seconds.
+        activate (bool): Activate the study after creating it (required
+            before adding simulation features).
+    """
+
+    name: str = ""
+    study_type: str = "motion_analysis"
+    duration: float = 5.0
+    activate: bool = True
+
+
+class MotionStudyRefParameters(BaseModel):
+    """Parameters referencing one motion study by name.
+
+    Attributes:
+        name (str): Study name; empty targets the active study.
+    """
+
+    name: str = ""
+
+
+class MotionMotorParameters(BaseModel):
+    """Parameters for adding a motor to a motion study.
+
+    Attributes:
+        motor_type (str): ``"rotary"`` or ``"linear"``.
+        entity (MateEntityRef): Face/edge/axis that fixes the motor's
+            location and direction (selected by name or pick point), as in
+            the SolidWorks motor dialog.
+        speed (float): Constant speed — RPM for a rotary motor, millimetres
+            per second for a linear motor.
+        reverse (bool): Reverse the motor direction.
+        component (str): Optional name of the moving component the motor
+            drives (``RelativeComponent``); empty lets SolidWorks infer it
+            from the selected face.
+        study_name (str): Target study name; empty targets the active study.
+    """
+
+    motor_type: str = "rotary"
+    entity: MateEntityRef
+    speed: float = 10.0
+    reverse: bool = False
+    component: str = ""
+    study_name: str = ""
+
+
+class MotionGravityParameters(BaseModel):
+    """Parameters for adding gravity to a motion study.
+
+    Attributes:
+        axis (str): Gravity axis ``"x"``, ``"y"`` or ``"z"``.
+        strength (float): Gravitational acceleration in metres per second
+            squared (SI); defaults to standard gravity.
+        reverse (bool): Reverse the gravity direction along the axis.
+        study_name (str): Target study name; empty targets the active study.
+    """
+
+    axis: str = "y"
+    strength: float = 9.80665
+    reverse: bool = True
+    study_name: str = ""
+
+
+class MotionTimeParameters(BaseModel):
+    """Parameters for positioning a motion study at a point in time.
+
+    Attributes:
+        time (float): Time in seconds along the (calculated) study.
+        study_name (str): Target study name; empty targets the active study.
+    """
+
+    time: float
+    study_name: str = ""
+
+
+class MotionExportParameters(BaseModel):
+    """Parameters for exporting a motion study animation to AVI.
+
+    Attributes:
+        file_path (str): Output ``.avi`` path.
+        study_name (str): Target study name; empty targets the active study.
+    """
+
+    file_path: str
+    study_name: str = ""
+
+
 class MassProperties(BaseModel):
     """Mass properties information.
 
@@ -2135,6 +2232,125 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="suppress_mate is not implemented by this adapter",
+        )
+
+    # Motion-study Operations
+    async def create_motion_study(
+        self, params: MotionStudyParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Create (or re-select) a motion study and set its analysis type.
+
+        Args:
+            params (MotionStudyParameters): Study name, type and duration.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Study name/type or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="create_motion_study is not implemented by this adapter",
+        )
+
+    async def ensure_motion_addin(self) -> AdapterResult[dict[str, Any]]:
+        """Ensure the SOLIDWORKS Motion add-in is loaded.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Add-in load state or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="ensure_motion_addin is not implemented by this adapter",
+        )
+
+    async def add_motor(
+        self, params: MotionMotorParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Add a rotary or linear constant-speed motor to a motion study.
+
+        Args:
+            params (MotionMotorParameters): Motor type, entity, speed.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created motor feature or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="add_motor is not implemented by this adapter",
+        )
+
+    async def add_gravity(
+        self, params: MotionGravityParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Add gravity to a motion study.
+
+        Args:
+            params (MotionGravityParameters): Axis, strength, direction.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created gravity feature or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="add_gravity is not implemented by this adapter",
+        )
+
+    async def calculate_motion(
+        self, params: MotionStudyRefParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Solve a motion study.
+
+        Args:
+            params (MotionStudyRefParameters): Target study name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Calculation result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="calculate_motion is not implemented by this adapter",
+        )
+
+    async def set_motion_time(
+        self, params: MotionTimeParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Position a calculated motion study at a point in time.
+
+        Args:
+            params (MotionTimeParameters): Time in seconds and study name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Applied time or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="set_motion_time is not implemented by this adapter",
+        )
+
+    async def export_motion_avi(
+        self, params: MotionExportParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Export a motion study animation to an AVI file.
+
+        Args:
+            params (MotionExportParameters): Output path and study name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Output path or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="export_motion_avi is not implemented by this adapter",
+        )
+
+    async def list_motion_studies(self) -> AdapterResult[list[dict[str, Any]]]:
+        """List the motion studies of the active document.
+
+        Returns:
+            AdapterResult[list[dict[str, Any]]]: One entry per study or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="list_motion_studies is not implemented by this adapter",
         )
 
     @abstractmethod

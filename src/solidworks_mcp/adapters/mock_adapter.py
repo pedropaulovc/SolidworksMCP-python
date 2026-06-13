@@ -43,6 +43,12 @@ from .base import (
     MateRefParameters,
     MeasureParameters,
     MirrorFeatureParameters,
+    MotionExportParameters,
+    MotionGravityParameters,
+    MotionMotorParameters,
+    MotionStudyParameters,
+    MotionStudyRefParameters,
+    MotionTimeParameters,
     MoveComponentParameters,
     ReplaceComponentParameters,
     RevolveParameters,
@@ -149,6 +155,11 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         # holds mate_type/alignment/entities/suppressed state so the
         # Phase 7B mate tools behave statefully in mock mode.
         self._mates: dict[str, dict[str, Any]] = {}
+        # Motion-study state: each entry keeps study_type/duration plus the
+        # motors and gravity added to it, so the motion tools behave
+        # statefully in mock mode and get_motion_results can fake a trace.
+        self._motion_studies: dict[str, dict[str, Any]] = {}
+        self._active_motion_study = ""
         self._operation_count = 0
 
         # Configurable simulation delays (in seconds)
@@ -1940,6 +1951,266 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             data={"name": name, "suppressed": params.suppress},
             execution_time=self._delays["model_operation"] / 2,
         )
+
+    _MOTION_STUDY_TYPES = ("animation", "physical_simulation", "motion_analysis")
+    _MOTION_MOTOR_TYPES = ("rotary", "linear")
+    _MOTION_GRAVITY_AXES = ("x", "y", "z")
+
+    def _resolve_motion_study(
+        self, name: str
+    ) -> tuple[str, dict[str, Any]] | AdapterResult[dict[str, Any]]:
+        """Resolve a study by name (or the active one) for mock motion ops."""
+        target = name or self._active_motion_study
+        if not target:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="No motion study specified and none is active; "
+                "create_motion_study first",
+            )
+        study = self._motion_studies.get(target)
+        if study is None:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Motion study {target!r} not found",
+            )
+        self._active_motion_study = target
+        return target, study
+
+    async def create_motion_study(
+        self, params: MotionStudyParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock creating (or re-selecting) a motion study.
+
+        Args:
+            params (MotionStudyParameters): Study name, type and duration.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Study name/type/duration.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if params.study_type not in self._MOTION_STUDY_TYPES:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown study_type: {params.study_type!r} "
+                f"(expected one of {sorted(self._MOTION_STUDY_TYPES)})",
+            )
+        if params.name and params.name not in self._motion_studies:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Motion study {params.name!r} not found",
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        name = params.name or f"Motion Study {len(self._motion_studies) + 1}"
+        study = self._motion_studies.setdefault(
+            name, {"motors": [], "gravity": None, "calculated": False}
+        )
+        study["study_type"] = params.study_type
+        study["duration"] = float(params.duration)
+        if params.activate:
+            self._active_motion_study = name
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": name,
+                "study_type": params.study_type,
+                "duration": float(params.duration),
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def ensure_motion_addin(self) -> AdapterResult[dict[str, Any]]:
+        """Mock loading the SOLIDWORKS Motion add-in (always available)."""
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"load_addin_status": 0},
+        )
+
+    async def add_motor(
+        self, params: MotionMotorParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock adding a rotary/linear constant-speed motor to a study.
+
+        Args:
+            params (MotionMotorParameters): Motor type, entity, speed.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created motor feature.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if params.motor_type not in self._MOTION_MOTOR_TYPES:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown motor_type: {params.motor_type!r} "
+                f"(expected one of {sorted(self._MOTION_MOTOR_TYPES)})",
+            )
+        resolved = self._resolve_motion_study(params.study_name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        _, study = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        name = f"{params.motor_type.title()}Motor{len(study['motors']) + 1}"
+        study["motors"].append(
+            {"name": name, "motor_type": params.motor_type, "speed": params.speed}
+        )
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": name,
+                "motor_type": params.motor_type,
+                "speed": float(params.speed),
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def add_gravity(
+        self, params: MotionGravityParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock adding gravity to a motion study.
+
+        Args:
+            params (MotionGravityParameters): Axis, strength, direction.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Created gravity feature.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if params.axis not in self._MOTION_GRAVITY_AXES:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown axis: {params.axis!r} "
+                f"(expected one of {sorted(self._MOTION_GRAVITY_AXES)})",
+            )
+        resolved = self._resolve_motion_study(params.study_name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        _, study = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        study["gravity"] = {"axis": params.axis, "strength": params.strength}
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={
+                "name": "Gravity1",
+                "axis": params.axis,
+                "strength": float(params.strength),
+            },
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def calculate_motion(
+        self, params: MotionStudyRefParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock solving a motion study.
+
+        Args:
+            params (MotionStudyRefParameters): Target study name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Calculation result.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        resolved = self._resolve_motion_study(params.name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, study = resolved
+
+        await asyncio.sleep(self._delays["model_operation"])
+        self._operation_count += 1
+        study["calculated"] = True
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": name, "calculated": True},
+            execution_time=self._delays["model_operation"],
+        )
+
+    async def set_motion_time(
+        self, params: MotionTimeParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock scrubbing a calculated motion study to a point in time.
+
+        Args:
+            params (MotionTimeParameters): Time in seconds and study name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Applied time.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        resolved = self._resolve_motion_study(params.study_name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, _ = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": name, "time": float(params.time)},
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def export_motion_avi(
+        self, params: MotionExportParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock exporting a motion study animation to AVI.
+
+        Args:
+            params (MotionExportParameters): Output path and study name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Output path.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        resolved = self._resolve_motion_study(params.study_name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, _ = resolved
+
+        await asyncio.sleep(self._delays["model_operation"])
+        self._operation_count += 1
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": name, "file_path": params.file_path},
+            execution_time=self._delays["model_operation"],
+        )
+
+    async def list_motion_studies(self) -> AdapterResult[list[dict[str, Any]]]:
+        """Mock listing the active document's motion studies.
+
+        Returns:
+            AdapterResult[list[dict[str, Any]]]: Name/type per study.
+        """
+        if not self._current_model:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        studies = [
+            {"name": name, "study_type": study.get("study_type")}
+            for name, study in self._motion_studies.items()
+        ]
+        return AdapterResult(status=AdapterResultStatus.SUCCESS, data=studies)
 
     async def create_sketch(self, plane: str) -> AdapterResult[dict[str, Any]]:  # type: ignore[override]
         """Mock creating a sketch.
