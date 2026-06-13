@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 
@@ -398,23 +399,59 @@ async def test_set_motion_time_records_time():
 
 
 @pytest.mark.asyncio
-async def test_export_motion_avi_success_and_failure():
+async def test_export_motion_video_success(tmp_path, monkeypatch):
+    import solidworks_mcp.adapters.solidworks.motion as motion
+
+    # Make the writer "finish" instantly and have SaveToAVI drop a real file.
+    monkeypatch.setattr(motion, "_VIDEO_POLL_INTERVAL", 0.0)
+    monkeypatch.setattr(motion, "_VIDEO_STABLE_POLLS", 1)
+
+    def _fake_save(self, path, params):
+        Path(path).write_bytes(b"FAKE-H264-DATA")
+        self.saved_avi = (path, params)
+        return self.save_avi_result
+
+    monkeypatch.setattr(_FakeStudy, "SaveToAVI", _fake_save)
+
     study = _FakeStudy()
     adapter, manager = _adapter_with_study(study)
     adapter._active_motion_study = study.Name
-    ok = await adapter.export_motion_avi(
-        MotionExportParameters(file_path="C:/out/op.avi")
-    )
+    out = tmp_path / "op.mp4"
+    ok = await adapter.export_motion_video(MotionExportParameters(file_path=str(out)))
     assert ok.status is AdapterResultStatus.SUCCESS
-    assert study.saved_avi[0] == "C:/out/op.avi"
+    assert ok.data["file_path"] == str(out)
+    assert ok.data["bytes"] > 0
     assert manager.avi_params_made == 1
+    assert out.exists()
 
-    study.save_avi_result = False
-    fail = await adapter.export_motion_avi(
+
+@pytest.mark.asyncio
+async def test_export_motion_video_rejects_avi():
+    study = _FakeStudy()
+    adapter, _ = _adapter_with_study(study)
+    adapter._active_motion_study = study.Name
+    res = await adapter.export_motion_video(
         MotionExportParameters(file_path="C:/out/op.avi")
     )
-    assert fail.status is AdapterResultStatus.ERROR
-    assert "SaveToAVI failed" in fail.error
+    assert res.status is AdapterResultStatus.ERROR
+    assert ".avi" in res.error and "headlessly" in res.error
+
+
+@pytest.mark.asyncio
+async def test_export_motion_video_save_returns_false(tmp_path, monkeypatch):
+    import solidworks_mcp.adapters.solidworks.motion as motion
+
+    monkeypatch.setattr(motion, "_VIDEO_POLL_INTERVAL", 0.0)
+    monkeypatch.setattr(motion, "_VIDEO_STABLE_POLLS", 1)
+    study = _FakeStudy()
+    study.save_avi_result = False
+    adapter, _ = _adapter_with_study(study)
+    adapter._active_motion_study = study.Name
+    res = await adapter.export_motion_video(
+        MotionExportParameters(file_path=str(tmp_path / "op.mp4"))
+    )
+    assert res.status is AdapterResultStatus.ERROR
+    assert "SaveToAVI returned false" in res.error
 
 
 @pytest.mark.asyncio

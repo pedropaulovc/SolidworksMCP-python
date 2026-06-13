@@ -12,6 +12,7 @@ import random
 import uuid
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from ..exceptions import SolidWorksOperationError
@@ -2171,20 +2172,29 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             execution_time=self._delays["model_operation"] / 2,
         )
 
-    async def export_motion_avi(
+    async def export_motion_video(
         self, params: MotionExportParameters
     ) -> AdapterResult[dict[str, Any]]:
-        """Mock exporting a motion study animation to AVI.
+        """Mock exporting a motion study animation to a video file.
+
+        Mirrors the real adapter: the path suffix must be ``.mp4``/``.mkv``/
+        ``.flv`` (``.avi`` is not available headlessly).
 
         Args:
             params (MotionExportParameters): Output path and study name.
 
         Returns:
-            AdapterResult[dict[str, Any]]: Output path.
+            AdapterResult[dict[str, Any]]: Output path and a fake byte size.
         """
         if not self._current_model:
             return AdapterResult(
                 status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        suffix = Path(params.file_path).suffix.lower()
+        if suffix not in (".mp4", ".mkv", ".flv"):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unsupported video format {suffix!r}; use .mp4, .mkv or .flv",
             )
         resolved = self._resolve_motion_study(params.study_name)
         if isinstance(resolved, AdapterResult):
@@ -2195,7 +2205,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         self._operation_count += 1
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
-            data={"name": name, "file_path": params.file_path},
+            data={"name": name, "file_path": params.file_path, "bytes": 41674},
             execution_time=self._delays["model_operation"],
         )
 

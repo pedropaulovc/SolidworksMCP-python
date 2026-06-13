@@ -211,18 +211,24 @@ class SetMotionTimeInput(BaseModel):
     )
 
 
-class ExportMotionAviInput(BaseModel):
-    """Input schema for exporting a motion study animation to AVI.
+class ExportMotionVideoInput(BaseModel):
+    """Input schema for exporting a motion study animation to a video file.
 
     Attributes:
-        file_path (str): Output ``.avi`` path.
+        file_path (str): Output video path; the suffix picks the container —
+            ``.mp4`` (recommended), ``.mkv`` or ``.flv``. ``.avi`` is not
+            available headlessly.
         study_name (str): Target study name; empty targets the active study.
+        frames_per_second (float): Animation frame rate written to the file.
     """
 
-    file_path: str = Field(description="Output .avi path")
+    file_path: str = Field(description="Output video path (.mp4/.mkv/.flv)")
     study_name: str = Field(
         default="",
         description="Target study name; empty targets the active study",
+    )
+    frames_per_second: float = Field(
+        default=25.0, description="Animation frame rate written to the file"
     )
 
 
@@ -608,44 +614,49 @@ async def register_motion_tools(
             return {"status": "error", "message": f"Unexpected error: {str(e)}"}
 
     @mcp.tool()
-    async def export_motion_avi(input_data: ExportMotionAviInput) -> dict[str, Any]:
-        """Export a motion study animation to an AVI file.
+    async def export_motion_video(input_data: ExportMotionVideoInput) -> dict[str, Any]:
+        """Export a motion study animation to a single-file H.264 video.
+
+        The container follows the path suffix (``.mp4``/``.mkv``/``.flv``).
+        ``.avi`` is not available headlessly — SOLIDWORKS only writes it via
+        the interactive Video-Compression codec dialog.
 
         Args:
-            input_data (ExportMotionAviInput): Output path and study name.
+            input_data (ExportMotionVideoInput): Output path and study name.
 
         Returns:
             dict[str, Any]: Status and output path.
 
         Example:
             ```python
-            result = await export_motion_avi({
-                "file_path": "C:/out/operation.avi",
+            result = await export_motion_video({
+                "file_path": "C:/out/operation.mp4",
             })
             ```
         """
         try:
-            input_data = _normalize_input(input_data, ExportMotionAviInput)
-            result = await adapter.export_motion_avi(
+            input_data = _normalize_input(input_data, ExportMotionVideoInput)
+            result = await adapter.export_motion_video(
                 MotionExportParameters(
                     file_path=input_data.file_path,
                     study_name=input_data.study_name,
+                    frames_per_second=input_data.frames_per_second,
                 )
             )
             if result.is_success:
                 payload = result.data or {}
                 return {
                     "status": "success",
-                    "message": f"Exported motion AVI: {payload.get('file_path')}",
+                    "message": f"Exported motion video: {payload.get('file_path')}",
                     "result": payload,
                     "execution_time": result.execution_time,
                 }
             return {
                 "status": "error",
-                "message": f"Failed to export motion AVI: {result.error}",
+                "message": f"Failed to export motion video: {result.error}",
             }
         except Exception as e:
-            logger.error(f"Error in export_motion_avi tool: {e}")
+            logger.error(f"Error in export_motion_video tool: {e}")
             return {"status": "error", "message": f"Unexpected error: {str(e)}"}
 
     @mcp.tool()

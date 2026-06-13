@@ -32,9 +32,12 @@ instead of mis-resolving them as properties.
 from __future__ import annotations
 
 import math
+import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+from .. import sw_type_info
 from ..base import (
     AdapterResult,
     AdapterResultStatus,
@@ -53,9 +56,13 @@ from .assembly import _select_mate_entity
 try:
     import pythoncom  # noqa: F401
     import win32com.client  # noqa: F401
+    import win32con  # noqa: F401
+    import win32gui  # noqa: F401
 except ImportError:  # pragma: no cover
     pythoncom = SimpleNamespace()
     win32com = SimpleNamespace(client=SimpleNamespace())
+    win32con = SimpleNamespace()
+    win32gui = SimpleNamespace()
 
 # swMotionStudyType_e — defined only in the .NET interop, absent from the
 # COM type library, so the values cannot be flagged/resolved at runtime.
@@ -97,11 +104,31 @@ _FORCE_ACTION_AND_REACTION = 1
 # swSimulationGravityAxis_e
 _GRAVITY_AXES = {"x": 0, "y": 1, "z": 2}
 
+# IAVIParameter.OutputType (swAnimationOutputType_e), keyed by file extension.
+#
+# Direct .avi (value 1) is NOT automatable: that path opens the Windows
+# Video-Compression codec dialog, which has no API, so SaveToAVI returns false
+# headlessly (works from the UI only because the user picks a codec there). The
+# modern single-file video formats encode internally with no dialog and write a
+# real, compact H.264 file headlessly — verified live on SW 2026: .mp4/.mkv/.flv
+# all produce a valid ~40 KB H.264 video. .mp4 is the default/recommended.
+_VIDEO_OUTPUT_TYPES = {".mp4": 7, ".mkv": 8, ".flv": 9}
+# IAVIParameter.RendererType — swRendererType_Solidworks_Screen grabs the
+# graphics framebuffer. The PhotoView/ray-trace renderer (1) needs an active
+# render engine and makes the save return false when one isn't loaded.
+_AVI_RENDERER_SCREEN = 0
+# SaveToAVI returns true immediately and finishes writing the file on a
+# background thread; poll until its size stops growing before returning.
+_VIDEO_POLL_INTERVAL = 0.5
+_VIDEO_STABLE_POLLS = 4
+_VIDEO_WAIT_TIMEOUT = 300.0
+
 # Zero-argument Motion methods pywin32 must invoke (not read as properties).
 _MOTION_METHODS = (
     "CreateMotionStudy",
     "GetMotionStudy",
     "GetMotionStudyNames",
+    "CreateAVIParameter",
     "ActivateMotionStudy",
     "Activate",
     "Calculate",
@@ -113,6 +140,7 @@ _MOTION_METHODS = (
     "ConstantSpeedMotor",
     "SaveToAVI",
     "SetEndPoints",
+    "Stop",
 )
 
 
@@ -147,10 +175,10 @@ class SolidWorksMotionMixin:
     ) -> AdapterResult[dict[str, Any]]:
         return _set_motion_time_impl(self, params)
 
-    async def export_motion_avi(
+    async def export_motion_video(
         self, params: MotionExportParameters
     ) -> AdapterResult[dict[str, Any]]:
-        return _export_motion_avi_impl(self, params)
+        return _export_motion_video_impl(self, params)
 
     async def list_motion_studies(self) -> AdapterResult[list[dict[str, Any]]]:
         return _list_motion_studies_impl(self)
@@ -172,11 +200,20 @@ class SolidWorksMotionMixin:
 
 
 def _flag_motion_methods(obj: Any) -> None:
-    """Flag the known zero-argument Motion methods on a dispatch.
+    """Flag the known Motion methods on a dispatch so pywin32 invokes them.
 
-    ``_FlagAsMethod`` only records intent; the ``GetIDsOfNames`` round-trip
-    happens at call time, so flagging a name the object does not expose is
-    harmless here (all names belong to the Motion interfaces).
+    Several Motion methods (``Calculate``, ``Activate`` …) are dual-marked
+    and pywin32 resolves them as *property gets* — ``study.Calculate()`` then
+    fails with ``TypeError: 'bool' object is not callable`` (the propget runs
+    the method, returns its bool, and Python tries to call the bool).
+    ``_FlagAsMethod`` forces method dispatch.
+
+    Each name is flagged **individually**: ``_FlagAsMethod`` does a
+    ``GetIDsOfNames`` round-trip per name, so passing a name the object does
+    not expose (e.g. a manager-only name to a study dispatch) raises and would
+    abort a single multi-name call, leaving the valid names — including
+    ``Calculate`` — unflagged. Per-name try/except mirrors
+    ``sw_type_info.flag_methods``.
 
     Args:
         obj: A Motion COM dispatch (manager or study).
@@ -184,14 +221,21 @@ def _flag_motion_methods(obj: Any) -> None:
     flag = getattr(obj, "_FlagAsMethod", None)
     if flag is None:
         return
-    try:
-        flag(*_MOTION_METHODS)
-    except Exception:  # pragma: no cover - defensive
-        pass
+    for name in _MOTION_METHODS:
+        try:
+            flag(name)
+        except Exception:  # noqa: BLE001 - name not on this dispatch; skip
+            pass
 
 
 def _motion_manager(adapter: Any) -> Any:
     """Return the active document's motion-study manager (or ``None``).
+
+    ``IModelDocExtension::GetMotionStudyManager`` is present in the type
+    library and vtable but absent from SolidWorks's ``IDispatch`` name table,
+    so a by-name (late-bound) call raises ``com_error 'Member not found'``.
+    The Extension is wrapped in its early-bound interface class
+    (:func:`sw_type_info.early_bound`) so the call dispatches by dispid.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -199,9 +243,11 @@ def _motion_manager(adapter: Any) -> Any:
     Returns:
         Any: ``IMotionStudyManager`` dispatch or ``None``.
     """
-    mgr = adapter._attempt(
-        lambda: adapter.currentModel.Extension.GetMotionStudyManager(), default=None
-    )
+    ext = adapter._attempt(lambda: adapter.currentModel.Extension, default=None)
+    if ext is None:
+        return None
+    ext = sw_type_info.early_bound(ext, "IModelDocExtension")
+    mgr = adapter._attempt(lambda: ext.GetMotionStudyManager(), default=None)
     if mgr is not None:
         _flag_motion_methods(mgr)
     return mgr
@@ -645,37 +691,135 @@ def _set_motion_time_impl(
     )
 
 
-def _export_motion_avi_impl(
+def _restore_sw_window(adapter: Any) -> None:
+    """Un-minimise the SOLIDWORKS frame so the screen renderer has a viewport.
+
+    ``RendererType_Solidworks_Screen`` grabs the OpenGL framebuffer; that grab
+    yields blank/garbage frames when the window is minimised. Restoring (not
+    stealing foreground) is enough. Handle obtained from
+    ``ISldWorks::Frame::GetHWndx64`` — no title guessing. Best-effort: any
+    failure is swallowed so export still attempts the render.
+    """
+    if not hasattr(win32gui, "ShowWindow"):
+        return
+    try:
+        frame = adapter.swApp.Frame()
+        for name in ("GetHWndx64", "GetHWnd"):
+            try:
+                frame._FlagAsMethod(name)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            hwnd = int(frame.GetHWndx64())
+        except Exception:  # noqa: BLE001
+            hwnd = int(frame.GetHWnd())
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    except Exception:  # noqa: BLE001 - rendering is still worth attempting
+        pass
+
+
+def _wait_for_video_file(out_path: Path) -> int:
+    """Block until the video file stops growing, then return its size in bytes.
+
+    SaveToAVI returns true immediately and finishes encoding on a background
+    thread, so polling stops once the size holds steady across several polls
+    (or the timeout hits). Returns 0 if nothing was written.
+    """
+    stable = 0
+    last = -1
+    deadline = time.monotonic() + _VIDEO_WAIT_TIMEOUT
+    while time.monotonic() < deadline:
+        size = out_path.stat().st_size if out_path.exists() else 0
+        if size > 0 and size == last:
+            stable += 1
+            if stable >= _VIDEO_STABLE_POLLS:
+                break
+        else:
+            stable = 0
+        last = size
+        time.sleep(_VIDEO_POLL_INTERVAL)
+    return out_path.stat().st_size if out_path.exists() else 0
+
+
+def _export_motion_video_impl(
     adapter: Any, params: MotionExportParameters
 ) -> AdapterResult[dict[str, Any]]:
-    """Export a motion study animation to an AVI file.
+    """Export a calculated motion study to a single-file H.264 video.
+
+    The container is inferred from ``params.file_path``'s suffix:
+    ``.mp4`` (recommended), ``.mkv`` or ``.flv``. Legacy ``.avi`` is rejected
+    because SOLIDWORKS only writes ``.avi`` through the interactive
+    Video-Compression codec dialog (no API), so it can't be produced
+    headlessly; the modern formats encode internally with no dialog.
 
     Args:
         adapter: A fully connected ``PyWin32Adapter``.
-        params: Output path and target study name.
+        params: Output path (extension picks the container), study name and
+            frame rate.
 
     Returns:
-        AdapterResult[dict[str, Any]]: Output path or error.
+        AdapterResult[dict[str, Any]]: Output path and byte size, or error.
     """
     if not adapter.currentModel:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
 
     def _operation() -> dict[str, Any]:
+        out_path = Path(params.file_path)
+        output_type = _VIDEO_OUTPUT_TYPES.get(out_path.suffix.lower())
+        if output_type is None:
+            supported = ", ".join(sorted(_VIDEO_OUTPUT_TYPES))
+            extra = (
+                " — .avi can only be written via the interactive SOLIDWORKS "
+                "Video-Compression codec dialog, so it is not available headlessly"
+                if out_path.suffix.lower() == ".avi"
+                else ""
+            )
+            raise Exception(
+                f"Unsupported video format {out_path.suffix!r}; "
+                f"use one of: {supported}{extra}"
+            )
         mgr = _motion_manager(adapter)
         if mgr is None:
             raise Exception("MotionManager unavailable")
         study = _resolve_study(adapter, mgr, params.study_name)
         avi_params = adapter._attempt(lambda: mgr.CreateAVIParameter(), default=None)
+        if avi_params is None:
+            raise Exception("CreateAVIParameter returned null")
+        adapter._attempt(lambda: setattr(avi_params, "OutputType", output_type))
+        adapter._attempt(
+            lambda: setattr(
+                avi_params, "FramePerSecond", float(params.frames_per_second)
+            )
+        )
+        adapter._attempt(lambda: setattr(avi_params, "SaveEntireAnimation", True))
+        adapter._attempt(
+            lambda: setattr(avi_params, "RendererType", _AVI_RENDERER_SCREEN)
+        )
+        _restore_sw_window(adapter)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if out_path.exists():
+            out_path.unlink()
+        # Stop playback first or the save races the animator and returns false.
+        adapter._attempt(lambda: study.Stop())
         ok = adapter._attempt(
-            lambda: study.SaveToAVI(params.file_path, avi_params), default=False
+            lambda: study.SaveToAVI(str(out_path), avi_params), default=False
         )
         if not ok:
-            raise Exception(f"SaveToAVI failed for {params.file_path!r}")
-        return {"name": adapter._active_motion_study, "file_path": params.file_path}
+            raise Exception(f"SaveToAVI returned false for {out_path}")
+        size = _wait_for_video_file(out_path)
+        if size == 0:
+            raise Exception(
+                f"SaveToAVI reported success but wrote no data to {out_path}"
+            )
+        return {
+            "name": adapter._active_motion_study,
+            "file_path": str(out_path),
+            "bytes": size,
+        }
 
     return cast(
         AdapterResult[dict[str, Any]],
-        adapter._handle_com_operation("export_motion_avi", _operation),
+        adapter._handle_com_operation("export_motion_video", _operation),
     )
 
 
