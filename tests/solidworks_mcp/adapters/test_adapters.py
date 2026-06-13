@@ -1077,6 +1077,39 @@ class TestPyWin32AdapterBranches:
         assert feature_manager.FeatureCut3.called
 
     @pytest.mark.asyncio
+    async def test_revolve_360_passes_exact_two_pi(self, monkeypatch):
+        """A 360 revolve must pass EXACTLY 2*pi rad as Dir1Angle.
+
+        Regression: a truncated pi literal (3.14159) made 360 deg come out as
+        6.283180 rad -- 5e-6 short of 2*pi. SolidWorks then treats it as a
+        near-360 blind revolve and leaves the start/end cap faces un-merged,
+        so a revolved sphere renders/exports as a flat half-disc even though
+        its volume still reads correct. The angle must be full-precision.
+        """
+        adapter = self._build_adapter(monkeypatch)
+        feature_obj = SimpleNamespace(Name="Revolve1", GetID=lambda: 1)
+        feature_manager = SimpleNamespace(
+            FeatureRevolve2=Mock(return_value=feature_obj),
+        )
+        adapter.currentModel = SimpleNamespace(FeatureManager=feature_manager)
+
+        result = await adapter.create_revolve(
+            SimpleNamespace(
+                angle=360.0,
+                reverse_direction=False,
+                both_directions=False,
+                thin_feature=False,
+                thin_thickness=None,
+                merge_result=True,
+            )
+        )
+        assert result.is_success
+        # Dir1Angle is the 9th positional arg of FeatureRevolve2.
+        dir1_angle = feature_manager.FeatureRevolve2.call_args.args[8]
+        assert dir1_angle == pytest.approx(2.0 * math.pi, abs=1e-12)
+        assert dir1_angle != 360.0 * 3.14159 / 180.0  # the old truncated bug
+
+    @pytest.mark.asyncio
     async def test_both_directions_maps_to_midplane_end_condition(self, monkeypatch):
         """both_directions=True must pass swEndCondMidPlane as T1 for solid extrusions and cuts."""
         adapter = self._build_adapter(monkeypatch)
