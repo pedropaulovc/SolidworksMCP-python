@@ -57,6 +57,7 @@ from .base import (
     ReplaceComponentParameters,
     RevolveParameters,
     RotateComponentParameters,
+    SetComponentSolvingParameters,
     SetGlobalVariableParameters,
     ShellParameters,
     SolidWorksAdapter,
@@ -159,6 +160,10 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         # holds mate_type/alignment/entities/suppressed state so the
         # Phase 7B mate tools behave statefully in mock mode.
         self._mates: dict[str, dict[str, Any]] = {}
+        # Suppression state of mates that live inside a subassembly document,
+        # keyed by (component, mate_name) — the mock does not model sub docs,
+        # so these are tracked separately from top-level mates.
+        self._sub_suppressed_mates: dict[tuple[str, str], bool] = {}
         # Motion-study state: each entry keeps study_type/duration plus the
         # motors and gravity added to it, so the motion tools behave
         # statefully in mock mode and get_motion_results can fake a trace.
@@ -1942,6 +1947,25 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         Returns:
             AdapterResult[dict[str, Any]]: Resulting suppression state.
         """
+        # A mate inside a subassembly lives in that sub's document, which the
+        # mock does not model — echo success keyed by component so callers can
+        # exercise the flexible-sub suppression path.
+        if params.component:
+            await asyncio.sleep(self._delays["model_operation"] / 2)
+            self._operation_count += 1
+            self._sub_suppressed_mates[(params.component, params.name)] = (
+                params.suppress
+            )
+            return AdapterResult(
+                status=AdapterResultStatus.SUCCESS,
+                data={
+                    "name": params.name,
+                    "suppressed": params.suppress,
+                    "component": params.component,
+                },
+                execution_time=self._delays["model_operation"] / 2,
+            )
+
         resolved = self._mate_or_error(params.name)
         if isinstance(resolved, AdapterResult):
             return resolved
@@ -1952,7 +1976,46 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         mate["suppressed"] = params.suppress
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
-            data={"name": name, "suppressed": params.suppress},
+            data={"name": name, "suppressed": params.suppress, "component": ""},
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def set_component_solving(
+        self, params: SetComponentSolvingParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock setting a component's solve mode (rigid or flexible).
+
+        Args:
+            params (SetComponentSolvingParameters): Component name and mode.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Resulting solve mode, or an error
+            when the mode is unknown, the component is missing, or a fixed
+            component is asked to go flexible (mirrors the live refusal).
+        """
+        if params.solving not in ("rigid", "flexible"):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown solving mode: {params.solving!r} "
+                "(expected 'rigid' or 'flexible')",
+            )
+        resolved = self._component_or_error(params.name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, component = resolved
+        if params.solving == "flexible" and component.get("fixed"):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Solve mode did not take for {name!r}: a fixed "
+                "subassembly cannot be flexible — float it first",
+            )
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        component["solving"] = params.solving
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": name, "solving": params.solving},
             execution_time=self._delays["model_operation"] / 2,
         )
 

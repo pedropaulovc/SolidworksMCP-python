@@ -340,7 +340,61 @@ async def test_add_motor_selection_failure_errors():
         )
     )
     assert result.status is AdapterResultStatus.ERROR
-    assert "Failed to select motor entity" in result.error
+    assert "Failed to resolve motor entity" in result.error
+
+
+@pytest.mark.asyncio
+async def test_add_motor_by_component_uses_corresponding_face(monkeypatch):
+    study = _FakeStudy()
+    adapter, _ = _adapter_with_study(study, selected=object())
+    adapter._active_motion_study = study.Name
+    import solidworks_mcp.adapters.solidworks.motion as motion
+
+    sentinel = object()
+    seen: dict[str, object] = {}
+
+    def _fake_face(_adapter, component, point=None):
+        seen["component"] = component
+        seen["point"] = point
+        return sentinel
+
+    monkeypatch.setattr(motion, "_component_cylindrical_face", _fake_face)
+
+    result = await adapter.add_motor(
+        MotionMotorParameters(
+            motor_type="rotary",
+            entity=MateEntityRef(
+                entity_type="FACE", component="drive-train-1/crankshaft-1"
+            ),
+            speed=30.0,
+        )
+    )
+    assert result.status is AdapterResultStatus.SUCCESS
+    assert seen["component"] == "drive-train-1/crankshaft-1"
+    # The corresponding entity is assigned directly as the motor reference.
+    assert study.last_definition.Location is sentinel
+    assert study.last_definition.DirectionReference is sentinel
+
+
+@pytest.mark.asyncio
+async def test_add_motor_by_component_not_found_errors(monkeypatch):
+    study = _FakeStudy()
+    adapter, _ = _adapter_with_study(study, selected=object())
+    adapter._active_motion_study = study.Name
+    import solidworks_mcp.adapters.solidworks.motion as motion
+
+    monkeypatch.setattr(
+        motion, "_component_cylindrical_face", lambda *a, **k: None
+    )
+    result = await adapter.add_motor(
+        MotionMotorParameters(
+            motor_type="rotary",
+            entity=MateEntityRef(entity_type="FACE", component="ghost-1/part-1"),
+        )
+    )
+    assert result.status is AdapterResultStatus.ERROR
+    assert "Failed to resolve motor entity" in result.error
+    assert "ghost-1/part-1" in result.error
 
 
 @pytest.mark.asyncio

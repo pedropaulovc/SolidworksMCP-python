@@ -40,6 +40,7 @@ from ..base import (
     MoveComponentParameters,
     ReplaceComponentParameters,
     RotateComponentParameters,
+    SetComponentSolvingParameters,
     SolidWorksFeature,
     SuppressMateParameters,
 )
@@ -112,6 +113,16 @@ _SUPPRESS_FEATURE = 0
 _UNSUPPRESS_FEATURE = 1
 _ALL_CONFIGURATIONS = 2
 
+# IAssemblyDoc::CompConfigProperties5 — solve mode arguments.
+# inComponentResolveStatus: swComponentResolveStatus_e (2 = fully resolved).
+# inSolveMode: swComponentSolvingOption_e (0 = rigid, 1 = flexible).
+_COMP_FULLY_RESOLVED = 2
+_COMP_SOLVING = {"rigid": 0, "flexible": 1}
+# IComponent2::Solving readback (swComponentSolvingOption_e).
+_COMP_SOLVING_NAME = {0: "rigid", 1: "flexible"}
+# swSolidBodies for IPartDoc::GetBodies2.
+_SW_SOLID_BODY = 0
+
 
 class SolidWorksAssemblyMixin:
     """Expose SolidWorks assembly component methods via mixin-local helpers."""
@@ -178,6 +189,11 @@ class SolidWorksAssemblyMixin:
         self, params: SuppressMateParameters
     ) -> AdapterResult[dict[str, Any]]:
         return _suppress_mate_impl(self, params)
+
+    async def set_component_solving(
+        self, params: SetComponentSolvingParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        return _set_component_solving_impl(self, params)
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +384,11 @@ def _select_component(adapter: Any, name: str, mark: int, append: bool) -> bool:
 def _get_component(adapter: Any, name: str) -> Any:
     """Resolve an ``IComponent2`` via ``IAssemblyDoc::GetComponentByName``.
 
+    ``GetComponentByName`` resolves only top-level instances on some SolidWorks
+    versions (a nested ``"sub-1/part-1"`` path returns ``None``); the fallback
+    scans ``GetComponents(False)`` (all components, including those nested in
+    subassemblies) and matches on ``Name2``.
+
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
         name: Component name; any ``@assembly`` qualifier is stripped.
@@ -379,9 +400,30 @@ def _get_component(adapter: Any, name: str) -> Any:
     model = adapter.currentModel
     _flag_feature_methods(model, "IAssemblyDoc")
     component = adapter._attempt(lambda: model.GetComponentByName(bare), default=None)
+    if component is None:
+        component = _find_component_by_name2(adapter, bare)
     if component:
         _flag_feature_methods(component, "IComponent2")
     return component
+
+
+def _find_component_by_name2(adapter: Any, name2: str) -> Any:
+    """Find a component (including nested) by its full ``Name2`` path.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        name2: Full component path, e.g. ``"drive-train-1/crankshaft-1"``.
+
+    Returns:
+        Any: The matching ``IComponent2`` dispatch, or ``None``.
+    """
+    components = adapter._attempt(
+        lambda: adapter.currentModel.GetComponents(False), default=None
+    )
+    for component in components or []:
+        if str(_read_member(component, "Name2")) == name2:
+            return component
+    return None
 
 
 def _component_name(adapter: Any, component: Any, fallback: str) -> str:
@@ -1390,7 +1432,7 @@ def _select_mate_entity(adapter: Any, ref: Any, mark: int) -> bool:
     return False
 
 
-def _mate_group_subfeatures(adapter: Any) -> list[Any]:
+def _mate_group_subfeatures(adapter: Any, model: Any = None) -> list[Any]:
     """Collect the mate features inside the assembly's MateGroup folder(s).
 
     Mates do not appear in the top-level ``FirstFeature``/``GetNextFeature``
@@ -1399,13 +1441,17 @@ def _mate_group_subfeatures(adapter: Any) -> list[Any]:
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
+        model: Assembly model document to walk; defaults to
+            ``adapter.currentModel``. Pass a subassembly's model document to
+            reach mates that live inside a (flexible) subassembly.
 
     Returns:
         list[Any]: Mate feature dispatches in tree order.
     """
     mates: list[Any] = []
-    _flag_feature_methods(adapter.currentModel, "IModelDoc2")
-    feature = _read_member(adapter.currentModel, "FirstFeature")
+    model = model or adapter.currentModel
+    _flag_feature_methods(model, "IModelDoc2")
+    feature = _read_member(model, "FirstFeature")
     for _ in range(5000):
         if not feature:
             break
@@ -1422,7 +1468,7 @@ def _mate_group_subfeatures(adapter: Any) -> list[Any]:
     return mates
 
 
-def _mate_feature_by_name(adapter: Any, name: str) -> Any:
+def _mate_feature_by_name(adapter: Any, name: str, model: Any = None) -> Any:
     """Resolve a mate feature by its tree name.
 
     ``FeatureByName`` resolves mates too; the MateGroup walk is the
@@ -1431,17 +1477,19 @@ def _mate_feature_by_name(adapter: Any, name: str) -> Any:
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
         name: Mate feature name, e.g. ``"Coincident1"``.
+        model: Model document to search; defaults to ``adapter.currentModel``.
+            Pass a subassembly's model document to resolve a mate that lives
+            inside it (e.g. a driving-dimension mate in a flexible sub).
 
     Returns:
         Any: The mate feature dispatch or ``None``.
     """
-    feature = adapter._attempt(
-        lambda: adapter.currentModel.FeatureByName(name), default=None
-    )
+    model = model or adapter.currentModel
+    feature = adapter._attempt(lambda: model.FeatureByName(name), default=None)
     if feature:
         _flag_feature_methods(feature, "IFeature")
         return feature
-    for mate in _mate_group_subfeatures(adapter):
+    for mate in _mate_group_subfeatures(adapter, model):
         if str(_read_member(mate, "Name")) == name:
             return mate
     return None
@@ -1833,9 +1881,21 @@ def _suppress_mate_impl(
         return AdapterResult(status=AdapterResultStatus.ERROR, error="name is required")
 
     def _suppress_operation() -> dict[str, Any]:
-        feature = _mate_feature_by_name(adapter, params.name)
+        model = adapter.currentModel
+        if params.component:
+            comp = _get_component(adapter, params.component)
+            if comp is None:
+                raise Exception(f"Component not found: {params.component!r}")
+            model = adapter._attempt(lambda: comp.GetModelDoc2(), default=None)
+            if model is None:
+                raise Exception(
+                    f"Could not open the model document of {params.component!r}"
+                )
+
+        feature = _mate_feature_by_name(adapter, params.name, model)
         if feature is None:
-            raise Exception(f"Mate not found: {params.name!r}")
+            where = f" in {params.component!r}" if params.component else ""
+            raise Exception(f"Mate not found: {params.name!r}{where}")
 
         action = _SUPPRESS_FEATURE if params.suppress else _UNSUPPRESS_FEATURE
         adapter._attempt(
@@ -1850,9 +1910,159 @@ def _suppress_mate_impl(
         if resulting != params.suppress:
             state = "suppressed" if params.suppress else "unsuppressed"
             raise Exception(f"Mate {params.name!r} did not become {state}")
-        return {"name": params.name, "suppressed": resulting}
+        return {
+            "name": params.name,
+            "suppressed": resulting,
+            "component": params.component,
+        }
 
     return cast(
         AdapterResult[dict[str, Any]],
         adapter._handle_com_operation("suppress_mate", _suppress_operation),
     )
+
+
+def _set_component_solving_impl(
+    adapter: Any, params: SetComponentSolvingParameters
+) -> AdapterResult[dict[str, Any]]:
+    """Set a subassembly component's solve mode via ``CompConfigProperties5``.
+
+    Selects the component, applies the rigid/flexible solve mode across the
+    fully-resolved state, and verifies it by reading ``IComponent2::Solving``
+    back. A fixed subassembly silently refuses to go flexible — float and
+    ground it first; the readback then surfaces the refusal as an error.
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Component name and target solve mode.
+
+    Returns:
+        AdapterResult[dict[str, Any]]: Resulting solve mode or error.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    mode = _COMP_SOLVING.get(params.solving)
+    if mode is None:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown solving mode: {params.solving!r} "
+            f"(expected one of {sorted(_COMP_SOLVING)})",
+        )
+
+    def _operation() -> dict[str, Any]:
+        asm = adapter.currentModel
+        comp = _get_component(adapter, params.name)
+        if comp is None:
+            raise Exception(f"Component not found: {params.name!r}")
+        adapter._attempt(lambda: asm.ClearSelection2(True))
+        if not _select_component(adapter, params.name, 0, False):
+            raise Exception(f"Failed to select component {params.name!r}")
+        adapter._attempt(
+            lambda: asm.CompConfigProperties5(
+                _COMP_FULLY_RESOLVED, mode, True, False, "", False, False
+            )
+        )
+        adapter._attempt(lambda: asm.ClearSelection2(True))
+        solving = int(adapter._attempt(lambda: comp.Solving, default=-1))
+        if solving != mode:
+            raise Exception(
+                f"Solve mode did not take for {params.name!r}: requested "
+                f"{params.solving!r}, read back {_COMP_SOLVING_NAME.get(solving, solving)!r}"
+                " (a fixed subassembly cannot be flexible — float it first)"
+            )
+        return {"name": params.name, "solving": _COMP_SOLVING_NAME[solving]}
+
+    return cast(
+        AdapterResult[dict[str, Any]],
+        adapter._handle_com_operation("set_component_solving", _operation),
+    )
+
+
+def _component_cylindrical_face(
+    adapter: Any, name: str, point: list[float] | None = None
+) -> Any:
+    """Map a component's cylindrical face into assembly context.
+
+    Iterates the component part's solid bodies, gathers cylindrical faces, and
+    returns ``IComponent2::GetCorrespondingEntity`` of the chosen one — the
+    assembly-context entity a rotary motor (or any axis reference) can use,
+    robust for a part nested in a flexible subassembly. With ``point`` the face
+    whose axis passes nearest that assembly-space point (millimetres) is chosen;
+    otherwise the largest by area (the dominant journal/shaft).
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        name: Component name, e.g. ``"drive-train-1/crankshaft-1"``.
+        point: Optional ``[x, y, z]`` in millimetres to disambiguate.
+
+    Returns:
+        Any: The corresponding ``IEntity`` (a face) in assembly context, or
+        ``None`` when the component or a cylindrical face is not found.
+    """
+    comp = _get_component(adapter, name)
+    if comp is None:
+        return None
+    part = adapter._attempt(lambda: comp.GetModelDoc2(), default=None)
+    if part is None:
+        return None
+    bodies = adapter._attempt(
+        lambda: part.GetBodies2(_SW_SOLID_BODY, False), default=None
+    )
+    if bodies is None:
+        return None
+    if not isinstance(bodies, (list, tuple)):
+        bodies = [bodies]
+
+    target = [c / 1000.0 for c in point] if point else None
+    best_face = None
+    best_key = None
+    for body in bodies:
+        if body is None:
+            continue
+        _flag_feature_methods(body, "IBody2")
+        face = adapter._attempt(lambda b=body: b.GetFirstFace(), default=None)
+        for _ in range(100000):
+            if not face:
+                break
+            _flag_feature_methods(face, "IFace2")
+            surface = adapter._attempt(lambda f=face: f.GetSurface(), default=None)
+            if surface is not None:
+                _flag_feature_methods(surface, "ISurface")
+                if bool(adapter._attempt(lambda s=surface: s.IsCylinder(), default=False)):
+                    cyl = adapter._attempt(
+                        lambda s=surface: s.CylinderParams, default=None
+                    )
+                    area = float(adapter._attempt(lambda f=face: f.GetArea(), default=0.0))
+                    if cyl is not None:
+                        key = _cylinder_rank(cyl, area, target)
+                        if best_key is None or key > best_key:
+                            best_key, best_face = key, face
+            face = adapter._attempt(lambda f=face: f.GetNextFace(), default=None)
+    if best_face is None:
+        return None
+    return adapter._attempt(
+        lambda: comp.GetCorrespondingEntity(best_face), default=None
+    )
+
+
+def _cylinder_rank(
+    cyl: Any, area: float, target: list[float] | None
+) -> tuple[float, float]:
+    """Ranking key for a cylindrical face (higher is better).
+
+    ``CylinderParams`` is ``[ox, oy, oz, ax, ay, az, radius]`` (point on the
+    axis, axis direction, radius) in metres. Without a target the key is the
+    face area; with one it is the negative perpendicular distance from the
+    target to the axis line (nearest axis wins), area breaking ties.
+    """
+    if target is None:
+        return (area, 0.0)
+    origin = [float(cyl[0]), float(cyl[1]), float(cyl[2])]
+    axis = [float(cyl[3]), float(cyl[4]), float(cyl[5])]
+    norm = math.sqrt(sum(c * c for c in axis)) or 1.0
+    axis = [c / norm for c in axis]
+    rel = [target[i] - origin[i] for i in range(3)]
+    proj = sum(rel[i] * axis[i] for i in range(3))
+    perp = [rel[i] - proj * axis[i] for i in range(3)]
+    dist = math.sqrt(sum(c * c for c in perp))
+    return (-dist, area)

@@ -859,12 +859,22 @@ class MateEntityRef(BaseModel):
             (view-dependent pick); empty when locating by name.
         mark (int): Explicit selection mark; 0 selects with the mate type's
             default mark (1 for standard mates, 16 for width, 8 for cam).
+        component (str): Optional component whose geometry the entity belongs
+            to, e.g. ``"drive-train-1/crankshaft-1"``. When set, the entity is
+            resolved in the part document and mapped into assembly context via
+            ``IComponent2.GetCorrespondingEntity`` — robust for a part nested
+            in a flexible subassembly, where hand-built ``name@a@b@title``
+            strings are malformed and ``SelectByID2`` silently mis-resolves.
+            Currently honored by the motor entity (``entity_type="FACE"``
+            picks the component's largest cylindrical face, whose axis defines
+            a rotary motor); ``point`` disambiguates when several qualify.
     """
 
     entity_type: str
     name: str = ""
     point: list[float] = []
     mark: int = 0
+    component: str = ""
 
 
 class AddMateParameters(BaseModel):
@@ -932,10 +942,36 @@ class SuppressMateParameters(BaseModel):
     Attributes:
         name (str): Mate feature name, e.g. ``"Coincident1"``.
         suppress (bool): ``True`` to suppress, ``False`` to unsuppress.
+        component (str): Optional component whose subassembly document owns
+            the mate, e.g. ``"drive-train-1"``. When set, the mate is
+            resolved and suppressed inside that subassembly's model document
+            instead of the top-level tree — the only way to free a
+            driving-dimension mate that lives inside a flexible subassembly
+            (its name, e.g. ``"Distance34"``, is the standalone name in the
+            sub, not a qualified top-level name). The subassembly is not
+            saved, so its on-disk fully-defined state is preserved.
     """
 
     name: str
     suppress: bool = True
+    component: str = ""
+
+
+class SetComponentSolvingParameters(BaseModel):
+    """Parameters for setting a subassembly component's solve mode.
+
+    Attributes:
+        name (str): Component name with instance suffix, e.g.
+            ``"drive-train-1"`` (``"sub-1/inner-1"`` for a nested child).
+        solving (str): ``"flexible"`` solves the subassembly's internal mates
+            simultaneously with the parent (its parts move within their DOF —
+            required for a parent motor or cross-assembly mate to drive parts
+            inside it); ``"rigid"`` treats the subassembly as a single solid.
+            A fixed subassembly cannot be flexible — float it first.
+    """
+
+    name: str
+    solving: str = "flexible"
 
 
 class MotionStudyParameters(BaseModel):
@@ -2328,6 +2364,22 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="suppress_mate is not implemented by this adapter",
+        )
+
+    async def set_component_solving(
+        self, params: SetComponentSolvingParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Set a subassembly component's solve mode (rigid or flexible).
+
+        Args:
+            params (SetComponentSolvingParameters): Component name and mode.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Resulting solve mode or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="set_component_solving is not implemented by this adapter",
         )
 
     # Motion-study Operations
