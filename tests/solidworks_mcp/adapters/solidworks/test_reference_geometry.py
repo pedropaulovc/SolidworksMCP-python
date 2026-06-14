@@ -95,6 +95,59 @@ def test_create_plane_offset_flip_sets_option_bit() -> None:
     assert calls[0][0] == 8 | 256  # Distance | OptionFlip
 
 
+def test_create_plane_negative_offset_uses_abs_and_flip() -> None:
+    """A negative offset must become a positive distance with OptionFlip set.
+
+    InsertRefPlane clamps a negative Distance to 0 (collapsing the plane onto
+    the base), so the sign is encoded by flipping the side instead.
+    """
+    adapter = _FakeAdapter()
+    calls: list[tuple] = []
+    adapter.currentModel = _model(
+        FeatureManager=SimpleNamespace(
+            InsertRefPlane=lambda *a: calls.append(a) or SimpleNamespace(Name="Plane2")
+        ),
+    )
+    result = reference_geometry._create_plane_impl(
+        adapter,
+        CreatePlaneParameters(mode="offset", base_plane="Top Plane", offset=-5.08),
+    )
+    assert result.is_success
+    constraint, distance, *_rest = calls[0]
+    assert constraint == 8 | 256  # Distance | OptionFlip
+    assert math.isclose(distance, 0.00508)  # magnitude, not -0.00508
+
+
+def test_create_plane_negative_offset_with_flip_cancels_flip() -> None:
+    """flip=True and a negative offset cancel: positive distance, no flip bit."""
+    adapter = _FakeAdapter()
+    calls: list[tuple] = []
+    adapter.currentModel = _model(
+        FeatureManager=SimpleNamespace(
+            InsertRefPlane=lambda *a: calls.append(a) or SimpleNamespace(Name="Plane2")
+        ),
+    )
+    result = reference_geometry._create_plane_impl(
+        adapter,
+        CreatePlaneParameters(
+            mode="offset", base_plane="Top Plane", offset=-5.0, flip=True
+        ),
+    )
+    assert result.is_success
+    constraint, distance, *_rest = calls[0]
+    assert constraint == 8  # Distance only (flip toggled back off)
+    assert math.isclose(distance, 0.005)
+
+
+def test_offset_plane_distance_helper() -> None:
+    flip = reference_geometry._PLANE_OPTION_FLIP
+    assert reference_geometry._offset_plane_distance(16.0, 0) == (0.016, 0)
+    assert reference_geometry._offset_plane_distance(-16.0, 0) == (0.016, flip)
+    assert reference_geometry._offset_plane_distance(16.0, flip) == (0.016, flip)
+    assert reference_geometry._offset_plane_distance(-16.0, flip) == (0.016, 0)
+    assert reference_geometry._offset_plane_distance(0.0, 0) == (0.0, 0)
+
+
 def test_create_plane_angle_success() -> None:
     adapter = _FakeAdapter()
     calls: list[tuple] = []
