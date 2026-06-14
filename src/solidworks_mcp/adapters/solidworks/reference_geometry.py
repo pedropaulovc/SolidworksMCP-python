@@ -47,6 +47,33 @@ _POINT_FACE_CENTER = 4
 _ALONG_CURVE_TYPES = {"distance": 0, "percentage": 1, "evenly": 2}
 
 _PLANE_MODES = ("offset", "angle", "three_point", "parallel_point")
+
+
+def _offset_plane_distance(offset_mm: float, base_flip: int) -> tuple[float, int]:
+    """Resolve an offset-plane Distance constraint to ``(distance_m, flip_bits)``.
+
+    ``IFeatureManager.InsertRefPlane``'s Distance constraint takes a positive
+    magnitude; the *side* of the base plane is chosen by the ``OptionFlip`` bit,
+    not by the sign of the distance. Passing a negative distance does not place
+    the plane on the opposite side -- SOLIDWORKS clamps it to 0, collapsing the
+    new plane onto the base. So a negative ``offset`` must be converted to a
+    positive magnitude with the flip bit toggled relative to the caller's
+    ``flip`` request.
+
+    Args:
+        offset_mm: Signed offset from the base plane, in millimetres.
+        base_flip: ``_PLANE_OPTION_FLIP`` if the caller requested ``flip`` else 0.
+
+    Returns:
+        ``(distance_m, flip_bits)`` -- a non-negative distance in metres and the
+        flip bits to OR into the Distance constraint.
+    """
+    distance_m = float(offset_mm) / 1000.0
+    flip_bits = base_flip
+    if distance_m < 0.0:
+        distance_m = -distance_m
+        flip_bits ^= _PLANE_OPTION_FLIP
+    return distance_m, flip_bits
 _AXIS_MODES = ("two_planes", "cylindrical_face", "two_points", "edge")
 _POINT_MODES = ("face_center", "arc_center", "along_curve")
 
@@ -194,9 +221,10 @@ def _create_plane_impl(
         if params.mode == "offset":
             if not _select_named_feature(adapter, params.base_plane, 0, True):
                 raise Exception(f"Failed to select base plane: {params.base_plane}")
+            distance_m, dist_flip = _offset_plane_distance(params.offset, flip)
             constraints = (
-                _PLANE_DISTANCE | flip,
-                float(params.offset) / 1000.0,
+                _PLANE_DISTANCE | dist_flip,
+                distance_m,
                 0, 0.0, 0, 0.0,
             )
         elif params.mode == "angle":
