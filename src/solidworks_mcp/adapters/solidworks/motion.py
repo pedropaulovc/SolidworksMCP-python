@@ -51,7 +51,11 @@ from ..base import (
     MotionStudyRefParameters,
     MotionTimeParameters,
 )
-from .assembly import _component_cylindrical_face, _select_mate_entity
+from .assembly import (
+    _component_cylindrical_face,
+    _component_named_feature,
+    _select_mate_entity,
+)
 
 try:
     import pythoncom  # noqa: F401
@@ -548,12 +552,15 @@ def _add_motor_impl(
 def _resolve_motor_entity(adapter: Any, ref: Any) -> Any:
     """Resolve the Location/DirectionReference entity for a motor.
 
-    For a part nested in a flexible subassembly (``ref.component`` set), map a
-    cylindrical face into assembly context via ``GetCorrespondingEntity`` and
-    return the dispatch DIRECTLY — its ``Select4`` returns false there but the
-    entity is still valid as a motor reference, and a hand-built selection
-    string would mis-resolve to the top level. Otherwise select by name/point
-    and read the selection back (the documented motor-dialog flow).
+    For a part nested in a flexible subassembly (``ref.component`` set), map the
+    reference into assembly context and return the dispatch DIRECTLY — its
+    ``Select4`` returns false there but the entity is still valid as a motor
+    reference, and a hand-built selection string would mis-resolve to the top
+    level. With ``name`` the named reference axis (or plane) is mapped via
+    ``GetCorresponding`` (depth-agnostic, no face walk — preferred for a rotary
+    motor on a part's axis); otherwise the largest/nearest cylindrical face is
+    mapped via ``GetCorrespondingEntity``. Without ``component``, select by
+    name/point and read the selection back (the documented motor-dialog flow).
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -562,6 +569,8 @@ def _resolve_motor_entity(adapter: Any, ref: Any) -> Any:
     Returns:
         Any: The entity dispatch to use for the motor, or ``None``.
     """
+    if ref.component and ref.name:
+        return _component_named_feature(adapter, ref.component, ref.name)
     if ref.component:
         return _component_cylindrical_face(adapter, ref.component, ref.point or None)
     if not _select_mate_entity(adapter, ref, 1):

@@ -1401,6 +1401,11 @@ def _select_mate_entity(adapter: Any, ref: Any, mark: int) -> bool:
     Returns:
         bool: ``True`` when the entity selected.
     """
+    if ref.component and ref.name:
+        mapped = _component_named_feature(adapter, ref.component, ref.name)
+        if mapped is None:
+            return False
+        return bool(adapter._attempt(lambda: mapped.Select2(True, mark), default=False))
     if ref.name:
         qualified = _qualify_entity_name(adapter, ref.name)
         return bool(
@@ -1976,6 +1981,46 @@ def _set_component_solving_impl(
         AdapterResult[dict[str, Any]],
         adapter._handle_com_operation("set_component_solving", _operation),
     )
+
+
+def _component_named_feature(adapter: Any, name: str, feature_name: str) -> Any:
+    """Map a named feature inside a component into assembly context.
+
+    Resolves the component (``"sub-1/part-1"`` slash path), reads the named
+    feature off the component's part document as a base ``IFeature``, and
+    returns ``IComponent2::GetCorresponding`` of it -- the assembly-context
+    object a mate or motor can select via ``IFeature::Select2``.
+
+    Unlike ``GetCorrespondingEntity`` (vertex/face/edge only), ``GetCorresponding``
+    maps ANY persistent-reference object including a reference-axis or
+    reference-plane ``IFeature``. This is depth-agnostic: the ``IComponent2``
+    already encodes its full tree path, so a part nested two levels deep
+    (part-in-sub-in-top) resolves where a hand-built ``name@part@sub@title``
+    string silently fails. It also avoids the cylindrical-face walk
+    (~600 s on a fine-toothed gear) -- mapping a named lobe axis takes ~1 s.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        name: Component name, e.g. ``"drive-train-1/cylinder-gear-1"``.
+        feature_name: Reference-feature name in the part, e.g. ``"Axis3"``.
+
+    Returns:
+        Any: The corresponding object (a feature dispatch) in assembly
+        context, or ``None`` when the component or feature is not found.
+    """
+    comp = _get_component(adapter, name)
+    if comp is None:
+        return None
+    part = adapter._attempt(lambda: comp.GetModelDoc2(), default=None)
+    if part is None:
+        return None
+    feat = adapter._attempt(lambda p=part: p.FeatureByName(feature_name), default=None)
+    if feat is None:
+        return None
+    mapped = adapter._attempt(lambda: comp.GetCorresponding(feat), default=None)
+    if mapped is not None:
+        _flag_feature_methods(mapped, "IFeature")
+    return mapped
 
 
 def _component_cylindrical_face(

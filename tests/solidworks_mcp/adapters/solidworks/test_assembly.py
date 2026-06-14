@@ -1527,6 +1527,59 @@ def test_component_cylindrical_face_no_cylinder_returns_none() -> None:
     )
 
 
+class _NamedFeatureComponent:
+    """Component whose part doc resolves a named feature; GetCorresponding maps
+    it into assembly context (the GetCorresponding sibling -- features, not
+    just entities)."""
+
+    def __init__(self, name, features) -> None:
+        self.Name2 = name
+        self._features = dict(features)
+        self.corresponded: list[object] = []
+
+    def GetModelDoc2(self):  # noqa: N802
+        return SimpleNamespace(FeatureByName=lambda n: self._features.get(n))
+
+    def GetCorresponding(self, feat):  # noqa: N802
+        self.corresponded.append(feat)
+        return ("assembly-feature", feat)
+
+
+def test_component_named_feature_maps_via_getcorresponding() -> None:
+    axis = SimpleNamespace(Name="Axis3")
+    comp = _NamedFeatureComponent("drive-train-1/cylinder-gear-1", {"Axis3": axis})
+    top = _FakeAssemblyModel(components={"drive-train-1/cylinder-gear-1": comp})
+    adapter = _adapter_with(top)
+
+    result = assembly_module._component_named_feature(
+        adapter, "drive-train-1/cylinder-gear-1", "Axis3"
+    )
+    assert result == ("assembly-feature", axis)
+    assert comp.corresponded == [axis]
+
+
+def test_component_named_feature_missing_feature_returns_none() -> None:
+    comp = _NamedFeatureComponent("sub-1/part-1", {"Axis1": object()})
+    top = _FakeAssemblyModel(components={"sub-1/part-1": comp})
+    adapter = _adapter_with(top)
+    assert (
+        assembly_module._component_named_feature(adapter, "sub-1/part-1", "Axis9")
+        is None
+    )
+
+
+def test_select_mate_entity_component_name_selects_mapped_feature() -> None:
+    selected = SimpleNamespace(Select2=lambda append, mark: True)
+    comp = _NamedFeatureComponent("channel-1/connecting-rod-1", {"Axis1": object()})
+    comp.GetCorresponding = lambda feat: selected  # type: ignore[method-assign]
+    top = _FakeAssemblyModel(components={"channel-1/connecting-rod-1": comp})
+    adapter = _adapter_with(top)
+    ref = MateEntityRef(
+        entity_type="AXIS", component="channel-1/connecting-rod-1", name="Axis1"
+    )
+    assert assembly_module._select_mate_entity(adapter, ref, mark=1) is True
+
+
 # ---------------------------------------------------------------------------
 # Mock adapter parity (Phase 7B)
 # ---------------------------------------------------------------------------
