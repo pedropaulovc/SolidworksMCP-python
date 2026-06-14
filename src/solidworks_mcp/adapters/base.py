@@ -860,14 +860,18 @@ class MateEntityRef(BaseModel):
         mark (int): Explicit selection mark; 0 selects with the mate type's
             default mark (1 for standard mates, 16 for width, 8 for cam).
         component (str): Optional component whose geometry the entity belongs
-            to, e.g. ``"drive-train-1/crankshaft-1"``. When set, the entity is
-            resolved in the part document and mapped into assembly context via
-            ``IComponent2.GetCorrespondingEntity`` — robust for a part nested
-            in a flexible subassembly, where hand-built ``name@a@b@title``
-            strings are malformed and ``SelectByID2`` silently mis-resolves.
-            Currently honored by the motor entity (``entity_type="FACE"``
-            picks the component's largest cylindrical face, whose axis defines
-            a rotary motor); ``point`` disambiguates when several qualify.
+            to, e.g. ``"drive-train-1/cylinder-gear-1"`` (the ``"sub/part"``
+            slash path). When set, the entity is resolved in the part document
+            and mapped into assembly context — robust for a part nested in a
+            flexible subassembly, where hand-built ``name@a@b@title`` strings
+            are malformed and ``SelectByID2`` silently mis-resolves (named
+            selection works one level deep but fails at depth two). With
+            ``name`` the named reference feature (e.g. ``"Axis3"``, a cam-lobe
+            axis) maps via ``IComponent2.GetCorresponding`` — depth-agnostic
+            and ~600x faster than a cylindrical-face walk on a fine gear.
+            Without ``name`` (motor only) the largest/nearest cylindrical face
+            maps via ``IComponent2.GetCorrespondingEntity`` (``point``
+            disambiguates). Honored by mate entities and by the motor entity.
     """
 
     entity_type: str

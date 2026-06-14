@@ -377,6 +377,46 @@ async def test_add_motor_by_component_uses_corresponding_face(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_add_motor_by_component_axis_uses_named_feature(monkeypatch):
+    """component + name resolves the named axis via GetCorresponding (no face
+    walk) -- the depth-2 cam/crank path."""
+    study = _FakeStudy()
+    adapter, _ = _adapter_with_study(study, selected=object())
+    adapter._active_motion_study = study.Name
+    import solidworks_mcp.adapters.solidworks.motion as motion
+
+    sentinel = object()
+    seen: dict[str, object] = {}
+
+    def _fake_named(_adapter, component, feature_name):
+        seen["component"] = component
+        seen["feature"] = feature_name
+        return sentinel
+
+    def _explode(*_a, **_k):  # the face walk must NOT be taken for a named axis
+        raise AssertionError("cylindrical-face walk used for a named axis")
+
+    monkeypatch.setattr(motion, "_component_named_feature", _fake_named)
+    monkeypatch.setattr(motion, "_component_cylindrical_face", _explode)
+
+    result = await adapter.add_motor(
+        MotionMotorParameters(
+            motor_type="rotary",
+            entity=MateEntityRef(
+                entity_type="AXIS",
+                component="drive-train-1/crankshaft-1",
+                name="Axis1",
+            ),
+            speed=20.0,
+        )
+    )
+    assert result.status is AdapterResultStatus.SUCCESS
+    assert seen == {"component": "drive-train-1/crankshaft-1", "feature": "Axis1"}
+    assert study.last_definition.Location is sentinel
+    assert study.last_definition.DirectionReference is sentinel
+
+
+@pytest.mark.asyncio
 async def test_add_motor_by_component_not_found_errors(monkeypatch):
     study = _FakeStudy()
     adapter, _ = _adapter_with_study(study, selected=object())
