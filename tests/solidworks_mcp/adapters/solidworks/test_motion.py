@@ -81,10 +81,14 @@ class _FakeFeatureData:
         self.Axis = None
         self.Strength = None
         self.constant_speed: float | None = None
+        self.oscillating: tuple[float, float] | None = None
         self.endpoints: tuple | None = None
 
     def ConstantSpeedMotor(self, speed):  # noqa: N802
         self.constant_speed = float(speed)
+
+    def OscillatingMotor(self, amplitude, frequency):  # noqa: N802
+        self.oscillating = (float(amplitude), float(frequency))
 
     def SetEndPoints(self, p1, p2):  # noqa: N802
         self.endpoints = (p1, p2)
@@ -313,6 +317,48 @@ async def test_add_motor_linear_converts_mm_per_s_to_m_per_s():
     assert result.status is AdapterResultStatus.SUCCESS
     assert captured["speed"] == pytest.approx(1.0)  # 1000 mm/s -> 1 m/s
     assert study.definitions == [77]  # linear motor feature id
+
+
+@pytest.mark.asyncio
+async def test_add_motor_oscillating_rotary_passes_degrees_through():
+    study = _FakeStudy()
+    adapter, _ = _adapter_with_study(study, selected=object())
+    adapter._active_motion_study = study.Name
+
+    result = await adapter.add_motor(
+        MotionMotorParameters(
+            motor_type="rotary",
+            entity=MateEntityRef(entity_type="AXIS", name="Axis1@crank-1@asm"),
+            motion_function="oscillating",
+            amplitude=15.0,  # degrees
+            frequency=2.0,  # Hz
+        )
+    )
+    assert result.status is AdapterResultStatus.SUCCESS
+    # Rotary amplitude is degrees -> passes through; frequency is Hz.
+    assert study.last_definition.oscillating == (15.0, 2.0)
+    assert study.last_definition.constant_speed is None  # not a constant motor
+
+
+@pytest.mark.asyncio
+async def test_add_motor_oscillating_linear_converts_mm_amplitude_to_m():
+    study = _FakeStudy()
+    adapter, _ = _adapter_with_study(study, selected=object())
+    adapter._active_motion_study = study.Name
+
+    result = await adapter.add_motor(
+        MotionMotorParameters(
+            motor_type="linear",
+            entity=MateEntityRef(entity_type="EDGE", name="Edge1@slide-1@asm"),
+            motion_function="oscillating",
+            amplitude=10.0,  # mm
+            frequency=1.5,
+        )
+    )
+    assert result.status is AdapterResultStatus.SUCCESS
+    amp, freq = study.last_definition.oscillating
+    assert amp == pytest.approx(0.010)  # 10 mm -> 0.010 m
+    assert freq == pytest.approx(1.5)
 
 
 @pytest.mark.asyncio

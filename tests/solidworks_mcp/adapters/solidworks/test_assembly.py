@@ -20,6 +20,7 @@ from solidworks_mcp.adapters.base import (
     MoveComponentParameters,
     ReplaceComponentParameters,
     RotateComponentParameters,
+    SetComponentConfigurationParameters,
     SetComponentSolvingParameters,
     SuppressMateParameters,
 )
@@ -873,6 +874,16 @@ class _FakeMate:
         return True
 
 
+class _FakeRackPinionMateData:
+    """Stand-in for an ``IRackPinionMateFeatureData`` from ``CreateMateData``."""
+
+    def __init__(self, mate_type) -> None:
+        self.mate_type = mate_type
+        self.DiameterType = None
+        self.DiameterVal = None
+        self.Reverse = None
+
+
 class _FakeMateGroup:
     def __init__(self, mates) -> None:
         self.mates = list(mates)
@@ -903,6 +914,20 @@ class _MateModel(_FakeAssemblyModel):
         self.add_mate_status = 1
         self.add_mate_modify_result = True
         self._last_feature = None
+        self.create_mate_data_calls: list[int] = []
+        self.created_mate_data: list[_FakeRackPinionMateData] = []
+
+    def CreateMateData(self, mate_type):  # noqa: N802
+        self.create_mate_data_calls.append(mate_type)
+        data = _FakeRackPinionMateData(mate_type)
+        self.created_mate_data.append(data)
+        return data
+
+    def CreateMate(self, data):  # noqa: N802
+        mate = _FakeMate(self.add_mate_name)
+        mate.mate_data = data
+        self.mate_group.mates.append(mate)
+        return mate
 
     def FeatureByName(self, name):  # noqa: N802
         mate = next((m for m in self.mate_group.mates if m.Name == name), None)
@@ -1234,7 +1259,12 @@ def test_suppress_mate_success_applies_all_configurations() -> None:
 
     assert result.is_success
     assert mate.suppression_calls == [(0, 2)]  # suppress, all configurations
-    assert result.data == {"name": "Distance1", "suppressed": True, "component": ""}
+    assert result.data == {
+        "name": "Distance1",
+        "suppressed": True,
+        "component": "",
+        "configuration": "",
+    }
 
 
 def test_unsuppress_mate_success() -> None:
@@ -1247,7 +1277,51 @@ def test_unsuppress_mate_success() -> None:
 
     assert result.is_success
     assert mate.suppression_calls == [(1, 2)]
-    assert result.data == {"name": "Distance1", "suppressed": False, "component": ""}
+    assert result.data == {
+        "name": "Distance1",
+        "suppressed": False,
+        "component": "",
+        "configuration": "",
+    }
+
+
+def test_suppress_mate_scoped_to_configuration() -> None:
+    """A configuration name routes to swSpecifyConfiguration and is verified
+    against that configuration (already active here, so no switch needed)."""
+    mate = _FakeMate("Distance1")
+    model = _MateModel(mates=[mate])
+    model.ConfigurationManager = SimpleNamespace(
+        ActiveConfiguration=SimpleNamespace(Name="cone_disengaged")
+    )
+    model.ShowConfiguration2 = lambda name: True
+    adapter = _adapter_with(model)
+
+    result = assembly_module._suppress_mate_impl(
+        adapter,
+        SuppressMateParameters(
+            name="Distance1", suppress=True, configuration="cone_disengaged"
+        ),
+    )
+
+    assert result.is_success
+    assert mate.suppression_calls == [(0, 3)]  # suppress, specify configuration
+    assert result.data == {
+        "name": "Distance1",
+        "suppressed": True,
+        "component": "",
+        "configuration": "cone_disengaged",
+    }
+
+
+def test_suppress_mate_configuration_with_component_errors() -> None:
+    result = assembly_module._suppress_mate_impl(
+        _adapter_with(_MateModel(mates=[_FakeMate("Distance1")])),
+        SuppressMateParameters(
+            name="Distance1", configuration="rest", component="drive-train-1"
+        ),
+    )
+    assert result.is_error
+    assert "not supported together with component" in (result.error or "")
 
 
 def test_suppress_mate_state_not_applied_errors() -> None:
@@ -1308,6 +1382,7 @@ def test_suppress_mate_in_subassembly_resolves_in_sub_doc() -> None:
         "name": "Distance34",
         "suppressed": True,
         "component": "drive-train-1",
+        "configuration": "",
     }
 
 
@@ -1401,6 +1476,85 @@ def test_set_component_solving_refusal_reports_readback() -> None:
     assert result.is_error
     assert "did not take" in (result.error or "")
     assert "float it first" in (result.error or "")
+
+
+class _RefConfigModel(_FakeAssemblyModel):
+    """Assembly model whose CompConfigProperties5 sets a component's referenced
+    child configuration (empty RefConfigName restores 'Default', mirroring SW)."""
+
+    def __init__(self, components=None, takes=True) -> None:
+        super().__init__(components=components)
+        self.takes = takes
+        self.config_calls: list[tuple] = []
+
+    def CompConfigProperties5(  # noqa: N802
+        self, suppression, solving, visibility, named, config, bom, envelope
+    ):
+        self.config_calls.append((suppression, solving, config))
+        if self.takes:
+            for comp in self._components.values():
+                comp.ReferencedConfiguration = config or "Default"
+        return True
+
+
+def test_set_component_configuration_success() -> None:
+    comp = _SolvingComponent(solving=1)  # flexible — must be preserved
+    model = _RefConfigModel(components={"drive-train-1": comp})
+    adapter = _adapter_with(model)
+
+    result = assembly_module._set_component_configuration_impl(
+        adapter,
+        SetComponentConfigurationParameters(
+            name="drive-train-1", configuration="cone_disengaged"
+        ),
+    )
+    assert result.is_success
+    assert result.data == {"name": "drive-train-1", "configuration": "cone_disengaged"}
+    # Suppression stays fully-resolved (2) and the flexible solve mode (1) is
+    # preserved while the referenced child config is set.
+    assert model.config_calls == [(2, 1, "cone_disengaged")]
+    assert model.rebuilds == 1  # EditRebuild3 required for the change to show
+
+
+def test_set_component_configuration_empty_restores_default() -> None:
+    comp = _SolvingComponent(solving=0)
+    model = _RefConfigModel(components={"drive-train-1": comp})
+    adapter = _adapter_with(model)
+
+    result = assembly_module._set_component_configuration_impl(
+        adapter,
+        SetComponentConfigurationParameters(name="drive-train-1", configuration=""),
+    )
+    assert result.is_success
+    assert result.data == {"name": "drive-train-1", "configuration": "Default"}
+    assert model.config_calls == [(2, 0, "")]  # empty RefConfigName = default
+
+
+def test_set_component_configuration_component_not_found_errors() -> None:
+    model = _RefConfigModel(components={})
+    adapter = _adapter_with(model)
+    result = assembly_module._set_component_configuration_impl(
+        adapter,
+        SetComponentConfigurationParameters(
+            name="missing-1", configuration="cone_disengaged"
+        ),
+    )
+    assert result.is_error
+    assert "Component not found" in (result.error or "")
+
+
+def test_set_component_configuration_readback_mismatch_errors() -> None:
+    comp = _SolvingComponent(solving=0)  # ReferencedConfiguration stays 'Default'
+    model = _RefConfigModel(components={"drive-train-1": comp}, takes=False)
+    adapter = _adapter_with(model)
+    result = assembly_module._set_component_configuration_impl(
+        adapter,
+        SetComponentConfigurationParameters(
+            name="drive-train-1", configuration="cone_disengaged"
+        ),
+    )
+    assert result.is_error
+    assert "did not take" in (result.error or "")
 
 
 # ---------------------------------------------------------------------------
@@ -1635,6 +1789,32 @@ async def test_mock_set_component_solving_unknown_mode_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mock_set_component_configuration_sets_and_restores() -> None:
+    adapter, name = await _assembly_mock_with_component()
+    set_result = await adapter.set_component_configuration(
+        SetComponentConfigurationParameters(name=name, configuration="cone_disengaged")
+    )
+    assert set_result.is_success
+    assert set_result.data == {"name": name, "configuration": "cone_disengaged"}
+
+    restored = await adapter.set_component_configuration(
+        SetComponentConfigurationParameters(name=name, configuration="")
+    )
+    assert restored.is_success
+    assert restored.data == {"name": name, "configuration": "Default"}
+
+
+@pytest.mark.asyncio
+async def test_mock_set_component_configuration_not_found_errors() -> None:
+    adapter, _ = await _assembly_mock_with_component()
+    result = await adapter.set_component_configuration(
+        SetComponentConfigurationParameters(name="ghost-1", configuration="x")
+    )
+    assert result.is_error
+    assert "Component not found" in (result.error or "")
+
+
+@pytest.mark.asyncio
 async def test_mock_suppress_mate_in_subassembly_records_component() -> None:
     adapter, name = await _assembly_mock_with_component()
     result = await adapter.suppress_mate(
@@ -1822,12 +2002,17 @@ def test_add_mate_rack_pinion_sets_pitch_diameter() -> None:
         ),
     )
 
+    # Rack-pinion mates carrying a value are built via CreateMateData ->
+    # CreateMate (AddMate5 cannot set the diameter; a follow-up ModifyDefinition
+    # fails), so AddMate5 is never called for this mate.
     assert result.is_success
-    assert model.mate_calls[0][0] == 13  # swMateRACKPINION
-    mate = model.mate_group.mates[-1]
-    assert mate.definition.DiameterType == 0  # swPinionPitchDiameter
-    assert abs(mate.definition.DiameterVal - 0.030) < 1e-12  # metres
-    assert mate.modify_calls == [mate.definition]
+    assert model.mate_calls == []
+    assert model.create_mate_data_calls == [13]  # CreateMateData(swMateRACKPINION)
+    data = model.created_mate_data[-1]
+    assert data.DiameterType == 0  # swPinionPitchDiameter
+    assert abs(data.DiameterVal - 0.030) < 1e-12  # metres
+    assert data.Reverse is False
+    assert result.data["name"] == "RackPinionMate1"
     assert result.data["pinion_pitch_diameter"] == 30.0
 
 
@@ -1846,9 +2031,11 @@ def test_add_mate_rack_pinion_travel_per_revolution() -> None:
     )
 
     assert result.is_success
-    mate = model.mate_group.mates[-1]
-    assert mate.definition.DiameterType == 1  # swRackTravelPerRevolution
-    assert abs(mate.definition.DiameterVal - 0.0254) < 1e-12
+    assert model.create_mate_data_calls == [13]
+    data = model.created_mate_data[-1]
+    assert data.DiameterType == 1  # swRackTravelPerRevolution
+    assert abs(data.DiameterVal - 0.0254) < 1e-12
+    assert result.data["rack_travel_per_revolution"] == 25.4
 
 
 def test_add_mate_rack_pinion_both_values_errors() -> None:

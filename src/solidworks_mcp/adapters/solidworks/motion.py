@@ -142,6 +142,7 @@ _MOTION_METHODS = (
     "SetDuration",
     "SetTime",
     "ConstantSpeedMotor",
+    "OscillatingMotor",
     "SaveToAVI",
     "SetEndPoints",
     "Stop",
@@ -524,12 +525,23 @@ def _add_motor_impl(
             if comp is not None:
                 adapter._attempt(lambda: setattr(data, "RelativeComponent", comp))
 
-        speed = float(params.speed)
-        # Linear motor speed arrives in mm/s; the API is SI (m/s). Rotary
-        # speed passes through (RPM, the rotary motor's native unit).
-        if params.motor_type == "linear":
-            speed = speed / 1000.0
-        adapter._attempt(lambda: data.ConstantSpeedMotor(speed))
+        if params.motion_function == "oscillating":
+            # OscillatingMotor(Displacement, Frequency): rotary displacement is
+            # in degrees, linear displacement in metres (API is SI); frequency
+            # in Hz. Linear amplitude arrives in mm -> convert to m.
+            amp = float(params.amplitude)
+            if params.motor_type == "linear":
+                amp = amp / 1000.0
+            adapter._attempt(
+                lambda: data.OscillatingMotor(amp, float(params.frequency))
+            )
+        else:
+            speed = float(params.speed)
+            # Linear motor speed arrives in mm/s; the API is SI (m/s). Rotary
+            # speed passes through (RPM, the rotary motor's native unit).
+            if params.motor_type == "linear":
+                speed = speed / 1000.0
+            adapter._attempt(lambda: data.ConstantSpeedMotor(speed))
         if params.reverse:
             adapter._attempt(lambda: setattr(data, "ReverseDirection", True))
 

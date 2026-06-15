@@ -954,11 +954,23 @@ class SuppressMateParameters(BaseModel):
             (its name, e.g. ``"Distance34"``, is the standalone name in the
             sub, not a qualified top-level name). The subassembly is not
             saved, so its on-disk fully-defined state is preserved.
+        configuration (str): Optional configuration name to scope the
+            suppression to. Empty (default) suppresses across **all**
+            configurations (``swAllConfiguration``); a name suppresses only
+            in that configuration (``swSpecifyConfiguration``), leaving the
+            mate's state in every other configuration untouched — the basis
+            for engagement states (``rest``/``cone_disengaged``/
+            ``pinion_engaged``). The named configuration is made active for
+            the ``IsSuppressed`` readback, then the prior active
+            configuration is restored. Not supported together with
+            ``component`` (a sub-document's own configurations are a separate
+            namespace).
     """
 
     name: str
     suppress: bool = True
     component: str = ""
+    configuration: str = ""
 
 
 class SetComponentSolvingParameters(BaseModel):
@@ -976,6 +988,28 @@ class SetComponentSolvingParameters(BaseModel):
 
     name: str
     solving: str = "flexible"
+
+
+class SetComponentConfigurationParameters(BaseModel):
+    """Parameters for setting which child configuration a component references.
+
+    Attributes:
+        name (str): Component name with instance suffix, e.g.
+            ``"drive-train-1"`` (``"sub-1/inner-1"`` for a nested child).
+        configuration (str): Name of the child configuration the component
+            should reference in the assembly's **active** configuration. An
+            empty string restores the component's default referenced
+            configuration. Because the change is scoped to the active assembly
+            configuration, the same component can reference different child
+            configurations per assembly configuration — the basis for
+            top-level engagement states (e.g. ``harmonic-analyzer``'s
+            ``cone_disengaged`` config points ``drive-train-1`` at the
+            drive-train's own ``cone_disengaged`` config, while ``Default``
+            keeps it at ``Default``).
+    """
+
+    name: str
+    configuration: str = ""
 
 
 class MotionStudyParameters(BaseModel):
@@ -1032,6 +1066,9 @@ class MotionMotorParameters(BaseModel):
     reverse: bool = False
     component: str = ""
     study_name: str = ""
+    motion_function: str = "constant"
+    amplitude: float = 0.0
+    frequency: float = 0.0
 
 
 class MotionGravityParameters(BaseModel):
@@ -2384,6 +2421,28 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="set_component_solving is not implemented by this adapter",
+        )
+
+    async def set_component_configuration(
+        self, params: SetComponentConfigurationParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Set which child configuration a component references.
+
+        Scoped to the assembly's active configuration, so the same component
+        can reference different child configurations in different assembly
+        configurations.
+
+        Args:
+            params (SetComponentConfigurationParameters): Component name and
+                target child configuration name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Resulting referenced configuration
+            or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="set_component_configuration is not implemented by this adapter",
         )
 
     # Motion-study Operations

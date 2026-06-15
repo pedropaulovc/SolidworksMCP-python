@@ -23,6 +23,7 @@ from ..adapters.base import (
     MoveComponentParameters,
     ReplaceComponentParameters,
     RotateComponentParameters,
+    SetComponentConfigurationParameters,
     SetComponentSolvingParameters,
     SolidWorksAdapter,
     SuppressMateParameters,
@@ -636,6 +637,42 @@ class SetComponentSolvingInput(BaseModel):
             raise ValueError("name is required")
         if self.solving not in ("rigid", "flexible"):
             raise ValueError("solving must be 'rigid' or 'flexible'")
+
+
+class SetComponentConfigurationInput(BaseModel):
+    """Input schema for setting a component's referenced child configuration.
+
+    Attributes:
+        name (str): Component name with instance suffix.
+        configuration (str): Child configuration to reference (empty restores
+            the default).
+    """
+
+    name: str = Field(
+        description=(
+            "Component name with instance suffix, e.g. 'drive-train-1' "
+            "('sub-1/inner-1' for a nested child)"
+        )
+    )
+    configuration: str = Field(
+        default="",
+        description=(
+            "Name of the child configuration the component references in the "
+            "assembly's active configuration; scoped to that assembly "
+            "configuration only, so the component can reference a different "
+            "child config per assembly config (top-level engagement states). "
+            "Empty restores the component's default referenced configuration."
+        ),
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        """Validate the component name.
+
+        Raises:
+            ValueError: When the name is empty.
+        """
+        if not self.name.strip():
+            raise ValueError("name is required")
 
 
 async def register_assembly_tools(
@@ -1319,5 +1356,59 @@ async def register_assembly_tools(
             logger.error(f"Error in set_component_solving tool: {e}")
             return {"status": "error", "message": f"Unexpected error: {str(e)}"}
 
-    tool_count = 14  # Number of tools registered
+    @mcp.tool()
+    async def set_component_configuration(
+        input_data: SetComponentConfigurationInput,
+    ) -> dict[str, Any]:
+        """Set which child configuration a component references.
+
+        The change is scoped to the assembly's active configuration, so the
+        same component can reference a different child configuration in each
+        assembly configuration — the basis for top-level engagement states
+        (e.g. a 'cone_disengaged' assembly configuration that points
+        'drive-train-1' at the drive-train's own 'cone_disengaged' config while
+        'Default' keeps it at 'Default'). An empty configuration restores the
+        component's default referenced configuration.
+
+        Args:
+            input_data (SetComponentConfigurationInput): Component name and
+                target child configuration name.
+
+        Returns:
+            dict[str, Any]: Status and resulting referenced configuration.
+
+        Example:
+            ```python
+            result = await set_component_configuration({
+                "name": "drive-train-1",
+                "configuration": "cone_disengaged",
+            })
+            ```
+        """
+        try:
+            input_data = _normalize_input(input_data, SetComponentConfigurationInput)
+            result = await adapter.set_component_configuration(
+                SetComponentConfigurationParameters(
+                    name=input_data.name,
+                    configuration=input_data.configuration,
+                )
+            )
+            if result.is_success:
+                payload = result.data or {}
+                return {
+                    "status": "success",
+                    "message": f"Set {payload.get('name')} referenced "
+                    f"configuration: {payload.get('configuration')}",
+                    "component": payload,
+                    "execution_time": result.execution_time,
+                }
+            return {
+                "status": "error",
+                "message": f"Failed to set referenced configuration: {result.error}",
+            }
+        except Exception as e:
+            logger.error(f"Error in set_component_configuration tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    tool_count = 15  # Number of tools registered
     return tool_count

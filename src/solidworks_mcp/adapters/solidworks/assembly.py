@@ -40,11 +40,12 @@ from ..base import (
     MoveComponentParameters,
     ReplaceComponentParameters,
     RotateComponentParameters,
+    SetComponentConfigurationParameters,
     SetComponentSolvingParameters,
     SolidWorksFeature,
     SuppressMateParameters,
 )
-from ..com_variant import double_array, null_callout
+from ..com_variant import bstr_array, double_array, null_callout
 from .features import (
     _feature_names,
     _flag_feature_methods,
@@ -112,6 +113,7 @@ _MATE_ERRORS = {
 _SUPPRESS_FEATURE = 0
 _UNSUPPRESS_FEATURE = 1
 _ALL_CONFIGURATIONS = 2
+_SPECIFY_CONFIGURATION = 3
 
 # IAssemblyDoc::CompConfigProperties5 — solve mode arguments.
 # inComponentResolveStatus: swComponentResolveStatus_e (2 = fully resolved).
@@ -194,6 +196,11 @@ class SolidWorksAssemblyMixin:
         self, params: SetComponentSolvingParameters
     ) -> AdapterResult[dict[str, Any]]:
         return _set_component_solving_impl(self, params)
+
+    async def set_component_configuration(
+        self, params: SetComponentConfigurationParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        return _set_component_configuration_impl(self, params)
 
 
 # ---------------------------------------------------------------------------
@@ -1573,13 +1580,17 @@ def _validate_mechanical_values(params: AddMateParameters) -> str:
 def _apply_mechanical_values(
     adapter: Any, name: str, params: AddMateParameters
 ) -> None:
-    """Write rack-pinion/screw values into a created mate's definition.
+    """Write a screw mate's pitch value into the created mate's definition.
 
-    ``AddMate5`` has no parameters for the rack-pinion diameter or the
-    screw pitch — SolidWorks derives defaults from the selected geometry.
-    When the caller provided a value, edit the mate's feature data
-    (``IFeature::GetDefinition`` → set ``DiameterType``/``DiameterVal``
-    or ``RevolutionType``/``RevolutionVal`` → ``IFeature::ModifyDefinition``).
+    ``AddMate5`` has no parameter for the screw pitch — SolidWorks derives a
+    default from the selected geometry. When the caller provided a value, edit
+    the mate's feature data (``IFeature::GetDefinition`` → set
+    ``RevolutionType``/``RevolutionVal`` → ``IFeature::ModifyDefinition``).
+
+    Rack-pinion values are NOT applied here: a follow-up ``ModifyDefinition``
+    fails for a rack-pinion mate, so those mates are built up front via
+    ``_create_mechanical_mate`` (``CreateMateData`` → ``CreateMate``) and never
+    reach this path.
 
     Args:
         adapter: A fully connected ``PyWin32Adapter``.
@@ -1589,20 +1600,6 @@ def _apply_mechanical_values(
     Raises:
         Exception: When a value was requested but could not be applied.
     """
-    if params.mate_type == "rack_pinion" and (
-        params.pinion_pitch_diameter or params.rack_travel_per_revolution
-    ):
-        if params.pinion_pitch_diameter:
-            members = {
-                "DiameterType": _RACK_PINION_PITCH_DIAMETER,
-                "DiameterVal": float(params.pinion_pitch_diameter) / 1000.0,
-            }
-        else:
-            members = {
-                "DiameterType": _RACK_PINION_TRAVEL_PER_REVOLUTION,
-                "DiameterVal": float(params.rack_travel_per_revolution) / 1000.0,
-            }
-        _modify_mate_definition(adapter, name, members)
     if params.mate_type == "screw" and params.distance_per_revolution:
         _modify_mate_definition(
             adapter,
@@ -1612,6 +1609,49 @@ def _apply_mechanical_values(
                 "RevolutionVal": float(params.distance_per_revolution) / 1000.0,
             },
         )
+
+
+def _create_mechanical_mate(
+    adapter: Any, model: Any, params: AddMateParameters, mate_type: int
+) -> Any:
+    """Create a rack-pinion mate carrying a pitch diameter / travel value.
+
+    ``AddMate5`` creates a rack-pinion mate but has no parameter for the pitch
+    diameter, and a follow-up ``IFeature::ModifyDefinition`` on the created mate
+    fails ("ModifyDefinition failed for mate ...") -- the rack-pinion feature
+    data cannot be re-edited that way. The official pattern (SOLIDWORKS *Create
+    Rack and Pinion Mate* API example) is the ``CreateMateData`` -> set members
+    -> ``CreateMate`` flow: build the typed feature-data object, set its value
+    members up front, and create the mate from it. Entities are pre-selected by
+    the caller under the proper marks (rack=64 / pinion=128).
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        model: The active assembly model document.
+        params: Mate parameters carrying the mechanical value.
+        mate_type: ``swMateType_e`` value for the mate.
+
+    Returns:
+        The created mate ``IFeature``.
+
+    Raises:
+        Exception: When the feature data or the mate cannot be created.
+    """
+    data = adapter._attempt(lambda: model.CreateMateData(mate_type), default=None)
+    if data is None:
+        raise Exception(f"CreateMateData({mate_type}) returned None")
+    _flag_feature_methods(data, "IRackPinionMateFeatureData")
+    if params.pinion_pitch_diameter:
+        data.DiameterType = _RACK_PINION_PITCH_DIAMETER
+        data.DiameterVal = float(params.pinion_pitch_diameter) / 1000.0
+    else:
+        data.DiameterType = _RACK_PINION_TRAVEL_PER_REVOLUTION
+        data.DiameterVal = float(params.rack_travel_per_revolution) / 1000.0
+    data.Reverse = bool(params.flip)
+    mate = adapter._attempt(lambda: model.CreateMate(data), default=None)
+    if mate is None:
+        raise Exception(f"CreateMate failed for {params.mate_type} mate")
+    return mate
 
 
 def _modify_mate_definition(adapter: Any, name: str, members: dict[str, Any]) -> None:
@@ -1709,6 +1749,31 @@ def _add_mate_impl(
                     f"Failed to select mate entity {index + 1} "
                     f"({ref.entity_type} at {located!r})"
                 )
+
+        # Rack-pinion mates that carry a pitch diameter / travel value must be
+        # built via CreateMateData -> CreateMate (AddMate5 cannot set the value,
+        # and a follow-up ModifyDefinition on the result fails). Entities are
+        # already pre-selected above under marks 64 (rack) / 128 (pinion).
+        if params.mate_type == "rack_pinion" and (
+            params.pinion_pitch_diameter or params.rack_travel_per_revolution
+        ):
+            mate = _create_mechanical_mate(adapter, model, params, mate_type)
+            adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+            name = _mate_feature_name(adapter, mate)
+            adapter._attempt(lambda: model.EditRebuild3())
+            payload = {
+                "name": name,
+                "mate_type": params.mate_type,
+                "alignment": params.alignment,
+                "entities": len(params.entities),
+            }
+            if params.pinion_pitch_diameter:
+                payload["pinion_pitch_diameter"] = float(params.pinion_pitch_diameter)
+            if params.rack_travel_per_revolution:
+                payload["rack_travel_per_revolution"] = float(
+                    params.rack_travel_per_revolution
+                )
+            return payload
 
         distance = float(params.distance) / 1000.0
         if params.distance_limits:
@@ -1863,19 +1928,34 @@ def _delete_mate_impl(
     )
 
 
+def _config_name(model: Any) -> str:
+    """Return ``model``'s active configuration name, or empty when unreadable."""
+    try:
+        manager = model.ConfigurationManager
+        active = _read_member(manager, "ActiveConfiguration")
+        return str(_read_member(active, "Name")) if active is not None else ""
+    except Exception:
+        return ""
+
+
 def _suppress_mate_impl(
     adapter: Any, params: SuppressMateParameters
 ) -> AdapterResult[dict[str, Any]]:
     """Suppress/unsuppress a mate via ``IFeature::SetSuppression2``.
 
-    Applied across all configurations; the resulting state is verified by
-    reading ``IsSuppressed`` back. The configuration-names argument is a
-    typed-null VARIANT (bare ``None`` raises ``Type mismatch`` under
-    pywin32 late binding).
+    By default the change applies across all configurations
+    (``swAllConfiguration``, a typed-null names VARIANT — bare ``None``
+    raises ``Type mismatch`` under pywin32 late binding). When
+    ``params.configuration`` is set it scopes to that one configuration
+    (``swSpecifyConfiguration`` + a BSTR SAFEARRAY), the basis for the
+    engagement states where a gear mate is live in ``rest`` but suppressed in
+    ``cone_disengaged``. ``IsSuppressed`` reports the **active**
+    configuration's state, so for a scoped change the named configuration is
+    activated for the readback and the prior active configuration restored.
 
     Args:
         adapter: A fully connected ``PyWin32Adapter``.
-        params: Mate feature name and target state.
+        params: Mate feature name, target state, and optional config scope.
 
     Returns:
         AdapterResult[dict[str, Any]]: Resulting state or error.
@@ -1884,6 +1964,12 @@ def _suppress_mate_impl(
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
     if not params.name.strip():
         return AdapterResult(status=AdapterResultStatus.ERROR, error="name is required")
+    if params.configuration and params.component:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="configuration scope is not supported together with component "
+            "(a subassembly's configurations are a separate namespace)",
+        )
 
     def _suppress_operation() -> dict[str, Any]:
         model = adapter.currentModel
@@ -1903,22 +1989,43 @@ def _suppress_mate_impl(
             raise Exception(f"Mate not found: {params.name!r}{where}")
 
         action = _SUPPRESS_FEATURE if params.suppress else _UNSUPPRESS_FEATURE
+        if params.configuration:
+            which, names = _SPECIFY_CONFIGURATION, bstr_array([params.configuration])
+        else:
+            which, names = _ALL_CONFIGURATIONS, null_callout()
         adapter._attempt(
-            lambda: feature.SetSuppression2(
-                action, _ALL_CONFIGURATIONS, null_callout()
-            ),
+            lambda: feature.SetSuppression2(action, which, names),
             default=False,
         )
+
+        # IsSuppressed reads the active configuration; activate the scoped
+        # target for an honest readback, then restore what was active.
+        prior = ""
+        if params.configuration:
+            prior = _config_name(model)
+            if prior != params.configuration:
+                if not adapter._attempt(
+                    lambda: model.ShowConfiguration2(params.configuration),
+                    default=False,
+                ):
+                    raise Exception(
+                        f"Could not activate configuration {params.configuration!r} "
+                        "to verify suppression"
+                    )
         resulting = bool(
             adapter._attempt(lambda: feature.IsSuppressed(), default=False)
         )
+        if params.configuration and prior and prior != params.configuration:
+            adapter._attempt(lambda: model.ShowConfiguration2(prior), default=False)
         if resulting != params.suppress:
             state = "suppressed" if params.suppress else "unsuppressed"
-            raise Exception(f"Mate {params.name!r} did not become {state}")
+            where = f" in {params.configuration!r}" if params.configuration else ""
+            raise Exception(f"Mate {params.name!r} did not become {state}{where}")
         return {
             "name": params.name,
             "suppressed": resulting,
             "component": params.component,
+            "configuration": params.configuration,
         }
 
     return cast(
@@ -1980,6 +2087,79 @@ def _set_component_solving_impl(
     return cast(
         AdapterResult[dict[str, Any]],
         adapter._handle_com_operation("set_component_solving", _operation),
+    )
+
+
+def _set_component_configuration_impl(
+    adapter: Any, params: SetComponentConfigurationParameters
+) -> AdapterResult[dict[str, Any]]:
+    """Set which child configuration a component references via
+    ``CompConfigProperties5``, scoped to the active assembly configuration.
+
+    Selects the component and applies the referenced-configuration change to
+    the assembly's **active** configuration only, so the same component can
+    point at a different child configuration in each assembly configuration --
+    the mechanism behind top-level engagement states (e.g. a ``cone_disengaged``
+    assembly config that references the drive-train's own ``cone_disengaged``).
+    A non-empty ``configuration`` selects that child config; an empty string
+    restores the component's default. The component's current solve mode is
+    preserved (``CompConfigProperties5`` also carries it). The change is
+    verified by reading ``IComponent2::ReferencedConfiguration`` back after an
+    ``EditRebuild3`` (required for the change to take effect).
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Component name and target child configuration name.
+
+    Returns:
+        AdapterResult[dict[str, Any]]: Resulting referenced configuration or
+        error.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if not params.name.strip():
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="name is required")
+
+    def _operation() -> dict[str, Any]:
+        asm = adapter.currentModel
+        comp = _get_component(adapter, params.name)
+        if comp is None:
+            raise Exception(f"Component not found: {params.name!r}")
+        # CompConfigProperties5 rewrites the solve mode too, so preserve it.
+        solving = int(
+            adapter._attempt(lambda: comp.Solving, default=_COMP_SOLVING["rigid"])
+        )
+        adapter._attempt(lambda: asm.ClearSelection2(True))
+        if not _select_component(adapter, params.name, 0, False):
+            raise Exception(f"Failed to select component {params.name!r}")
+        adapter._attempt(
+            lambda: asm.CompConfigProperties5(
+                _COMP_FULLY_RESOLVED,
+                solving,
+                True,
+                False,
+                params.configuration,
+                False,
+                False,
+            )
+        )
+        adapter._attempt(lambda: asm.ClearSelection2(True))
+        # ReferencedConfiguration only reflects the change after a rebuild.
+        adapter._attempt(lambda: asm.EditRebuild3())
+        referenced = str(
+            adapter._attempt(lambda: comp.ReferencedConfiguration, default="")
+        )
+        if params.configuration and referenced != params.configuration:
+            raise Exception(
+                f"Referenced configuration did not take for {params.name!r}: "
+                f"requested {params.configuration!r}, read back {referenced!r} "
+                "(does the component's model have a configuration by that name?)"
+            )
+        return {"name": params.name, "configuration": referenced}
+
+    return cast(
+        AdapterResult[dict[str, Any]],
+        adapter._handle_com_operation("set_component_configuration", _operation),
     )
 
 
