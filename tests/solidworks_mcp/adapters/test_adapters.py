@@ -1411,6 +1411,47 @@ class TestPyWin32AdapterBranches:
         assert no_op.is_success
 
     @pytest.mark.asyncio
+    async def test_save_file_in_place_uses_save3_not_close_and_remove(
+        self, monkeypatch, tmp_path
+    ):
+        """Saving the active doc back to the path it was opened from is an
+        in-place save: it must use the silent Save3 and NEVER CloseDoc /
+        os.remove the document being saved (the old code did, which
+        disconnected the doc and deleted the file)."""
+        adapter = self._build_adapter(monkeypatch)
+        target = tmp_path / "drive-train.SLDASM"
+        target.write_text("model", encoding="utf-8")
+
+        removed: list[str] = []
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.os.remove",
+            lambda p, *a, **k: removed.append(p),
+        )
+
+        close_calls: list[str] = []
+        save3_args: list[tuple] = []
+
+        def _save3(options, errors, warnings):
+            save3_args.append((options, errors, warnings))
+            return True
+
+        adapter.currentModel = SimpleNamespace(
+            Save3=_save3,
+            SaveAs3=Mock(side_effect=AssertionError("SaveAs3 must not run in place")),
+            GetPathName=Mock(return_value=str(target)),
+        )
+        adapter.swApp = SimpleNamespace(CloseDoc=lambda p: close_calls.append(p))
+
+        result = await adapter.save_file(str(target))
+
+        assert result.is_success
+        assert close_calls == []  # the active doc was never closed
+        assert removed == []  # the target file was never deleted
+        assert save3_args  # Save3 was used for the in-place write
+        assert save3_args[0][0] == (1 | 8)  # silent | save-referenced
+        assert target.exists()
+
+    @pytest.mark.asyncio
     async def test_feature_and_configuration_edge_paths(self, monkeypatch):
         """Cover list_features/list_configurations edge cases and guarded feature ops."""
         adapter = self._build_adapter(monkeypatch)

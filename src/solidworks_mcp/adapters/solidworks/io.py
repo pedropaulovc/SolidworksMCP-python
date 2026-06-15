@@ -9,6 +9,7 @@ from typing import Any, cast
 
 from .. import sw_type_info as _sw_type_info
 from ..base import AdapterResult, AdapterResultStatus, MassProperties, SolidWorksModel
+from ..com_variant import byref_long
 
 try:
     import pythoncom
@@ -471,15 +472,51 @@ class SolidWorksIOMixin:
                 status=AdapterResultStatus.ERROR, error="No active model"
             )
 
+        def _active_path() -> str:
+            """Absolute on-disk path of the active doc, or ``""`` if unsaved."""
+            path_attr = getattr(adapter.currentModel, "GetPathName", "")
+            model_path = path_attr() if callable(path_attr) else path_attr
+            return os.path.abspath(model_path) if model_path else ""
+
+        def _silent_save_in_place() -> bool:
+            """Save the active doc to its own path with a silent ``Save3``.
+
+            ``swSaveAsOptions_Silent (1) | swSaveAsOptions_SaveReferenced (8)``
+            with **real** ``VT_BYREF | VT_I4`` out params: a bare ``None`` for
+            the ``Errors``/``Warnings`` params fails the COM call, which forces
+            the blocking parameterless ``Save()`` and its "Component documents
+            must be saved" modal. The real byref params let ``Save3`` write
+            without a dialog.
+            """
+            errors, warnings = byref_long(), byref_long()
+            return self._is_success(
+                adapter._attempt(
+                    lambda: adapter.currentModel.Save3(1 | 8, errors, warnings),
+                    default=False,
+                )
+            )
+
         def _save() -> None:
-            """Save the model."""
+            """Save the model in place, or Save-As to a different path."""
             if file_path:
                 resolved_path = os.path.abspath(file_path)
+
+                # Saving the active doc to the path it was opened from is an
+                # in-place save, NOT a Save-As: never CloseDoc/os.remove the doc
+                # being saved (that disconnects it and deletes the file). Use
+                # the silent in-place Save3 instead.
+                if os.path.normcase(resolved_path) == os.path.normcase(_active_path()):
+                    if _silent_save_in_place() and os.path.exists(resolved_path):
+                        return
+                    raise Exception(f"Failed to save in place: {resolved_path}")
+
                 os.makedirs(os.path.dirname(resolved_path), exist_ok=True)
 
+                # True Save-As to a different path: clear any stale target file
+                # so SaveAs3 can write it. Safe because resolved_path is not the
+                # active document.
                 if adapter.swApp:
                     adapter._attempt(lambda: adapter.swApp.CloseDoc(resolved_path))
-
                 if os.path.exists(resolved_path):
                     adapter._attempt(lambda: os.remove(resolved_path))
 
@@ -497,22 +534,11 @@ class SolidWorksIOMixin:
                     raise Exception(f"File not written after save: {resolved_path}")
                 return
 
-            save_result = adapter._attempt(
-                lambda: adapter.currentModel.Save3(1, None, None)
-            )
-            if save_result is None:
-                save_fn = getattr(adapter.currentModel, "Save", None)
-                if callable(save_fn):
-                    save_result = save_fn()
-                else:
-                    raise Exception("Failed to save file")
-
-            if self._is_success(save_result):
+            # No path: silent in-place save of the active document.
+            if _silent_save_in_place():
                 return
-
-            path_attr = getattr(adapter.currentModel, "GetPathName", "")
-            model_path = path_attr() if callable(path_attr) else path_attr
-            if model_path and os.path.exists(model_path):
+            active = _active_path()
+            if active and os.path.exists(active):
                 return
             raise Exception("Failed to save file")
 
