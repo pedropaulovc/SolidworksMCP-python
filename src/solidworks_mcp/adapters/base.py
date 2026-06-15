@@ -990,6 +990,28 @@ class SetComponentSolvingParameters(BaseModel):
     solving: str = "flexible"
 
 
+class SetComponentConfigurationParameters(BaseModel):
+    """Parameters for setting which child configuration a component references.
+
+    Attributes:
+        name (str): Component name with instance suffix, e.g.
+            ``"drive-train-1"`` (``"sub-1/inner-1"`` for a nested child).
+        configuration (str): Name of the child configuration the component
+            should reference in the assembly's **active** configuration. An
+            empty string restores the component's default referenced
+            configuration. Because the change is scoped to the active assembly
+            configuration, the same component can reference different child
+            configurations per assembly configuration — the basis for
+            top-level engagement states (e.g. ``harmonic-analyzer``'s
+            ``cone_disengaged`` config points ``drive-train-1`` at the
+            drive-train's own ``cone_disengaged`` config, while ``Default``
+            keeps it at ``Default``).
+    """
+
+    name: str
+    configuration: str = ""
+
+
 class MotionStudyParameters(BaseModel):
     """Parameters for creating (or re-selecting) a motion study.
 
@@ -2399,6 +2421,28 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="set_component_solving is not implemented by this adapter",
+        )
+
+    async def set_component_configuration(
+        self, params: SetComponentConfigurationParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Set which child configuration a component references.
+
+        Scoped to the assembly's active configuration, so the same component
+        can reference different child configurations in different assembly
+        configurations.
+
+        Args:
+            params (SetComponentConfigurationParameters): Component name and
+                target child configuration name.
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Resulting referenced configuration
+            or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="set_component_configuration is not implemented by this adapter",
         )
 
     # Motion-study Operations

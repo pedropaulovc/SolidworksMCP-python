@@ -57,6 +57,7 @@ from .base import (
     ReplaceComponentParameters,
     RevolveParameters,
     RotateComponentParameters,
+    SetComponentConfigurationParameters,
     SetComponentSolvingParameters,
     SetGlobalVariableParameters,
     ShellParameters,
@@ -2016,6 +2017,34 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         return AdapterResult(
             status=AdapterResultStatus.SUCCESS,
             data={"name": name, "solving": params.solving},
+            execution_time=self._delays["model_operation"] / 2,
+        )
+
+    async def set_component_configuration(
+        self, params: SetComponentConfigurationParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        """Mock setting which child configuration a component references.
+
+        Args:
+            params (SetComponentConfigurationParameters): Component name and
+                target child configuration name (empty restores the default).
+
+        Returns:
+            AdapterResult[dict[str, Any]]: Resulting referenced configuration,
+            or an error when the model or component is missing.
+        """
+        resolved = self._component_or_error(params.name)
+        if isinstance(resolved, AdapterResult):
+            return resolved
+        name, component = resolved
+
+        await asyncio.sleep(self._delays["model_operation"] / 2)
+        self._operation_count += 1
+        referenced = params.configuration or "Default"
+        component["configuration"] = referenced
+        return AdapterResult(
+            status=AdapterResultStatus.SUCCESS,
+            data={"name": name, "configuration": referenced},
             execution_time=self._delays["model_operation"] / 2,
         )
 

@@ -20,6 +20,7 @@ from solidworks_mcp.adapters.base import (
     MoveComponentParameters,
     ReplaceComponentParameters,
     RotateComponentParameters,
+    SetComponentConfigurationParameters,
     SetComponentSolvingParameters,
     SuppressMateParameters,
 )
@@ -1477,6 +1478,85 @@ def test_set_component_solving_refusal_reports_readback() -> None:
     assert "float it first" in (result.error or "")
 
 
+class _RefConfigModel(_FakeAssemblyModel):
+    """Assembly model whose CompConfigProperties5 sets a component's referenced
+    child configuration (empty RefConfigName restores 'Default', mirroring SW)."""
+
+    def __init__(self, components=None, takes=True) -> None:
+        super().__init__(components=components)
+        self.takes = takes
+        self.config_calls: list[tuple] = []
+
+    def CompConfigProperties5(  # noqa: N802
+        self, suppression, solving, visibility, named, config, bom, envelope
+    ):
+        self.config_calls.append((suppression, solving, config))
+        if self.takes:
+            for comp in self._components.values():
+                comp.ReferencedConfiguration = config or "Default"
+        return True
+
+
+def test_set_component_configuration_success() -> None:
+    comp = _SolvingComponent(solving=1)  # flexible — must be preserved
+    model = _RefConfigModel(components={"drive-train-1": comp})
+    adapter = _adapter_with(model)
+
+    result = assembly_module._set_component_configuration_impl(
+        adapter,
+        SetComponentConfigurationParameters(
+            name="drive-train-1", configuration="cone_disengaged"
+        ),
+    )
+    assert result.is_success
+    assert result.data == {"name": "drive-train-1", "configuration": "cone_disengaged"}
+    # Suppression stays fully-resolved (2) and the flexible solve mode (1) is
+    # preserved while the referenced child config is set.
+    assert model.config_calls == [(2, 1, "cone_disengaged")]
+    assert model.rebuilds == 1  # EditRebuild3 required for the change to show
+
+
+def test_set_component_configuration_empty_restores_default() -> None:
+    comp = _SolvingComponent(solving=0)
+    model = _RefConfigModel(components={"drive-train-1": comp})
+    adapter = _adapter_with(model)
+
+    result = assembly_module._set_component_configuration_impl(
+        adapter,
+        SetComponentConfigurationParameters(name="drive-train-1", configuration=""),
+    )
+    assert result.is_success
+    assert result.data == {"name": "drive-train-1", "configuration": "Default"}
+    assert model.config_calls == [(2, 0, "")]  # empty RefConfigName = default
+
+
+def test_set_component_configuration_component_not_found_errors() -> None:
+    model = _RefConfigModel(components={})
+    adapter = _adapter_with(model)
+    result = assembly_module._set_component_configuration_impl(
+        adapter,
+        SetComponentConfigurationParameters(
+            name="missing-1", configuration="cone_disengaged"
+        ),
+    )
+    assert result.is_error
+    assert "Component not found" in (result.error or "")
+
+
+def test_set_component_configuration_readback_mismatch_errors() -> None:
+    comp = _SolvingComponent(solving=0)  # ReferencedConfiguration stays 'Default'
+    model = _RefConfigModel(components={"drive-train-1": comp}, takes=False)
+    adapter = _adapter_with(model)
+    result = assembly_module._set_component_configuration_impl(
+        adapter,
+        SetComponentConfigurationParameters(
+            name="drive-train-1", configuration="cone_disengaged"
+        ),
+    )
+    assert result.is_error
+    assert "did not take" in (result.error or "")
+
+
 # ---------------------------------------------------------------------------
 # Component cylindrical-face resolution (PR-M4 motor entity)
 # ---------------------------------------------------------------------------
@@ -1706,6 +1786,32 @@ async def test_mock_set_component_solving_unknown_mode_errors() -> None:
     )
     assert result.is_error
     assert "Unknown solving mode" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_mock_set_component_configuration_sets_and_restores() -> None:
+    adapter, name = await _assembly_mock_with_component()
+    set_result = await adapter.set_component_configuration(
+        SetComponentConfigurationParameters(name=name, configuration="cone_disengaged")
+    )
+    assert set_result.is_success
+    assert set_result.data == {"name": name, "configuration": "cone_disengaged"}
+
+    restored = await adapter.set_component_configuration(
+        SetComponentConfigurationParameters(name=name, configuration="")
+    )
+    assert restored.is_success
+    assert restored.data == {"name": name, "configuration": "Default"}
+
+
+@pytest.mark.asyncio
+async def test_mock_set_component_configuration_not_found_errors() -> None:
+    adapter, _ = await _assembly_mock_with_component()
+    result = await adapter.set_component_configuration(
+        SetComponentConfigurationParameters(name="ghost-1", configuration="x")
+    )
+    assert result.is_error
+    assert "Component not found" in (result.error or "")
 
 
 @pytest.mark.asyncio

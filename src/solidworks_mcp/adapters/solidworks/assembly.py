@@ -40,6 +40,7 @@ from ..base import (
     MoveComponentParameters,
     ReplaceComponentParameters,
     RotateComponentParameters,
+    SetComponentConfigurationParameters,
     SetComponentSolvingParameters,
     SolidWorksFeature,
     SuppressMateParameters,
@@ -195,6 +196,11 @@ class SolidWorksAssemblyMixin:
         self, params: SetComponentSolvingParameters
     ) -> AdapterResult[dict[str, Any]]:
         return _set_component_solving_impl(self, params)
+
+    async def set_component_configuration(
+        self, params: SetComponentConfigurationParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        return _set_component_configuration_impl(self, params)
 
 
 # ---------------------------------------------------------------------------
@@ -2081,6 +2087,79 @@ def _set_component_solving_impl(
     return cast(
         AdapterResult[dict[str, Any]],
         adapter._handle_com_operation("set_component_solving", _operation),
+    )
+
+
+def _set_component_configuration_impl(
+    adapter: Any, params: SetComponentConfigurationParameters
+) -> AdapterResult[dict[str, Any]]:
+    """Set which child configuration a component references via
+    ``CompConfigProperties5``, scoped to the active assembly configuration.
+
+    Selects the component and applies the referenced-configuration change to
+    the assembly's **active** configuration only, so the same component can
+    point at a different child configuration in each assembly configuration --
+    the mechanism behind top-level engagement states (e.g. a ``cone_disengaged``
+    assembly config that references the drive-train's own ``cone_disengaged``).
+    A non-empty ``configuration`` selects that child config; an empty string
+    restores the component's default. The component's current solve mode is
+    preserved (``CompConfigProperties5`` also carries it). The change is
+    verified by reading ``IComponent2::ReferencedConfiguration`` back after an
+    ``EditRebuild3`` (required for the change to take effect).
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Component name and target child configuration name.
+
+    Returns:
+        AdapterResult[dict[str, Any]]: Resulting referenced configuration or
+        error.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if not params.name.strip():
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="name is required")
+
+    def _operation() -> dict[str, Any]:
+        asm = adapter.currentModel
+        comp = _get_component(adapter, params.name)
+        if comp is None:
+            raise Exception(f"Component not found: {params.name!r}")
+        # CompConfigProperties5 rewrites the solve mode too, so preserve it.
+        solving = int(
+            adapter._attempt(lambda: comp.Solving, default=_COMP_SOLVING["rigid"])
+        )
+        adapter._attempt(lambda: asm.ClearSelection2(True))
+        if not _select_component(adapter, params.name, 0, False):
+            raise Exception(f"Failed to select component {params.name!r}")
+        adapter._attempt(
+            lambda: asm.CompConfigProperties5(
+                _COMP_FULLY_RESOLVED,
+                solving,
+                True,
+                False,
+                params.configuration,
+                False,
+                False,
+            )
+        )
+        adapter._attempt(lambda: asm.ClearSelection2(True))
+        # ReferencedConfiguration only reflects the change after a rebuild.
+        adapter._attempt(lambda: asm.EditRebuild3())
+        referenced = str(
+            adapter._attempt(lambda: comp.ReferencedConfiguration, default="")
+        )
+        if params.configuration and referenced != params.configuration:
+            raise Exception(
+                f"Referenced configuration did not take for {params.name!r}: "
+                f"requested {params.configuration!r}, read back {referenced!r} "
+                "(does the component's model have a configuration by that name?)"
+            )
+        return {"name": params.name, "configuration": referenced}
+
+    return cast(
+        AdapterResult[dict[str, Any]],
+        adapter._handle_com_operation("set_component_configuration", _operation),
     )
 
 
