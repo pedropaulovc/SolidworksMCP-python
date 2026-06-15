@@ -873,6 +873,16 @@ class _FakeMate:
         return True
 
 
+class _FakeRackPinionMateData:
+    """Stand-in for an ``IRackPinionMateFeatureData`` from ``CreateMateData``."""
+
+    def __init__(self, mate_type) -> None:
+        self.mate_type = mate_type
+        self.DiameterType = None
+        self.DiameterVal = None
+        self.Reverse = None
+
+
 class _FakeMateGroup:
     def __init__(self, mates) -> None:
         self.mates = list(mates)
@@ -903,6 +913,20 @@ class _MateModel(_FakeAssemblyModel):
         self.add_mate_status = 1
         self.add_mate_modify_result = True
         self._last_feature = None
+        self.create_mate_data_calls: list[int] = []
+        self.created_mate_data: list[_FakeRackPinionMateData] = []
+
+    def CreateMateData(self, mate_type):  # noqa: N802
+        self.create_mate_data_calls.append(mate_type)
+        data = _FakeRackPinionMateData(mate_type)
+        self.created_mate_data.append(data)
+        return data
+
+    def CreateMate(self, data):  # noqa: N802
+        mate = _FakeMate(self.add_mate_name)
+        mate.mate_data = data
+        self.mate_group.mates.append(mate)
+        return mate
 
     def FeatureByName(self, name):  # noqa: N802
         mate = next((m for m in self.mate_group.mates if m.Name == name), None)
@@ -1234,7 +1258,12 @@ def test_suppress_mate_success_applies_all_configurations() -> None:
 
     assert result.is_success
     assert mate.suppression_calls == [(0, 2)]  # suppress, all configurations
-    assert result.data == {"name": "Distance1", "suppressed": True, "component": ""}
+    assert result.data == {
+        "name": "Distance1",
+        "suppressed": True,
+        "component": "",
+        "configuration": "",
+    }
 
 
 def test_unsuppress_mate_success() -> None:
@@ -1247,7 +1276,51 @@ def test_unsuppress_mate_success() -> None:
 
     assert result.is_success
     assert mate.suppression_calls == [(1, 2)]
-    assert result.data == {"name": "Distance1", "suppressed": False, "component": ""}
+    assert result.data == {
+        "name": "Distance1",
+        "suppressed": False,
+        "component": "",
+        "configuration": "",
+    }
+
+
+def test_suppress_mate_scoped_to_configuration() -> None:
+    """A configuration name routes to swSpecifyConfiguration and is verified
+    against that configuration (already active here, so no switch needed)."""
+    mate = _FakeMate("Distance1")
+    model = _MateModel(mates=[mate])
+    model.ConfigurationManager = SimpleNamespace(
+        ActiveConfiguration=SimpleNamespace(Name="cone_disengaged")
+    )
+    model.ShowConfiguration2 = lambda name: True
+    adapter = _adapter_with(model)
+
+    result = assembly_module._suppress_mate_impl(
+        adapter,
+        SuppressMateParameters(
+            name="Distance1", suppress=True, configuration="cone_disengaged"
+        ),
+    )
+
+    assert result.is_success
+    assert mate.suppression_calls == [(0, 3)]  # suppress, specify configuration
+    assert result.data == {
+        "name": "Distance1",
+        "suppressed": True,
+        "component": "",
+        "configuration": "cone_disengaged",
+    }
+
+
+def test_suppress_mate_configuration_with_component_errors() -> None:
+    result = assembly_module._suppress_mate_impl(
+        _adapter_with(_MateModel(mates=[_FakeMate("Distance1")])),
+        SuppressMateParameters(
+            name="Distance1", configuration="rest", component="drive-train-1"
+        ),
+    )
+    assert result.is_error
+    assert "not supported together with component" in (result.error or "")
 
 
 def test_suppress_mate_state_not_applied_errors() -> None:
@@ -1308,6 +1381,7 @@ def test_suppress_mate_in_subassembly_resolves_in_sub_doc() -> None:
         "name": "Distance34",
         "suppressed": True,
         "component": "drive-train-1",
+        "configuration": "",
     }
 
 
@@ -1822,12 +1896,17 @@ def test_add_mate_rack_pinion_sets_pitch_diameter() -> None:
         ),
     )
 
+    # Rack-pinion mates carrying a value are built via CreateMateData ->
+    # CreateMate (AddMate5 cannot set the diameter; a follow-up ModifyDefinition
+    # fails), so AddMate5 is never called for this mate.
     assert result.is_success
-    assert model.mate_calls[0][0] == 13  # swMateRACKPINION
-    mate = model.mate_group.mates[-1]
-    assert mate.definition.DiameterType == 0  # swPinionPitchDiameter
-    assert abs(mate.definition.DiameterVal - 0.030) < 1e-12  # metres
-    assert mate.modify_calls == [mate.definition]
+    assert model.mate_calls == []
+    assert model.create_mate_data_calls == [13]  # CreateMateData(swMateRACKPINION)
+    data = model.created_mate_data[-1]
+    assert data.DiameterType == 0  # swPinionPitchDiameter
+    assert abs(data.DiameterVal - 0.030) < 1e-12  # metres
+    assert data.Reverse is False
+    assert result.data["name"] == "RackPinionMate1"
     assert result.data["pinion_pitch_diameter"] == 30.0
 
 
@@ -1846,9 +1925,11 @@ def test_add_mate_rack_pinion_travel_per_revolution() -> None:
     )
 
     assert result.is_success
-    mate = model.mate_group.mates[-1]
-    assert mate.definition.DiameterType == 1  # swRackTravelPerRevolution
-    assert abs(mate.definition.DiameterVal - 0.0254) < 1e-12
+    assert model.create_mate_data_calls == [13]
+    data = model.created_mate_data[-1]
+    assert data.DiameterType == 1  # swRackTravelPerRevolution
+    assert abs(data.DiameterVal - 0.0254) < 1e-12
+    assert result.data["rack_travel_per_revolution"] == 25.4
 
 
 def test_add_mate_rack_pinion_both_values_errors() -> None:

@@ -954,11 +954,23 @@ class SuppressMateParameters(BaseModel):
             (its name, e.g. ``"Distance34"``, is the standalone name in the
             sub, not a qualified top-level name). The subassembly is not
             saved, so its on-disk fully-defined state is preserved.
+        configuration (str): Optional configuration name to scope the
+            suppression to. Empty (default) suppresses across **all**
+            configurations (``swAllConfiguration``); a name suppresses only
+            in that configuration (``swSpecifyConfiguration``), leaving the
+            mate's state in every other configuration untouched — the basis
+            for engagement states (``rest``/``cone_disengaged``/
+            ``pinion_engaged``). The named configuration is made active for
+            the ``IsSuppressed`` readback, then the prior active
+            configuration is restored. Not supported together with
+            ``component`` (a sub-document's own configurations are a separate
+            namespace).
     """
 
     name: str
     suppress: bool = True
     component: str = ""
+    configuration: str = ""
 
 
 class SetComponentSolvingParameters(BaseModel):
@@ -1032,6 +1044,9 @@ class MotionMotorParameters(BaseModel):
     reverse: bool = False
     component: str = ""
     study_name: str = ""
+    motion_function: str = "constant"
+    amplitude: float = 0.0
+    frequency: float = 0.0
 
 
 class MotionGravityParameters(BaseModel):
