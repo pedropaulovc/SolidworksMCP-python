@@ -164,6 +164,7 @@ def _adapter_with(model, components=None) -> _FakeAdapter:
     adapter.currentModel = model
     adapter.swApp = SimpleNamespace(
         GetMathUtility=lambda: _FakeMathUtility(),
+        DocumentVisible=lambda *args: None,
         OpenDoc6=lambda *args: SimpleNamespace(),
         GetOpenDocumentByName=lambda _path: None,
         ActivateDoc3=lambda *args: None,
@@ -298,6 +299,50 @@ def test_insert_component_success_preloads_and_positions(tmp_path) -> None:
     assert result.data["name"] == "inserted-1"
     assert result.data["position"] == [10.0, 20.0, 30.0]
     assert model.rebuilds >= 1
+
+
+def test_insert_component_preloads_hidden_then_restores_visibility(tmp_path) -> None:
+    part = tmp_path / "shaft.sldprt"
+    part.write_text("", encoding="utf-8")
+    adapter = _adapter_with(_FakeAssemblyModel())
+    events: list[tuple] = []
+    adapter.swApp.DocumentVisible = lambda visible, doc_type: events.append(
+        ("visible", visible, doc_type)
+    )
+    adapter.swApp.OpenDoc6 = lambda *args: (
+        events.append(("open", args[1])) or (SimpleNamespace())
+    )
+
+    result = assembly_module._insert_component_impl(
+        adapter, InsertComponentParameters(file_path=str(part))
+    )
+
+    assert result.is_success
+    # The part is hidden (False) before the open and restored (True) after,
+    # so the load never spins up the part's SceneGraph display buffers.
+    assert events == [
+        ("visible", False, 1),
+        ("open", 1),
+        ("visible", True, 1),
+    ]
+
+
+def test_insert_component_restores_visibility_on_preload_failure(tmp_path) -> None:
+    part = tmp_path / "shaft.sldprt"
+    part.write_text("", encoding="utf-8")
+    adapter = _adapter_with(_FakeAssemblyModel())
+    restored: list[bool] = []
+    adapter.swApp.DocumentVisible = lambda visible, doc_type: restored.append(visible)
+    adapter.swApp.OpenDoc6 = lambda *args: None
+    adapter.swApp.GetOpenDocumentByName = lambda _path: None
+
+    result = assembly_module._insert_component_impl(
+        adapter, InsertComponentParameters(file_path=str(part))
+    )
+
+    assert result.is_error
+    # Visibility is restored to True even though the load failed.
+    assert restored == [False, True]
 
 
 def test_insert_component_unsupported_extension_errors(tmp_path) -> None:

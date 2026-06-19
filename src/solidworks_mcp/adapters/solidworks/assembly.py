@@ -747,6 +747,24 @@ def _kinematic_rotate_component(
 def _preload_component_file(adapter: Any, resolved_path: str) -> None:
     """Load a model into memory so ``AddComponent5`` can reference it.
 
+    ``AddComponent5`` requires the source file to already be loaded in
+    memory (per the API remarks), but it does *not* require the file to be
+    displayed. We load it **invisibly** by bracketing ``OpenDoc6`` with
+    ``ISldWorks::DocumentVisible(False/True)``: this is the documented
+    pattern (see ``ISldWorks::OpenDoc6`` Remarks → "Avoid large increases in
+    memory usage caused when adding parts to assemblies" and
+    ``ISldWorks::DocumentVisible``). Loading hidden skips the per-document
+    SceneGraph display buffers (2-3 MB even for trivial parts, not shared
+    between parts and assemblies) and, because the part never becomes the
+    active displayed document, avoids the UI flash and the need to switch
+    the assembly back to the foreground.
+
+    The visibility flag is restored in a ``finally`` so an unrelated open
+    later in the session is unaffected even if the load raises. A document
+    opened invisibly cannot subsequently be shown via ``IModelDoc2::Visible``
+    (per the ``DocumentVisible`` Remarks); that is acceptable here because
+    the part is only ever referenced as an assembly component.
+
     Args:
         adapter: Connected adapter.
         resolved_path: Absolute path to the ``.sldprt``/``.sldasm`` file.
@@ -763,10 +781,16 @@ def _preload_component_file(adapter: Any, resolved_path: str) -> None:
             "(expected .sldprt or .sldasm)"
         )
     app = adapter.swApp
-    loaded = adapter._attempt(
-        lambda: app.OpenDoc6(resolved_path, doc_type, 1, "", _byref_i4(), _byref_i4()),
-        default=None,
-    )
+    adapter._attempt(lambda: app.DocumentVisible(False, doc_type), default=None)
+    try:
+        loaded = adapter._attempt(
+            lambda: app.OpenDoc6(
+                resolved_path, doc_type, 1, "", _byref_i4(), _byref_i4()
+            ),
+            default=None,
+        )
+    finally:
+        adapter._attempt(lambda: app.DocumentVisible(True, doc_type), default=None)
     if not loaded:
         loaded = adapter._attempt(
             lambda: app.GetOpenDocumentByName(resolved_path), default=None
@@ -778,8 +802,11 @@ def _preload_component_file(adapter: Any, resolved_path: str) -> None:
 def _activate_assembly(adapter: Any) -> None:
     """Re-activate the assembly document (best effort).
 
-    ``OpenDoc6`` during the preload makes the component document active in
-    the UI; later view-dependent operations need the assembly back.
+    Now that the preload loads the component invisibly (see
+    ``_preload_component_file``) the part never becomes the active displayed
+    document, so this is a defensive safeguard rather than a correction: it
+    keeps the assembly in the foreground for later view-dependent operations
+    regardless of how the COM session left things.
     """
     title = adapter._attempt(lambda: adapter.currentModel.GetTitle(), default=None)
     if not title:
