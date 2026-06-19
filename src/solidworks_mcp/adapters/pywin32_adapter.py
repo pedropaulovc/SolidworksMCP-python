@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import Any, TypeVar
 
 from ..exceptions import SolidWorksMCPError
-from . import sw_type_info
+from . import sw_install, sw_type_info
 from .base import (
     AdapterHealth,
     AdapterResult,
@@ -171,41 +171,97 @@ class _ComSessionCoordinator:
         self._adapter._com_initialized = False
 
     async def acquire_solidworks_application(self) -> Any:
-        """Acquire a live SolidWorks COM application object with retries.
+        """Acquire a live SolidWorks COM application object.
 
-        Attempts up to 8 connect-cycles.  Each cycle first tries
-        ``win32com.client.GetActiveObject("SldWorks.Application")`` to bind to
-        a running instance, then falls back to
-        ``win32com.client.Dispatch("SldWorks.Application")`` to start one.
-        Between cycles the coroutine sleeps 1 second so that a slow
-        SolidWorks launch has time to register its COM class.
+        Attaching to an already-running instance works for every edition and
+        never raises the 3DEXPERIENCE launch dialog, so that is always tried
+        first.  When nothing is running, the launch strategy is resolved from
+        the installed edition (see :mod:`solidworks_mcp.adapters.sw_install`):
+
+        * **Standard install** — cold-start the ``SldWorks.Application`` COM
+          class via late-bound ``Dispatch``.
+        * **3DEXPERIENCE / "for Makers" edition** — start through the Platform
+          desktop shortcut (a bare COM/exe cold-start only pops the modal
+          "must be launched from the 3DEXPERIENCE Platform" dialog and exits),
+          then attach over COM.
+        * **Makers edition with no shortcut found** — raise an actionable
+          error rather than triggering that dialog.
 
         Returns:
             Any: The live ``SldWorks.Application`` COM object.
 
         Raises:
-            SolidWorksMCPError: After all retries are exhausted, wraps the
-                last ``pywintypes.com_error`` or raises a generic message
-                when the returned object is ``None``.
+            SolidWorksMCPError: When acquisition fails, or the Makers edition is
+                installed but cannot be started automatically.
 
         Side Effects:
             Sets ``adapter.swApp`` to the acquired COM object.
         """
         self._adapter.swApp = None
-        last_error: Exception | None = None
-        # Force late binding (dynamic.Dispatch) — the gen_py wrapper provides
-        # method-name lookup for flag_methods but early-bound dispatches
-        # reject VARIANT pass-by-ref params used by OpenDoc6 and friends.
-        for _ in range(8):
-            try:
-                raw = win32com.client.GetActiveObject("SldWorks.Application")
-                app = _dynamic_dispatch(raw) if raw is not None else None
-                if app is not None:
-                    self._adapter.swApp = app
-                    return app
-            except pywintypes.com_error as active_error:
-                last_error = active_error
 
+        app = self._attach_to_running_application()
+        if app is not None:
+            self._adapter.swApp = app
+            return app
+
+        # A SolidWorks process may already be running but not yet attachable
+        # (still registering its Running Object Table entry, or parked on a
+        # startup dialog). Launching another instance here pops the "Another
+        # session of SOLIDWORKS may already be running" journal warning, so poll
+        # for attach instead of starting a duplicate.
+        if sw_install.is_solidworks_process_running():
+            return await self._await_running_application()
+
+        # No instance is running — validate how this install must be started
+        # before blindly cold-starting it.
+        strategy, shortcut = sw_install.resolve_launch_strategy()
+
+        if strategy is sw_install.LaunchStrategy.PLATFORM_REQUIRED:
+            raise SolidWorksMCPError(
+                "SolidWorks 'for Makers' (3DEXPERIENCE) edition is installed but no "
+                "running instance was found and no 3DEXPERIENCE Platform launch "
+                "shortcut could be located. Start SOLIDWORKS Design from the "
+                "3DEXPERIENCE Platform (or its desktop shortcut), then retry — this "
+                "edition cannot be launched directly via COM or sldworks.exe."
+            )
+
+        if strategy is sw_install.LaunchStrategy.PLATFORM_SHORTCUT:
+            return await self._launch_via_platform_and_attach(shortcut)
+
+        return await self._cold_start_application()
+
+    def _attach_to_running_application(self) -> Any | None:
+        """Bind to an already-running SolidWorks instance, if there is one.
+
+        Uses ``GetActiveObject`` and forces late binding via
+        ``dynamic.Dispatch`` — the gen_py wrapper provides method-name lookup
+        for ``flag_methods`` but early-bound dispatches reject the VARIANT
+        pass-by-ref params used by ``OpenDoc6`` and friends.
+
+        Returns:
+            Any | None: The late-bound COM object, or ``None`` when no instance
+            is running (or the bind fails for any reason).
+        """
+        try:
+            raw = win32com.client.GetActiveObject("SldWorks.Application")
+        except Exception:
+            return None
+        return _dynamic_dispatch(raw) if raw is not None else None
+
+    async def _cold_start_application(self) -> Any:
+        """Cold-start a standard SolidWorks install via the COM class.
+
+        Retries up to 8 times, sleeping 1 second between attempts so a slow
+        launch has time to register its COM class.
+
+        Returns:
+            Any: The live ``SldWorks.Application`` COM object.
+
+        Raises:
+            SolidWorksMCPError: After all retries are exhausted.
+        """
+        last_error: Exception | None = None
+        for _ in range(8):
             try:
                 app = _dynamic_dispatch("SldWorks.Application")
                 if app is not None:
@@ -219,6 +275,77 @@ class _ComSessionCoordinator:
         if last_error is not None:
             raise SolidWorksMCPError(str(last_error))
         raise SolidWorksMCPError("SolidWorks COM application instance is None")
+
+    async def _launch_via_platform_and_attach(self, shortcut: Any) -> Any:
+        """Launch the Makers edition via its Platform shortcut, then attach.
+
+        Args:
+            shortcut: The Platform launch shortcut path resolved by
+                :func:`sw_install.find_platform_shortcut`.
+
+        Returns:
+            Any: The live ``SldWorks.Application`` COM object.
+
+        Raises:
+            SolidWorksMCPError: When the launch is fired but no licensed COM
+                instance becomes attachable within the timeout.
+        """
+        sw_install.launch_via_platform_shortcut(shortcut)
+        app = await self._poll_for_running_application()
+        if app is not None:
+            return app
+
+        raise SolidWorksMCPError(
+            "Launched SolidWorks via the 3DEXPERIENCE Platform shortcut "
+            f"({shortcut}) but no COM instance became available within 60s. "
+            "Confirm the 3DEXPERIENCE session is signed in and dismiss any "
+            "startup dialogs, then retry."
+        )
+
+    async def _await_running_application(self) -> Any:
+        """Attach to a SolidWorks process that is up but not yet COM-attachable.
+
+        Polls without ever launching a second instance, so it cannot trigger the
+        duplicate-session journal warning.
+
+        Returns:
+            Any: The live ``SldWorks.Application`` COM object.
+
+        Raises:
+            SolidWorksMCPError: When the running process never becomes
+                COM-attachable within the timeout.
+        """
+        app = await self._poll_for_running_application()
+        if app is not None:
+            return app
+
+        raise SolidWorksMCPError(
+            "A SolidWorks process is running but did not become COM-attachable "
+            "within 60s. Dismiss any startup dialogs (e.g. the journal-file "
+            "warning or a 3DEXPERIENCE login prompt); if it persists, restart "
+            "SolidWorks via the 3DEXPERIENCE Platform."
+        )
+
+    async def _poll_for_running_application(self, attempts: int = 60) -> Any | None:
+        """Poll ``GetActiveObject`` until a running instance attaches.
+
+        The Platform splash can take ~30 s to hand off a licensed session, so the
+        default window is 60 seconds at a 1-second cadence.
+
+        Args:
+            attempts: Number of 1-second poll cycles before giving up.
+
+        Returns:
+            Any | None: The attached COM object, or ``None`` on timeout. Sets
+            ``adapter.swApp`` on success.
+        """
+        for _ in range(attempts):
+            await asyncio.sleep(1.0)
+            app = self._attach_to_running_application()
+            if app is not None:
+                self._adapter.swApp = app
+                return app
+        return None
 
     async def wait_for_server_ready(self, app: Any) -> None:
         """Poll until the SolidWorks COM server is responsive.

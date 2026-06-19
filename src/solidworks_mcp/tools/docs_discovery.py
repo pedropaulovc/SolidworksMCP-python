@@ -11,12 +11,14 @@ from __future__ import annotations
 import json
 import platform
 import re
+import time
 from pathlib import Path
 from typing import Any, TypeVar
 
 from loguru import logger
 from pydantic import Field
 
+from ..adapters import sw_install
 from .input_compat import CompatInput
 
 try:
@@ -418,21 +420,84 @@ class SolidWorksDocsDiscovery:
 
         try:
             # Prefer GetActiveObject so we attach to a running SolidWorks session.
-            # EnsureDispatch is used (instead of Dispatch) so that the type library
-            # is loaded and pythoncom ITypeInfo enumeration works correctly.
             try:
                 self.sw_app = win32com.client.GetActiveObject("SldWorks.Application")
+                return True
             except com_error:
-                logger.warning(
-                    "SolidWorks not running; attempting to create new instance"
-                )
-                self.sw_app = win32com.client.gencache.EnsureDispatch(
-                    "SldWorks.Application"
-                )
-            return True
+                pass
+
+            # Not running. Cold-starting the "for Makers" (3DEXPERIENCE) edition
+            # via the COM class only pops the modal "must be launched from the
+            # 3DEXPERIENCE Platform" dialog, so validate the edition first.
+            return self._start_and_attach()
         except com_error as e:
             logger.error(f"Failed to connect to SolidWorks: {e}")
             return False
+
+    def _start_and_attach(self) -> bool:
+        """Start SolidWorks when no instance is running, then attach for indexing.
+
+        A process that is already running but not yet COM-attachable is polled
+        rather than re-launched (a duplicate launch pops the "Another session of
+        SOLIDWORKS may already be running" journal warning). Otherwise standard
+        installs are cold-started via ``EnsureDispatch`` (early binding, so the
+        type library loads and ITypeInfo enumeration works) and the Makers
+        edition is started through its 3DEXPERIENCE Platform shortcut; if no
+        shortcut exists the dialog is avoided entirely.
+
+        Returns:
+            bool: ``True`` once ``self.sw_app`` is attached, ``False`` otherwise.
+        """
+        if sw_install.is_solidworks_process_running():
+            if self._poll_for_active_object():
+                return True
+            logger.error(
+                "A SolidWorks process is running but did not become COM-attachable "
+                "within 60s. Dismiss any startup dialogs, then retry COM indexing."
+            )
+            return False
+
+        strategy, shortcut = sw_install.resolve_launch_strategy()
+
+        if strategy is sw_install.LaunchStrategy.PLATFORM_REQUIRED:
+            logger.error(
+                "SolidWorks 'for Makers' (3DEXPERIENCE) edition is installed but not "
+                "running and no Platform launch shortcut was found. Start SOLIDWORKS "
+                "Design from the 3DEXPERIENCE Platform, then retry COM indexing."
+            )
+            return False
+
+        if strategy is sw_install.LaunchStrategy.PLATFORM_SHORTCUT:
+            sw_install.launch_via_platform_shortcut(shortcut)
+            if self._poll_for_active_object():
+                return True
+            logger.error(
+                "Launched SolidWorks via the 3DEXPERIENCE Platform shortcut but no "
+                "COM instance became available within 60s."
+            )
+            return False
+
+        logger.warning("SolidWorks not running; attempting to create new instance")
+        self.sw_app = win32com.client.gencache.EnsureDispatch("SldWorks.Application")
+        return True
+
+    def _poll_for_active_object(self, attempts: int = 60) -> bool:
+        """Poll ``GetActiveObject`` until a running SolidWorks attaches.
+
+        Args:
+            attempts: Number of 1-second poll cycles before giving up.
+
+        Returns:
+            bool: ``True`` once ``self.sw_app`` is attached, ``False`` on timeout.
+        """
+        for _ in range(attempts):
+            time.sleep(1.0)
+            try:
+                self.sw_app = win32com.client.GetActiveObject("SldWorks.Application")
+                return True
+            except com_error:
+                continue
+        return False
 
     def discover_com_objects(self) -> dict[str, Any]:
         """Discover all COM objects and their methods/properties.
