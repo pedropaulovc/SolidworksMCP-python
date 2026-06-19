@@ -218,6 +218,34 @@ updated 2026-04-24.
   user settings (`[SettingsIo] Failed to read ... Unexpected token '﻿'`).
   Strip the BOM; write plain UTF-8.
 
+### 11. 3DEXPERIENCE "for Makers" edition — cold-start dialog on connect
+
+- **Cause:** the "for Makers" edition (registered COM server under
+  `...\SOLIDWORKS 3DEXPERIENCE R<year>x\...`) refuses any cold start that is
+  not the Platform shortcut. Cold-starting `SldWorks.Application` via COM
+  `Dispatch` (or running `sldworks.exe`) pops the modal "SOLIDWORKS Design
+  must be launched from the 3DEXPERIENCE Platform…" dialog and exits without
+  registering a usable COM server.
+- **Fix (applied):** `adapters/sw_install.py` resolves a launch strategy from
+  the registered edition. `acquire_solidworks_application` (and
+  `docs_discovery.connect_to_solidworks`) always attach to a running instance
+  first; when none is running, the Makers edition is started via the Platform
+  Start-menu shortcut (`Dassault Systemes SOLIDWORKS 3DEXPERIENCE*/SOLIDWORKS
+  Design.lnk`) and then attached. Standard installs still cold-start via COM.
+  If the edition is Makers but no shortcut is found, an actionable error is
+  raised instead of triggering the dialog.
+  - The registry stores `LocalServer32` as an 8.3 short path
+    (`...\SOLIDW~1\...`) that hides the `3DEXPERIENCE` marker, so the path is
+    expanded via `GetLongPathNameW` before the edition check.
+  - Before any launch, `is_solidworks_process_running()` (a `tasklist` probe)
+    short-circuits: if an `sldworks.exe` is already up but not yet
+    COM-attachable, the code polls for attach instead of starting a second
+    instance — otherwise the second launch pops the "Another session of
+    SOLIDWORKS may already be running / journal file could not be created"
+    warning.
+- **Check:** `python -c "from solidworks_mcp.adapters import sw_install;
+  print(sw_install.resolve_launch_strategy())"`.
+
 ### Decision order when starting a debug session
 
 1. Read recent `%APPDATA%\Claude\logs\main.log` entries for

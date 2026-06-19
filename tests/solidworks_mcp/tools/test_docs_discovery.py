@@ -318,6 +318,15 @@ def test_discovery_connect_uses_dispatch_when_getobject_none(
     monkeypatch.setattr(docs_mod, "HAS_WIN32COM", True)
     monkeypatch.setattr(docs_mod.platform, "system", lambda: "Windows")
     monkeypatch.setattr(docs_mod, "com_error", _FakeComError, raising=False)
+    # Standard (non-3DEXPERIENCE) install, nothing running: cold-start via dispatch.
+    monkeypatch.setattr(
+        docs_mod.sw_install, "is_solidworks_process_running", lambda: False
+    )
+    monkeypatch.setattr(
+        docs_mod.sw_install,
+        "resolve_launch_strategy",
+        lambda: (docs_mod.sw_install.LaunchStrategy.COM_DISPATCH, None),
+    )
     monkeypatch.setattr(
         docs_mod,
         "win32com",
@@ -334,6 +343,149 @@ def test_discovery_connect_uses_dispatch_when_getobject_none(
 
     discovery = docs_mod.SolidWorksDocsDiscovery(
         output_dir=Path("tests/.generated/docs-connect-dispatch")
+    )
+    assert discovery.connect_to_solidworks() is True
+    assert discovery.sw_app is fake_sw
+
+
+def test_discovery_connect_makers_launches_platform_shortcut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Makers install with no running instance is started via the Platform shortcut."""
+    import solidworks_mcp.tools.docs_discovery as docs_mod
+
+    fake_sw = object()
+
+    class _FakeComError(Exception):
+        pass
+
+    monkeypatch.setattr(docs_mod, "HAS_WIN32COM", True)
+    monkeypatch.setattr(docs_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(docs_mod, "com_error", _FakeComError, raising=False)
+    monkeypatch.setattr(docs_mod.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        docs_mod.sw_install, "is_solidworks_process_running", lambda: False
+    )
+
+    shortcut = Path(r"C:\sw\SOLIDWORKS Design.lnk")
+    monkeypatch.setattr(
+        docs_mod.sw_install,
+        "resolve_launch_strategy",
+        lambda: (docs_mod.sw_install.LaunchStrategy.PLATFORM_SHORTCUT, shortcut),
+    )
+    launched: list[Path] = []
+    monkeypatch.setattr(
+        docs_mod.sw_install, "launch_via_platform_shortcut", launched.append
+    )
+
+    # First two polls fail (still launching), third attaches.
+    attempts = {"n": 0}
+
+    def _get_active(_progid):
+        attempts["n"] += 1
+        if attempts["n"] <= 3:  # 1 pre-launch attach + 2 polls
+            raise _FakeComError("not running yet")
+        return fake_sw
+
+    monkeypatch.setattr(
+        docs_mod,
+        "win32com",
+        SimpleNamespace(client=SimpleNamespace(GetActiveObject=_get_active)),
+        raising=False,
+    )
+
+    discovery = docs_mod.SolidWorksDocsDiscovery(
+        output_dir=Path("tests/.generated/docs-connect-makers")
+    )
+    assert discovery.connect_to_solidworks() is True
+    assert discovery.sw_app is fake_sw
+    assert launched == [shortcut]
+
+
+def test_discovery_connect_makers_without_shortcut_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Makers install with no shortcut returns False instead of popping the dialog."""
+    import solidworks_mcp.tools.docs_discovery as docs_mod
+
+    class _FakeComError(Exception):
+        pass
+
+    monkeypatch.setattr(docs_mod, "HAS_WIN32COM", True)
+    monkeypatch.setattr(docs_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(docs_mod, "com_error", _FakeComError, raising=False)
+    monkeypatch.setattr(
+        docs_mod.sw_install, "is_solidworks_process_running", lambda: False
+    )
+    monkeypatch.setattr(
+        docs_mod.sw_install,
+        "resolve_launch_strategy",
+        lambda: (docs_mod.sw_install.LaunchStrategy.PLATFORM_REQUIRED, None),
+    )
+    monkeypatch.setattr(
+        docs_mod,
+        "win32com",
+        SimpleNamespace(
+            client=SimpleNamespace(
+                GetActiveObject=lambda _: (_ for _ in ()).throw(
+                    _FakeComError("not running")
+                ),
+            )
+        ),
+        raising=False,
+    )
+
+    discovery = docs_mod.SolidWorksDocsDiscovery(
+        output_dir=Path("tests/.generated/docs-connect-makers-noshortcut")
+    )
+    assert discovery.connect_to_solidworks() is False
+    assert discovery.sw_app is None
+
+
+def test_discovery_connect_polls_running_process_without_relaunch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A running-but-not-yet-attachable process is polled, never re-launched."""
+    import solidworks_mcp.tools.docs_discovery as docs_mod
+
+    fake_sw = object()
+
+    class _FakeComError(Exception):
+        pass
+
+    monkeypatch.setattr(docs_mod, "HAS_WIN32COM", True)
+    monkeypatch.setattr(docs_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(docs_mod, "com_error", _FakeComError, raising=False)
+    monkeypatch.setattr(docs_mod.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        docs_mod.sw_install, "is_solidworks_process_running", lambda: True
+    )
+    # Must not resolve/launch a strategy when a process is already running.
+    monkeypatch.setattr(
+        docs_mod.sw_install,
+        "resolve_launch_strategy",
+        lambda: (_ for _ in ()).throw(AssertionError("must not launch")),
+    )
+
+    attempts = {"n": 0}
+
+    def _get_active(_progid):
+        attempts["n"] += 1
+        if attempts["n"] == 1:  # initial attach in connect_to_solidworks
+            raise _FakeComError("not running yet")
+        if attempts["n"] == 2:  # first poll still not ready
+            raise _FakeComError("still starting")
+        return fake_sw
+
+    monkeypatch.setattr(
+        docs_mod,
+        "win32com",
+        SimpleNamespace(client=SimpleNamespace(GetActiveObject=_get_active)),
+        raising=False,
+    )
+
+    discovery = docs_mod.SolidWorksDocsDiscovery(
+        output_dir=Path("tests/.generated/docs-connect-poll")
     )
     assert discovery.connect_to_solidworks() is True
     assert discovery.sw_app is fake_sw

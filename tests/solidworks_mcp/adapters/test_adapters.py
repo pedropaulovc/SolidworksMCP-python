@@ -15,6 +15,7 @@ import pytest
 from solidworks_mcp.adapters import (
     AdapterFactory,
     create_adapter,
+    sw_install,
 )
 from solidworks_mcp.adapters.base import AdapterResult, AdapterResultStatus
 from solidworks_mcp.adapters.circuit_breaker import (
@@ -883,6 +884,16 @@ class TestPyWin32AdapterBranches:
         import win32com.client.dynamic as _win32_dynamic
 
         monkeypatch.setattr(_win32_dynamic, "Dispatch", Mock(return_value=fake_app))
+
+        # Standard (non-3DEXPERIENCE) install, nothing running: cold-start via COM.
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.is_solidworks_process_running",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.resolve_launch_strategy",
+            lambda: (sw_install.LaunchStrategy.COM_DISPATCH, None),
+        )
 
         await adapter.connect()
         assert adapter.swApp is fake_app
@@ -2766,6 +2777,15 @@ class TestPyWin32AdapterBranches:
             SimpleNamespace(Dispatch=Mock(return_value=None)),
             raising=False,
         )
+        # Standard (non-3DEXPERIENCE) install, nothing running: cold-start via COM.
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.is_solidworks_process_running",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.resolve_launch_strategy",
+            lambda: (sw_install.LaunchStrategy.COM_DISPATCH, None),
+        )
 
         with pytest.raises(SolidWorksMCPError, match="instance is None"):
             await adapter.connect()
@@ -3245,8 +3265,174 @@ class TestPyWin32AdapterBranches:
             SimpleNamespace(Dispatch=Mock(side_effect=RuntimeError("dispatch fail"))),
             raising=False,
         )
+        # Standard (non-3DEXPERIENCE) install, nothing running: cold-start via COM.
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.is_solidworks_process_running",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.resolve_launch_strategy",
+            lambda: (sw_install.LaunchStrategy.COM_DISPATCH, None),
+        )
 
         with pytest.raises(SolidWorksMCPError, match="dispatch fail"):
+            await adapter._acquire_solidworks_application()
+
+    @pytest.mark.asyncio
+    async def test_acquire_attaches_to_running_instance_before_launching(
+        self, monkeypatch
+    ) -> None:
+        """A running instance is attached first, without resolving any launch strategy."""
+        adapter = self._build_adapter(monkeypatch)
+
+        raw_app = object()
+        fake_app = SimpleNamespace(name="running")
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.win32com",
+            SimpleNamespace(
+                client=SimpleNamespace(GetActiveObject=Mock(return_value=raw_app))
+            ),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter._dynamic_dispatch",
+            lambda value: fake_app if value is raw_app else None,
+        )
+        # If a running instance is found, no launch strategy should be consulted.
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.resolve_launch_strategy",
+            Mock(side_effect=AssertionError("must not resolve strategy when attached")),
+        )
+
+        app = await adapter._acquire_solidworks_application()
+        assert app is fake_app
+        assert adapter.swApp is fake_app
+
+    @pytest.mark.asyncio
+    async def test_acquire_polls_running_process_without_relaunching(
+        self, monkeypatch
+    ) -> None:
+        """A running-but-not-yet-attachable process is polled, never re-launched."""
+        adapter = self._build_adapter(monkeypatch)
+
+        async def _fast_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.asyncio.sleep", _fast_sleep
+        )
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.is_solidworks_process_running",
+            lambda: True,
+        )
+        # Must never resolve a launch strategy when a process is already running.
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.resolve_launch_strategy",
+            Mock(side_effect=AssertionError("must not launch when process running")),
+        )
+
+        fake_app = SimpleNamespace(name="attached")
+        monkeypatch.setattr(
+            adapter._session_coordinator,
+            "_attach_to_running_application",
+            Mock(side_effect=[None, fake_app]),
+        )
+
+        app = await adapter._acquire_solidworks_application()
+        assert app is fake_app
+        assert adapter.swApp is fake_app
+
+    @pytest.mark.asyncio
+    async def test_acquire_raises_when_running_process_never_attaches(
+        self, monkeypatch
+    ) -> None:
+        """A running process that never becomes attachable raises, without launching."""
+        adapter = self._build_adapter(monkeypatch)
+
+        async def _fast_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.asyncio.sleep", _fast_sleep
+        )
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.is_solidworks_process_running",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            adapter._session_coordinator,
+            "_attach_to_running_application",
+            Mock(return_value=None),
+        )
+
+        with pytest.raises(SolidWorksMCPError, match="not become COM-attachable"):
+            await adapter._acquire_solidworks_application()
+
+    @pytest.mark.asyncio
+    async def test_acquire_launches_makers_via_platform_shortcut(
+        self, monkeypatch
+    ) -> None:
+        """The Makers edition is started via the Platform shortcut, then attached."""
+        adapter = self._build_adapter(monkeypatch)
+
+        async def _fast_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.asyncio.sleep", _fast_sleep
+        )
+
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.is_solidworks_process_running",
+            lambda: False,
+        )
+        shortcut = Path(r"C:\sw\SOLIDWORKS Design.lnk")
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.resolve_launch_strategy",
+            lambda: (sw_install.LaunchStrategy.PLATFORM_SHORTCUT, shortcut),
+        )
+        launched: list[Path] = []
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.launch_via_platform_shortcut",
+            launched.append,
+        )
+
+        # GetActiveObject: not running pre-launch, then the third poll attaches.
+        fake_app = SimpleNamespace(name="launched")
+        attach_results = [None, None, fake_app]
+        monkeypatch.setattr(
+            adapter._session_coordinator,
+            "_attach_to_running_application",
+            Mock(side_effect=attach_results),
+        )
+
+        app = await adapter._acquire_solidworks_application()
+        assert app is fake_app
+        assert adapter.swApp is fake_app
+        assert launched == [shortcut]
+
+    @pytest.mark.asyncio
+    async def test_acquire_raises_when_makers_shortcut_missing(
+        self, monkeypatch
+    ) -> None:
+        """The Makers edition with no shortcut raises an actionable error, not the dialog."""
+        adapter = self._build_adapter(monkeypatch)
+
+        monkeypatch.setattr(
+            adapter._session_coordinator,
+            "_attach_to_running_application",
+            Mock(return_value=None),
+        )
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.is_solidworks_process_running",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_install.resolve_launch_strategy",
+            lambda: (sw_install.LaunchStrategy.PLATFORM_REQUIRED, None),
+        )
+
+        with pytest.raises(SolidWorksMCPError, match="3DEXPERIENCE Platform"):
             await adapter._acquire_solidworks_application()
 
     @pytest.mark.asyncio
