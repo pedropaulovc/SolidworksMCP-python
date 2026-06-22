@@ -1009,29 +1009,27 @@ def _create_cut_extrude_impl(
         )
         sketch_selected = False
 
-        try:
-            feat_iter = adapter.currentModel.FirstFeature
-            last_profile_feature = None
-            while feat_iter:
-                try:
-                    type_name = feat_iter.GetTypeName2
-                    if type_name == "ProfileFeature":
-                        last_profile_feature = feat_iter
-                except Exception:
-                    pass
-                try:
-                    feat_iter = feat_iter.GetNextFeature
-                except Exception:
-                    break
-            if last_profile_feature:
-                sketch_selected = bool(
-                    adapter._attempt(
-                        lambda pf=last_profile_feature: pf.Select2(False, 0),
-                        default=False,
-                    )
+        # Select the profile to cut: the LAST unconsumed top-level sketch
+        # (``ProfileFeature``), by its CURRENT name. ``_profile_feature_names``
+        # walks the tree with the method-flagging the rest of the adapter relies
+        # on -- a bare ``model.FirstFeature``/``GetTypeName2`` walk fails here, the
+        # active doc is a late-bound CDispatch whose feature methods don't resolve
+        # by name without flagging -- and reads LIVE names. So this is rename-proof:
+        # a renamed sketch is still found and selected by its live name, where the
+        # cached ``_last_sketch_name`` string (fallback below) goes stale on rename.
+        profile_names = _profile_feature_names(adapter)
+        if profile_names:
+            target = profile_names[-1]
+            sketch_selected = bool(
+                adapter._attempt(
+                    lambda t=target: adapter.currentModel.Extension.SelectByID2(
+                        t, "SKETCH", 0.0, 0.0, 0.0, False, 0, null_callout(), 0
+                    ),
+                    default=False,
                 )
-        except Exception:
-            pass
+            )
+            if sketch_selected:
+                adapter._last_sketch_name = target
 
         if not sketch_selected:
             for candidate in (
