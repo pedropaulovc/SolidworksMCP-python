@@ -138,6 +138,10 @@ def test_resolve_com_server_path_expands_short_path(
     """The 8.3 short path from the registry is expanded so the 3DX marker survives."""
     short = r"C:\PROGRA~1\DASSAU~1\SOLIDW~1\SLDWORKS.exe"
     full = r"C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\sldworks.exe"
+    # winreg is None off Windows, which would short-circuit resolve_com_server_path
+    # to None before the (monkeypatched) readers run. Stub it so the registry-walk
+    # logic is exercised on Linux CI too (the readers below ignore the root handle).
+    monkeypatch.setattr(sw_install, "winreg", SimpleNamespace(HKEY_CLASSES_ROOT=0))
     monkeypatch.setattr(sw_install, "_read_default_value", lambda _root, sub: (
         "{CLSID}" if sub.endswith("CLSID") else short
     ))
