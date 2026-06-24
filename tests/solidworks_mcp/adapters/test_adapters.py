@@ -977,7 +977,7 @@ class TestPyWin32AdapterBranches:
             FeatureRevolve2=Mock(return_value=feature_obj),
             FeatureCut3=Mock(return_value=feature_obj),
             FeatureFillet3=Mock(return_value=feature_obj),
-            FeatureChamfer=Mock(return_value=feature_obj),
+            InsertFeatureChamfer=Mock(return_value=feature_obj),
         )
         mass_props = SimpleNamespace(
             Volume=2.0e-9,
@@ -994,11 +994,11 @@ class TestPyWin32AdapterBranches:
             Extension=extension,
             SketchManager=sketch_manager,
             FeatureManager=feature_manager,
-            # Fillet/chamfer now call the IModelDoc2-level methods and select
-            # edges by coordinate, so the model needs these directly.
+            # Fillet calls the IModelDoc2-level FeatureFillet3; chamfer calls
+            # FeatureManager.InsertFeatureChamfer. Both select edges by
+            # coordinate, so the model needs ClearSelection2 too.
             ClearSelection2=Mock(return_value=True),
             FeatureFillet3=Mock(return_value=feature_obj),
-            FeatureChamfer=Mock(return_value=feature_obj),
         )
 
         created_sketch = await adapter.create_sketch("XY")
@@ -1207,7 +1207,7 @@ class TestPyWin32AdapterBranches:
             FeatureRevolve2=Mock(return_value=feature_obj),
             FeatureCut3=Mock(return_value=feature_obj),
             FeatureFillet3=Mock(return_value=feature_obj),
-            FeatureChamfer=Mock(return_value=feature_obj),
+            InsertFeatureChamfer=Mock(return_value=feature_obj),
         )
         sketch_manager = SimpleNamespace(
             InsertSketch=Mock(return_value=SimpleNamespace(Name="SketchA")),
@@ -1534,10 +1534,10 @@ class TestPyWin32AdapterBranches:
             FirstFeature=None,
             FeatureManager=SimpleNamespace(
                 FeatureCut3=Mock(return_value=None),
+                InsertFeatureChamfer=Mock(return_value=None),
             ),
-            # Fillet/chamfer call the IModelDoc2-level methods directly.
+            # Fillet calls the IModelDoc2-level FeatureFillet3 directly.
             FeatureFillet3=Mock(return_value=None),
-            FeatureChamfer=Mock(return_value=None),
         )
         adapter.currentModel = model
 

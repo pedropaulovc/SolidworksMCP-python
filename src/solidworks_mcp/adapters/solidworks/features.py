@@ -57,9 +57,15 @@ class SolidWorksFeaturesMixin:
         return _add_fillet_impl(self, radius, edge_points)
 
     async def add_chamfer(
-        self, distance: float, edge_points: list[list[float]]
+        self,
+        distance: float,
+        edge_points: list[list[float]],
+        face_points: list[list[float]] | None = None,
+        tangent_propagation: bool = False,
     ) -> AdapterResult[SolidWorksFeature]:
-        return _add_chamfer_impl(self, distance, edge_points)
+        return _add_chamfer_impl(
+            self, distance, edge_points, face_points, tangent_propagation
+        )
 
     async def mirror_feature(
         self, params: MirrorFeatureParameters
@@ -985,6 +991,9 @@ def _create_cut_extrude_impl(
             feature_scope=bool(getattr(params, "feature_scope", False)),
             auto_select=bool(getattr(params, "auto_select", True)),
             both_directions=bool(getattr(params, "both_directions", False)),
+            selected_contours=getattr(params, "selected_contours", None),
+            start_offset=float(getattr(params, "start_offset", 0.0)),
+            flip_start_offset=bool(getattr(params, "flip_start_offset", False)),
         )
         feature_manager = adapter.currentModel.FeatureManager
 
@@ -1003,11 +1012,40 @@ def _create_cut_extrude_impl(
         else:
             t1 = adapter.constants["swEndCondBlind"]
 
-        t0 = adapter.constants.get("swStartSketchPlane", 0)
+        if normalized.start_offset:
+            t0 = adapter.constants.get("swStartOffset", 3)
+            start_offset_m = normalized.start_offset / 1000.0
+        else:
+            t0 = adapter.constants.get("swStartSketchPlane", 0)
+            start_offset_m = 0.0
+        flip_start = normalized.flip_start_offset
         adapter._attempt(
             lambda: adapter.currentModel.ClearSelection2(True), default=None
         )
         sketch_selected = False
+
+        # Selected-contour cut: instead of consuming the whole profile, select
+        # the individual SKETCHREGION contours by a model-space point inside each
+        # (metres). This is how a hand-built cut takes only the triangles bounded
+        # by a sketch's construction diagonals. SelectByID2 with an empty name +
+        # type "SKETCHREGION" resolves the region of the most recent visible
+        # sketch under that point; mark 1 tags each as a cut contour.
+        if normalized.selected_contours:
+            for i, (cx, cy, cz) in enumerate(normalized.selected_contours):
+                ok = adapter._attempt(
+                    lambda x=cx, y=cy, z=cz, ap=(i > 0): (
+                        adapter.currentModel.Extension.SelectByID2(
+                            "", "SKETCHREGION", x, y, z, ap, 1, null_callout(), 0
+                        )
+                    ),
+                    default=False,
+                )
+                sketch_selected = sketch_selected or bool(ok)
+            if not sketch_selected:
+                raise Exception(
+                    "selected_contours: no SKETCHREGION resolved at the given "
+                    f"points {normalized.selected_contours!r}"
+                )
 
         # Select the profile to cut: the LAST unconsumed top-level sketch
         # (``ProfileFeature``), by its CURRENT name. ``_profile_feature_names``
@@ -1018,7 +1056,7 @@ def _create_cut_extrude_impl(
         # a renamed sketch is still found and selected by its live name, where the
         # cached ``_last_sketch_name`` string (fallback below) goes stale on rename.
         profile_names = _profile_feature_names(adapter)
-        if profile_names:
+        if profile_names and not normalized.selected_contours:
             target = profile_names[-1]
             sketch_selected = bool(
                 adapter._attempt(
@@ -1093,8 +1131,8 @@ def _create_cut_extrude_impl(
                     False,  # AutoSelectComponents
                     False,  # PropagateFeatureToParts
                     t0,  # T0
-                    0.0,  # StartOffset
-                    False,  # FlipStartOffset
+                    start_offset_m,  # StartOffset
+                    flip_start,  # FlipStartOffset
                 )
             )
         else:
@@ -1124,8 +1162,8 @@ def _create_cut_extrude_impl(
                     False,
                     False,
                     t0,
-                    0.0,
-                    False,
+                    start_offset_m,
+                    flip_start,
                     False,
                 )
             )
@@ -1321,8 +1359,143 @@ def _resolve_feature(adapter: Any, returned: Any, names_before: set[str]) -> Any
     return new[-1]
 
 
+def _all_body_edges(adapter: Any) -> list[Any]:
+    """Every edge of every solid body in the active model (flagged for late bind)."""
+    model = adapter.currentModel
+    bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
+    edges: list[Any] = []
+    for body in bodies:
+        _flag_feature_methods(body, "IBody2")
+        for edge in adapter._attempt(lambda b=body: b.GetEdges(), default=None) or []:
+            _flag_feature_methods(edge, "IEdge")
+            edges.append(edge)
+    return edges
+
+
+def _select_edges_geometric(
+    adapter: Any, edge_points: list[list[float]], tol_mm: float = 0.5
+) -> bool:
+    """Select edges by matching a point on each to the body's actual edges.
+
+    Unlike :func:`_select_by_point` (which drives ``SelectByID2`` and is
+    therefore **view-dependent** -- it picks at the screen projection, so an edge
+    hidden behind the body in the active view silently fails to select), this
+    resolves each target point against the geometry directly: it walks every body
+    edge, asks ``IEdge.GetClosestPointOn`` for the nearest point on that edge, and
+    selects (``IEntity.Select2``) the one within ``tol_mm``. View orientation is
+    irrelevant, so all of a fillet's/chamfer's edges resolve in one pass even when
+    half of them face away from the camera.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        edge_points: Points ``[x, y, z]`` (mm), one per edge to select.
+        tol_mm: Max distance (mm) from the point to an edge to count as a hit.
+
+    Returns:
+        bool: ``True`` only when every point resolved to an edge and was
+        selected; ``False`` on the first miss (caller may fall back).
+    """
+    edges = _all_body_edges(adapter)
+    if not edges:
+        return False
+    tol_m = tol_mm / 1000.0
+    adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True), default=None)
+    for point in edge_points:
+        if len(point) != 3:
+            return False
+        px, py, pz = (float(c) / 1000.0 for c in point)
+        best, best_d = None, tol_m
+        for edge in edges:
+            cp = adapter._attempt(
+                lambda e=edge, px=px, py=py, pz=pz: list(e.GetClosestPointOn(px, py, pz)),
+                default=None,
+            )
+            if not cp or len(cp) < 3:
+                continue
+            d = ((cp[0] - px) ** 2 + (cp[1] - py) ** 2 + (cp[2] - pz) ** 2) ** 0.5
+            if d < best_d:
+                best, best_d = edge, d
+        if best is None:
+            return False
+        _flag_feature_methods(best, "IEntity")
+        if not adapter._attempt(lambda e=best: e.Select2(True, 0), default=False):
+            return False
+    return True
+
+
+def _all_body_faces(adapter: Any) -> list[Any]:
+    """Every face of every solid body in the active model (flagged for late bind)."""
+    model = adapter.currentModel
+    bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
+    faces: list[Any] = []
+    for body in bodies:
+        _flag_feature_methods(body, "IBody2")
+        for face in adapter._attempt(lambda b=body: b.GetFaces(), default=None) or []:
+            _flag_feature_methods(face, "IFace2")
+            faces.append(face)
+    return faces
+
+
+def _select_faces_geometric(
+    adapter: Any, face_points: list[list[float]], append: bool, tol_mm: float = 5.0
+) -> bool:
+    """Select whole faces by matching a point on each to the body's actual faces.
+
+    The geometric, view-independent analogue of :func:`_select_edges_geometric`
+    for faces: it walks every body face, asks ``IFace2.GetClosestPointOn`` for the
+    nearest point on that face, and selects (``IEntity.Select2``, mark 0) the one
+    closest to each target point. Selecting a *face* for a chamfer/fillet breaks
+    **all** of that face's edges -- the way a hand-built feature picks "this whole
+    window-surround face" rather than naming each rim edge.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        face_points: Points ``[x, y, z]`` (mm), one per face to select.
+        append: When ``True``, add to the current selection (so faces stack onto
+            already-selected edges); when ``False``, the first face replaces it.
+        tol_mm: Max distance (mm) from the point to a face to count as a hit; a
+            little slack absorbs bbox-centre points that sit just off a tilted
+            or curved face.
+
+    Returns:
+        bool: ``True`` only when every point resolved to a face and was selected;
+        ``False`` on the first miss.
+    """
+    faces = _all_body_faces(adapter)
+    if not faces:
+        return False
+    tol_m = tol_mm / 1000.0
+    for i, point in enumerate(face_points):
+        if len(point) != 3:
+            return False
+        px, py, pz = (float(c) / 1000.0 for c in point)
+        best, best_d = None, tol_m
+        for face in faces:
+            cp = adapter._attempt(
+                lambda f=face, px=px, py=py, pz=pz: list(f.GetClosestPointOn(px, py, pz)),
+                default=None,
+            )
+            if not cp or len(cp) < 3:
+                continue
+            d = ((cp[0] - px) ** 2 + (cp[1] - py) ** 2 + (cp[2] - pz) ** 2) ** 0.5
+            if d < best_d:
+                best, best_d = face, d
+        if best is None:
+            return False
+        _flag_feature_methods(best, "IEntity")
+        keep = append or i > 0
+        if not adapter._attempt(lambda f=best, k=keep: f.Select2(k, 0), default=False):
+            return False
+    return True
+
+
 def _select_edge_points(adapter: Any, edge_points: list[list[float]]) -> None:
     """Clear the selection, then select each edge located by a point on it.
+
+    Prefers view-independent geometric resolution
+    (:func:`_select_edges_geometric`); falls back to view-dependent
+    :func:`_select_by_point` picking when the geometric pass can't enumerate
+    bodies (e.g. test doubles).
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -1331,6 +1504,8 @@ def _select_edge_points(adapter: Any, edge_points: list[list[float]]) -> None:
     Raises:
         Exception: When an edge cannot be selected at a given point.
     """
+    if _select_edges_geometric(adapter, edge_points):
+        return
     adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True), default=None)
     for point in edge_points:
         if not _select_by_point(adapter, "EDGE", point, 0, True):
@@ -1410,20 +1585,36 @@ def _add_fillet_impl(
 
 
 def _add_chamfer_impl(
-    adapter: Any, distance: float, edge_points: list[list[float]]
+    adapter: Any,
+    distance: float,
+    edge_points: list[list[float]],
+    face_points: list[list[float]] | None = None,
+    tangent_propagation: bool = False,
 ) -> AdapterResult[SolidWorksFeature]:
-    """Create an equal-distance (45°) chamfer on edges located by coordinate.
+    """Create an angle-distance (45°) chamfer on edges and/or whole faces.
 
-    Each edge is located by a point on it (millimetres) and selected with
-    ``SelectByID2`` (edges have no caller-stable name).  ``IModelDoc2::
-    FeatureChamfer(Width, Angle, Flip)`` then builds a distance-angle chamfer;
-    a 45° angle yields equal legs of ``distance``.
+    Each edge is located by a point on it (millimetres) and resolved
+    view-independently (:func:`_select_edge_points`).  ``face_points`` selects
+    **whole faces** (:func:`_select_faces_geometric`); a face in a chamfer breaks
+    *all* of that face's edges -- the way a hand-built feature picks a
+    window-surround face instead of naming every rim edge.
+
+    ``IFeatureManager.InsertFeatureChamfer(Options, ChamferType, Width, Angle,
+    ...)`` builds the feature: ``ChamferType = swChamferAngleDistance`` and a 45°
+    angle yields equal legs of ``distance``.  ``tangent_propagation`` sets the
+    ``swFeatureChamferTangentPropagation`` (0x4) option bit so the chamfer runs
+    around tangent-connected edges, matching the GUI's default.  (The 3-arg
+    ``IModelDoc2.FeatureChamfer`` form cannot take faces or propagation.)
 
     Args:
         adapter: A fully connected ``PyWin32Adapter`` with a non-``None``
             ``currentModel``.
         distance: Chamfer leg length in **millimetres**.  Converted to metres.
         edge_points: Points ``[x, y, z]`` in mm, one per edge to chamfer.
+        face_points: Points ``[x, y, z]`` in mm, one per face whose edges are all
+            chamfered.  ``None``/empty chamfers only the listed edges.
+        tangent_propagation: When ``True``, propagate the chamfer along
+            tangent-connected edges.
 
     Returns:
         AdapterResult[SolidWorksFeature]: On success, ``data`` is a
@@ -1431,30 +1622,46 @@ def _add_chamfer_impl(
         ``status`` is ``ERROR``.
 
     Raises:
-        Exception: Propagated through ``_handle_com_operation`` when an edge
-            cannot be selected or the chamfer feature is not created.
+        Exception: Propagated through ``_handle_com_operation`` when an edge or
+            face cannot be selected or the chamfer feature is not created.
     """
     import math
 
     if not adapter.currentModel:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
-    if not edge_points:
+    if not edge_points and not face_points:
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
-            error="Chamfer requires at least one edge point",
+            error="Chamfer requires at least one edge or face point",
         )
 
     def _chamfer_operation() -> SolidWorksFeature:
         names_before = _feature_names(adapter)
-        _select_edge_points(adapter, edge_points)
+        if edge_points:
+            _select_edge_points(adapter, edge_points)
+        else:
+            adapter._attempt(
+                lambda: adapter.currentModel.ClearSelection2(True), default=None
+            )
+        if face_points and not _select_faces_geometric(
+            adapter, face_points, append=bool(edge_points)
+        ):
+            raise Exception(f"Failed to select chamfer faces {face_points} (mm)")
 
-        # IModelDoc2.FeatureChamfer(Width, Angle, Flip): distance-angle form.
-        # 45° => equal legs == Width.  (IFeatureManager has no FeatureChamfer
-        # on this build, only InsertFeatureChamfer; the old call was broken.)
-        feature = adapter.currentModel.FeatureChamfer(
+        # IFeatureManager.InsertFeatureChamfer: Options bitmask (0x4 = tangent
+        # propagation), ChamferType 1 = swChamferAngleDistance, then Width
+        # (metres) + Angle (radians); 45° => equal legs == Width. Remaining
+        # distance args are unused for the angle-distance type.
+        options = 0x4 if tangent_propagation else 0
+        feature = adapter.currentModel.FeatureManager.InsertFeatureChamfer(
+            options,
+            1,  # swChamferAngleDistance
             distance / 1000.0,  # Width (metres)
             math.radians(45.0),  # Angle (radians)
-            False,  # Flip
+            0.0,  # OtherDist (equal-distance only)
+            0.0,
+            0.0,
+            0.0,  # Vertex distances (vertex chamfer only)
         )
         feature = _resolve_feature(adapter, feature, names_before)
         if not feature:
@@ -1464,7 +1671,12 @@ def _add_chamfer_impl(
             name=str(_read_member(feature, "Name")),
             type="Chamfer",
             id=adapter._get_feature_id(feature),
-            parameters={"distance": distance, "edge_points": edge_points},
+            parameters={
+                "distance": distance,
+                "edge_points": edge_points,
+                "face_points": face_points or [],
+                "tangent_propagation": tangent_propagation,
+            },
             properties={"created": datetime.now().isoformat()},
         )
 

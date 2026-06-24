@@ -833,19 +833,31 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         )
 
     async def add_chamfer(
-        self, distance: float, edge_points: list[list[float]]
+        self,
+        distance: float,
+        edge_points: list[list[float]],
+        face_points: list[list[float]] | None = None,
+        tangent_propagation: bool = False,
     ) -> AdapterResult[SolidWorksFeature]:
-        """Mock adding a chamfer feature to edges located by coordinate.
+        """Mock adding a chamfer feature to edges and/or faces located by point.
 
         Args:
             distance (float): Chamfer distance in millimeters.
             edge_points (list[list[float]]): Points on edges to chamfer.
+            face_points (list[list[float]] | None): Points on faces to chamfer.
+            tangent_propagation (bool): Propagate along tangent edges.
 
         Returns:
             AdapterResult[SolidWorksFeature]: The result produced by the operation.
         """
         return await self._mock_feature(
-            "Chamfer", {"distance": distance, "edge_points": edge_points}
+            "Chamfer",
+            {
+                "distance": distance,
+                "edge_points": edge_points,
+                "face_points": face_points or [],
+                "tangent_propagation": tangent_propagation,
+            },
         )
 
     async def mirror_feature(
