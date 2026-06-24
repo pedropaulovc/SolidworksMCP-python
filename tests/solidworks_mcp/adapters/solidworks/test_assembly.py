@@ -1216,7 +1216,13 @@ def test_add_mate_selection_failure_errors() -> None:
     assert "Failed to select mate entity 1" in (result.error or "")
 
 
-def test_add_mate_error_status_reports_reason() -> None:
+def test_add_mate_error_status_reports_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    # _byref_i4 yields a real win32com VARIANT on Windows but falls back to a
+    # bare int 0 on Linux (no pywin32), which can't carry the byref out-status —
+    # so the mock's `error_status.value = 4` is lost and the reason reads as
+    # "unknown error". Stub it with a settable holder so the status round-trips
+    # cross-platform and the real reason-mapping logic is exercised on CI.
+    monkeypatch.setattr(assembly_module, "_byref_i4", lambda: SimpleNamespace(value=0))
     model = _MateModel()
     model.add_mate_status = 4
     adapter = _adapter_with(model)
