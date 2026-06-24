@@ -21,7 +21,15 @@ from fastmcp import FastMCP
 from loguru import logger
 from pydantic import BaseModel
 from pydantic_ai import Agent
-from pydantic_ai.toolsets.fastmcp import FastMCPToolset
+
+try:
+    # Optional: pydantic-ai 1.x ships FastMCPToolset here; 2.0 moved/removed it.
+    # The setup path below already degrades gracefully when it is None, so a
+    # missing/relocated module must not crash import (it broke test collection
+    # when pydantic-ai auto-upgraded to 2.0 under the unpinned `>=0.0.13`).
+    from pydantic_ai.toolsets.fastmcp import FastMCPToolset
+except ImportError:
+    FastMCPToolset = None
 
 from . import adapters, security, tools, utils
 from .adapters.base import AdapterResult
