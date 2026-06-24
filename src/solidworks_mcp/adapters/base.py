@@ -231,6 +231,19 @@ class ExtrusionParameters(BaseModel):
     merge_result: bool = True
     feature_scope: bool = False
     auto_select: bool = True
+    selected_contours: list[tuple[float, float, float]] | None = None
+    """Model-space points (metres), one per sketch region to cut. When set, the
+    cut selects those ``SKETCHREGION`` contours instead of the whole sketch --
+    the way a hand-built feature cuts only the triangles bounded by a sketch's
+    construction diagonals. ``None`` cuts the full profile (default)."""
+    start_offset: float = 0.0
+    """Offset (mm) of the cut's START plane from the sketch plane. Non-zero
+    switches the start condition to ``swStartOffset``, so the cut begins this
+    far from the sketch instead of at it -- e.g. a pocket that leaves a central
+    web by starting the through-cut partway across the body."""
+    flip_start_offset: bool = False
+    """When ``start_offset`` is set, flip which side of the sketch plane the
+    offset start is measured toward."""
 
 
 class RevolveParameters(BaseModel):
@@ -1885,14 +1898,23 @@ class SolidWorksAdapter(ABC):
         )
 
     async def add_chamfer(
-        self, distance: float, edge_points: list[list[float]]
+        self,
+        distance: float,
+        edge_points: list[list[float]],
+        face_points: list[list[float]] | None = None,
+        tangent_propagation: bool = False,
     ) -> AdapterResult[Any]:
-        """Add an equal-distance chamfer to edges located by coordinate.
+        """Add an angle-distance (45°) chamfer to edges and/or whole faces.
 
         Args:
             distance (float): Chamfer distance in millimeters.
             edge_points (list[list[float]]): Points ``[x, y, z]`` in mm, one per
                 edge to chamfer.
+            face_points (list[list[float]] | None): Points ``[x, y, z]`` in mm,
+                one per face whose edges are all chamfered. ``None`` chamfers
+                only the listed edges.
+            tangent_propagation (bool): Propagate the chamfer along
+                tangent-connected edges (the GUI default).
 
         Returns:
             AdapterResult: Feature result or error.

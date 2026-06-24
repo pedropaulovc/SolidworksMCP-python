@@ -108,14 +108,15 @@ def test_create_cut_extrude_uses_modern_fallback_when_cut4_returns_none() -> Non
 def test_add_fillet_and_chamfer_selection_and_feature_failures() -> None:
     adapter = _FakeFeatureAdapter()
 
-    # Edges are now located by a point on each, and fillet/chamfer call the
-    # IModelDoc2-level FeatureFillet3 / FeatureChamfer (not FeatureManager).
+    # Edges are now located by a point on each. Fillet calls the IModelDoc2-level
+    # FeatureFillet3; chamfer calls FeatureManager.InsertFeatureChamfer (so it can
+    # take whole faces + tangent propagation, which the 3-arg form cannot).
     # Selection failure: SelectByID2 returns False -> "Failed to select edge".
     adapter.currentModel = SimpleNamespace(
         Extension=SimpleNamespace(SelectByID2=lambda *a, **k: False),
         ClearSelection2=lambda *_a: True,
         FeatureFillet3=lambda *a: None,
-        FeatureChamfer=lambda *a: None,
+        FeatureManager=SimpleNamespace(InsertFeatureChamfer=lambda *a: None),
         FirstFeature=None,
     )
 
@@ -133,7 +134,7 @@ def test_add_fillet_and_chamfer_selection_and_feature_failures() -> None:
         Extension=SimpleNamespace(SelectByID2=lambda *a, **k: True),
         ClearSelection2=lambda *_a: True,
         FeatureFillet3=lambda *a: None,
-        FeatureChamfer=lambda *a: None,
+        FeatureManager=SimpleNamespace(InsertFeatureChamfer=lambda *a: None),
         FirstFeature=None,
     )
 
@@ -167,7 +168,7 @@ def test_add_chamfer_requires_model_and_edge_points() -> None:
     adapter.currentModel = SimpleNamespace()
     no_edges = features._add_chamfer_impl(adapter, 1.0, [])
     assert no_edges.status == AdapterResultStatus.ERROR
-    assert "at least one edge point" in (no_edges.error or "")
+    assert "at least one edge or face point" in (no_edges.error or "")
 
 
 def test_create_cut_extrude_through_all_both_directions() -> None:
