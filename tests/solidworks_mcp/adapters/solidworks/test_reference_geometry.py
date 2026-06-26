@@ -12,6 +12,7 @@ from solidworks_mcp.adapters.base import (
     CreateCoordinateSystemParameters,
     CreatePlaneParameters,
     CreateReferencePointParameters,
+    RenameFeatureParameters,
 )
 from solidworks_mcp.adapters.solidworks import reference_geometry
 
@@ -539,3 +540,69 @@ def test_create_coordinate_system_failure_when_returns_none() -> None:
     )
     assert result.status == AdapterResultStatus.ERROR
     assert "Failed to create coordinate system" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# rename_feature
+# ---------------------------------------------------------------------------
+
+
+def test_rename_feature_success_sets_name() -> None:
+    adapter = _FakeAdapter()
+    feature = SimpleNamespace(Name="Plane1")
+    adapter.currentModel = _model(FeatureByName=lambda name: feature)
+    result = reference_geometry._rename_feature_impl(
+        adapter,
+        RenameFeatureParameters(old_name="Plane1", new_name="seat_cyl00"),
+    )
+    assert result.is_success
+    assert feature.Name == "seat_cyl00"  # IFeature.Name was assigned
+    assert result.data.name == "seat_cyl00"
+    assert result.data.parameters == {
+        "old_name": "Plane1",
+        "new_name": "seat_cyl00",
+    }
+
+
+def test_rename_feature_strips_document_qualifier_before_lookup() -> None:
+    adapter = _FakeAdapter()
+    feature = SimpleNamespace(Name="Plane1")
+    looked_up: list[str] = []
+
+    def feature_by_name(name):
+        looked_up.append(name)
+        return feature
+
+    adapter.currentModel = _model(FeatureByName=feature_by_name)
+    result = reference_geometry._rename_feature_impl(
+        adapter,
+        RenameFeatureParameters(old_name="Plane1@drive-train", new_name="base_top"),
+    )
+    assert result.is_success
+    assert looked_up == ["Plane1"]  # "@document" stripped
+
+
+def test_rename_feature_not_found_errors() -> None:
+    adapter = _FakeAdapter()
+    adapter.currentModel = _model(FeatureByName=lambda name: None)
+    result = reference_geometry._rename_feature_impl(
+        adapter,
+        RenameFeatureParameters(old_name="Nope", new_name="x"),
+    )
+    assert not result.is_success
+    assert "not found" in (result.error or "").lower()
+
+
+def test_rename_feature_guards_no_model_and_empty_names() -> None:
+    adapter = _FakeAdapter()
+    no_model = reference_geometry._rename_feature_impl(
+        adapter, RenameFeatureParameters(old_name="a", new_name="b")
+    )
+    assert no_model.error == "No active model"
+
+    adapter.currentModel = _model()
+    empty = reference_geometry._rename_feature_impl(
+        adapter, RenameFeatureParameters(old_name="", new_name="b")
+    )
+    assert not empty.is_success
+    assert "non-empty" in (empty.error or "")

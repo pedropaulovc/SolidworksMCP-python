@@ -54,6 +54,7 @@ from .base import (
     MotionStudyRefParameters,
     MotionTimeParameters,
     MoveComponentParameters,
+    RenameFeatureParameters,
     ReplaceComponentParameters,
     RevolveParameters,
     RotateComponentParameters,
@@ -1010,6 +1011,22 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 "points": params.points,
                 "edge_point": params.edge_point,
             },
+        )
+
+    async def rename_feature(
+        self, params: RenameFeatureParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock renaming a feature in the active document's tree.
+
+        Args:
+            params (RenameFeatureParameters): Old and new feature names.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        return await self._mock_feature(
+            "Rename",
+            {"old_name": params.old_name, "new_name": params.new_name},
         )
 
     async def create_reference_point(

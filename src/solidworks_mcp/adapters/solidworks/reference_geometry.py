@@ -20,6 +20,7 @@ from ..base import (
     CreateCoordinateSystemParameters,
     CreatePlaneParameters,
     CreateReferencePointParameters,
+    RenameFeatureParameters,
     SolidWorksFeature,
 )
 from .features import (
@@ -90,6 +91,11 @@ class SolidWorksReferenceGeometryMixin:
         self, params: CreateAxisParameters
     ) -> AdapterResult[SolidWorksFeature]:
         return _create_axis_impl(self, params)
+
+    async def rename_feature(
+        self, params: RenameFeatureParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        return _rename_feature_impl(self, params)
 
     async def create_reference_point(
         self, params: CreateReferencePointParameters
@@ -381,6 +387,62 @@ def _create_axis_impl(
     return cast(
         AdapterResult[SolidWorksFeature],
         adapter._handle_com_operation("create_axis", _axis_operation),
+    )
+
+
+def _rename_feature_impl(
+    adapter: Any, params: RenameFeatureParameters
+) -> AdapterResult[SolidWorksFeature]:
+    """Rename a tree feature via ``IFeature::Name`` (a settable property).
+
+    Resolves the feature with ``IModelDoc2::FeatureByName`` (the same lookup
+    :func:`_select_named_feature` uses), then assigns the new name. Used to give
+    auto-named reference planes/axes (``Plane1``/``Axis2`` …) stable, semantic
+    names so assemblies can select them as ``"<new_name>@<component>"``.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        params: Old and new feature names (any ``@document`` qualifier on
+            ``old_name`` is stripped before lookup).
+
+    Returns:
+        AdapterResult[SolidWorksFeature]: ``data.name == new_name`` on success.
+
+    Raises:
+        Exception: Propagated through ``_handle_com_operation`` when the feature
+            is not found or the rename does not take.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if not params.old_name or not params.new_name:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="rename_feature requires non-empty 'old_name' and 'new_name'",
+        )
+
+    def _rename_operation() -> SolidWorksFeature:
+        bare = params.old_name.split("@", 1)[0]
+        feature = adapter._attempt(
+            lambda: adapter.currentModel.FeatureByName(bare), default=None
+        )
+        if not feature:
+            raise Exception(f"Feature not found: {params.old_name}")
+        feature.Name = params.new_name
+        if str(_read_member(feature, "Name")) != params.new_name:
+            raise Exception(
+                f"Rename did not take: {params.old_name!r} -> {params.new_name!r}"
+            )
+        return SolidWorksFeature(
+            name=params.new_name,
+            type="Rename",
+            id=adapter._get_feature_id(feature),
+            parameters={"old_name": params.old_name, "new_name": params.new_name},
+            properties={"renamed": datetime.now().isoformat()},
+        )
+
+    return cast(
+        AdapterResult[SolidWorksFeature],
+        adapter._handle_com_operation("rename_feature", _rename_operation),
     )
 
 
