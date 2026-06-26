@@ -443,6 +443,24 @@ class CreatePlaneParameters(BaseModel):
     flip: bool = False
 
 
+class RenameFeatureParameters(BaseModel):
+    """Parameters for renaming a feature in the active document's tree.
+
+    ``create_plane``/``create_axis`` only auto-name their features
+    (``Plane1``/``Axis2`` …); rename gives them a stable, human-readable name so
+    assemblies can select them as ``"<new_name>@<component>"`` independent of
+    feature-creation order.
+
+    Attributes:
+        old_name (str): Current feature name (any ``@document`` qualifier is
+            stripped before lookup).
+        new_name (str): Replacement feature name.
+    """
+
+    old_name: str
+    new_name: str
+
+
 class CreateAxisParameters(BaseModel):
     """Parameters for a reference-axis operation.
 
@@ -2026,6 +2044,22 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="create_axis is not implemented by this adapter",
+        )
+
+    async def rename_feature(
+        self, params: RenameFeatureParameters
+    ) -> AdapterResult[Any]:
+        """Rename a feature in the active document's tree.
+
+        Args:
+            params (RenameFeatureParameters): Old and new feature names.
+
+        Returns:
+            AdapterResult: Feature result or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="rename_feature is not implemented by this adapter",
         )
 
     async def create_reference_point(
