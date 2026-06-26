@@ -481,12 +481,15 @@ class SolidWorksIOMixin:
         def _silent_save_in_place() -> bool:
             """Save the active doc to its own path with a silent ``Save3``.
 
-            ``swSaveAsOptions_Silent (1) | swSaveAsOptions_SaveReferenced (8)``
+            ``swSaveAsOptions_Silent (1) | swSaveAsOptions_AvoidRebuildOnSave (8)``
             with **real** ``VT_BYREF | VT_I4`` out params: a bare ``None`` for
             the ``Errors``/``Warnings`` params fails the COM call, which forces
             the blocking parameterless ``Save()`` and its "Component documents
             must be saved" modal. The real byref params let ``Save3`` write
-            without a dialog.
+            without a dialog. (``8`` is ``AvoidRebuildOnSave`` per the canonical
+            ``swSaveAsOptions_e`` bitmask -- ``SaveReferenced`` is ``4`` -- so this
+            saves only the active doc and skips a redundant save-time rebuild; it
+            was historically mislabeled "SaveReferenced (8)".)
             """
             errors, warnings = byref_long(), byref_long()
             return self._is_success(
