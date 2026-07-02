@@ -50,31 +50,30 @@ _ALONG_CURVE_TYPES = {"distance": 0, "percentage": 1, "evenly": 2}
 _PLANE_MODES = ("offset", "angle", "three_point", "parallel_point")
 
 
-def _offset_plane_distance(offset_mm: float, base_flip: int) -> tuple[float, int]:
-    """Resolve an offset-plane Distance constraint to ``(distance_m, flip_bits)``.
+def _offset_plane_distance(offset_mm: float) -> tuple[float, int]:
+    """Resolve a signed offset-plane Distance constraint to ``(distance_m, flip_bits)``.
 
     ``IFeatureManager.InsertRefPlane``'s Distance constraint takes a positive
     magnitude; the *side* of the base plane is chosen by the ``OptionFlip`` bit,
     not by the sign of the distance. Passing a negative distance does not place
     the plane on the opposite side -- SOLIDWORKS clamps it to 0, collapsing the
-    new plane onto the base. So a negative ``offset`` must be converted to a
-    positive magnitude with the flip bit toggled relative to the caller's
-    ``flip`` request.
+    new plane onto the base. So a negative ``offset`` is converted to a positive
+    magnitude with the ``OptionFlip`` bit set; a positive ``offset`` keeps the
+    near side. The sign of ``offset`` is therefore the single knob that selects
+    the side -- there is no separate ``flip`` flag.
 
     Args:
-        offset_mm: Signed offset from the base plane, in millimetres.
-        base_flip: ``_PLANE_OPTION_FLIP`` if the caller requested ``flip`` else 0.
+        offset_mm: Signed offset from the base plane, in millimetres. A negative
+            value builds the plane on the far side of ``base_plane``.
 
     Returns:
         ``(distance_m, flip_bits)`` -- a non-negative distance in metres and the
         flip bits to OR into the Distance constraint.
     """
     distance_m = float(offset_mm) / 1000.0
-    flip_bits = base_flip
     if distance_m < 0.0:
-        distance_m = -distance_m
-        flip_bits ^= _PLANE_OPTION_FLIP
-    return distance_m, flip_bits
+        return -distance_m, _PLANE_OPTION_FLIP
+    return distance_m, 0
 _AXIS_MODES = ("two_planes", "cylindrical_face", "two_points", "edge")
 _POINT_MODES = ("face_center", "arc_center", "along_curve")
 
@@ -167,10 +166,10 @@ def _create_plane_impl(
     Reference entities are selected under marks 0/1/2 (first/second/third)
     before the call, per the ``IFeatureManager::InsertRefPlane`` contract:
 
-    - ``offset``: ``base_plane`` (mark 0); constraints ``Distance``
-      [+ ``OptionFlip``].
+    - ``offset``: ``base_plane`` (mark 0); constraint ``Distance``
+      (``+ OptionFlip`` for a negative, far-side ``offset``).
     - ``angle``: ``base_plane`` (mark 0) + pivot edge by point (mark 1);
-      constraints ``Angle`` [+ ``OptionFlip``] and ``Coincident``.
+      constraints ``Angle`` and ``Coincident``.
     - ``three_point``: three vertices (marks 0/1/2), ``Coincident`` each.
     - ``parallel_point``: ``base_plane`` (mark 0) + vertex (mark 1);
       constraints ``Parallel`` and ``Coincident``.
@@ -180,7 +179,7 @@ def _create_plane_impl(
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
-        params: Plane parameters (mode, references, distance/angle, flip).
+        params: Plane parameters (mode, references, signed distance/angle).
 
     Returns:
         AdapterResult[SolidWorksFeature]: ``data.type == "RefPlane"`` on
@@ -222,12 +221,11 @@ def _create_plane_impl(
         adapter._attempt(
             lambda: adapter.currentModel.ClearSelection2(True), default=None
         )
-        flip = _PLANE_OPTION_FLIP if params.flip else 0
         constraints = (0, 0.0, 0, 0.0, 0, 0.0)
         if params.mode == "offset":
             if not _select_named_feature(adapter, params.base_plane, 0, True):
                 raise Exception(f"Failed to select base plane: {params.base_plane}")
-            distance_m, dist_flip = _offset_plane_distance(params.offset, flip)
+            distance_m, dist_flip = _offset_plane_distance(params.offset)
             constraints = (
                 _PLANE_DISTANCE | dist_flip,
                 distance_m,
@@ -241,7 +239,7 @@ def _create_plane_impl(
                     f"Failed to select pivot edge at point {params.edge_point} (mm)"
                 )
             constraints = (
-                _PLANE_ANGLE | flip,
+                _PLANE_ANGLE,
                 math.radians(float(params.angle)),
                 _PLANE_COINCIDENT, 0.0, 0, 0.0,
             )
@@ -280,7 +278,6 @@ def _create_plane_impl(
                 "base_plane": params.base_plane,
                 "offset": float(params.offset),
                 "angle": float(params.angle),
-                "flip": bool(params.flip),
             },
             "Failed to create reference plane",
         )

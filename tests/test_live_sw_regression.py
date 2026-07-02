@@ -2390,11 +2390,13 @@ async def test_create_plane_offset_stack_of_twenty(connected_adapter) -> None:
         await adapter.close_model(save=False)
 
 
-async def test_create_plane_offset_flip_builds_other_side(connected_adapter) -> None:
-    """A flipped offset plane builds on the opposite side of the base plane.
+async def test_create_plane_negative_offset_builds_other_side(connected_adapter) -> None:
+    """A negative offset builds the plane on the opposite side of the base plane.
 
-    Proved geometrically: a sketch on the flipped plane extrudes into a body
-    whose features sit at negative z (behind the Front plane).
+    The sign of ``offset`` is the sole side selector (there is no separate
+    ``flip`` flag). Proved geometrically: a sketch on the far-side plane
+    extrudes into a body whose features sit at negative z (behind the Front
+    plane).
     """
     adapter = connected_adapter
 
@@ -2403,11 +2405,11 @@ async def test_create_plane_offset_flip_builds_other_side(connected_adapter) -> 
     try:
         plane = await adapter.create_plane(
             CreatePlaneParameters(
-                mode="offset", base_plane="Front Plane", offset=30.0, flip=True
+                mode="offset", base_plane="Front Plane", offset=-30.0
             )
         )
-        assert plane.is_success, f"flipped offset plane failed: {plane.error}"
-        assert plane.data.name, "flipped offset plane has no name"
+        assert plane.is_success, f"far-side offset plane failed: {plane.error}"
+        assert plane.data.name, "far-side offset plane has no name"
     finally:
         await adapter.close_model(save=False)
 
