@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import random
 import uuid
 from collections.abc import Callable
@@ -37,6 +38,7 @@ from .base import (
     CreateReferencePointParameters,
     DraftParameters,
     ExtrusionParameters,
+    ImportDxfDwgParameters,
     InsertComponentParameters,
     LinearPatternParameters,
     LoftParameters,
@@ -1009,6 +1011,37 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 "face_point": params.face_point,
                 "points": params.points,
                 "edge_point": params.edge_point,
+            },
+        )
+
+    async def import_dxf_dwg(
+        self, params: ImportDxfDwgParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock importing a DXF/DWG file into the active part as a sketch.
+
+        Validates the file exists (mirroring the live adapter's precondition)
+        and records a stub ``ImportedDxfDwg`` feature.
+
+        Args:
+            params (ImportDxfDwgParameters): The params value.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The result produced by the operation.
+        """
+        if not os.path.isfile(params.file_path):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"DXF/DWG file not found: {params.file_path}",
+            )
+        return await self._mock_feature(
+            "ImportedDxfDwg",
+            {
+                "file_path": params.file_path,
+                "plane": params.plane,
+                "scale": params.scale,
+                "position": params.position,
+                "merge_points": params.merge_points,
+                "import_hatch": params.import_hatch,
             },
         )
 

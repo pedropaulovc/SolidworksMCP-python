@@ -444,6 +444,52 @@ class CreatePlaneParameters(BaseModel):
     points: list[list[float]] = []
 
 
+class ImportDxfDwgParameters(BaseModel):
+    """Parameters for importing a DXF/DWG file into the active part as a sketch.
+
+    Wraps ``IFeatureManager::InsertDwgOrDxfFile2`` (import method
+    ``swImportDxfDwg_ImportToExistingPart``): the named plane is selected, then
+    the file's 2D geometry is inserted as a sketch feature on that plane. Import
+    defaults are configured through ``ISldWorks::GetImportFileData`` /
+    ``IImportDxfDwgData`` before the insert.
+
+    Distances are millimetres; ``scale`` and ``position`` map the file's own
+    units onto the model. SolidWorks computes sensible defaults for anything
+    left ``None`` (paper size / sheet scale to fit, length unit from the file
+    header), so a bare ``(file_path, plane)`` import is valid.
+
+    Attributes:
+        file_path (str): Absolute path to the ``.dxf``/``.dwg`` file.
+        plane (str): Reference plane to place the sketch on (``"Front"`` …).
+        scale (float | None): Uniform sheet scale applied to the imported
+            geometry (``IImportDxfDwgData::SetSheetScale``). ``None`` lets
+            SolidWorks fit the sheet to the data.
+        position (list[float] | None): ``[x, y]`` translation in millimetres of
+            the imported geometry's origin on the plane
+            (``IImportDxfDwgData::SetPosition``). ``None`` keeps the file origin.
+        merge_points (bool): Merge coincident endpoints so contours close
+            (``SetMergePoints``); recommended for cut profiles.
+        merge_distance (float): Merge tolerance in millimetres.
+        import_dimensions (bool): Import DXF dimension entities as sketch
+            dimensions. Off by default — the traced artwork carries none.
+        import_hatch (bool): Import hatch fills. Off by default — hatch fills are
+            not cuttable profiles; the outline contours define the cut regions.
+        add_constraints (bool): Let SolidWorks infer sketch relations on the
+            imported geometry. Off by default — inference on many near-collinear
+            traced segments produces spurious horizontal/vertical relations.
+    """
+
+    file_path: str
+    plane: str = "Front"
+    scale: float | None = None
+    position: list[float] | None = None
+    merge_points: bool = True
+    merge_distance: float = 0.002
+    import_dimensions: bool = False
+    import_hatch: bool = False
+    add_constraints: bool = False
+
+
 class RenameFeatureParameters(BaseModel):
     """Parameters for renaming a feature in the active document's tree.
 
@@ -2045,6 +2091,27 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="create_axis is not implemented by this adapter",
+        )
+
+    async def import_dxf_dwg(
+        self, params: ImportDxfDwgParameters
+    ) -> AdapterResult[Any]:
+        """Import a DXF/DWG file into the active part as a sketch feature.
+
+        Selects ``params.plane`` and inserts the file's 2D geometry on it via
+        ``IFeatureManager::InsertDwgOrDxfFile2``.
+
+        Args:
+            params (ImportDxfDwgParameters): File path, plane, scale/position,
+                and import options.
+
+        Returns:
+            AdapterResult: Feature result (the inserted DXF/DWG sketch feature)
+            or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="import_dxf_dwg is not implemented by this adapter",
         )
 
     async def rename_feature(

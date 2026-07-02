@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
 from .. import sw_type_info as _sw_type_info
-from ..base import AdapterResult, AdapterResultStatus, MassProperties, SolidWorksModel
-from ..com_variant import byref_long
+from ..base import (
+    AdapterResult,
+    AdapterResultStatus,
+    ImportDxfDwgParameters,
+    MassProperties,
+    SolidWorksFeature,
+    SolidWorksModel,
+)
+from ..com_variant import byref_long, null_callout
 
 try:
     import pythoncom
@@ -17,6 +25,8 @@ try:
 except ImportError:  # pragma: no cover
     pythoncom = SimpleNamespace()
     win32com = SimpleNamespace(client=SimpleNamespace())
+
+logger = logging.getLogger(__name__)
 
 
 class SolidWorksIOMixin:
@@ -371,6 +381,183 @@ class SolidWorksIOMixin:
         return cast(
             AdapterResult[SolidWorksModel],
             adapter._handle_com_operation("create_drawing", _create),
+        )
+
+    async def import_dxf_dwg(
+        self, params: ImportDxfDwgParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Import a DXF/DWG file into the active part as a sketch feature.
+
+        Selects ``params.plane``, obtains an ``IImportDxfDwgData`` from
+        ``ISldWorks::GetImportFileData``, configures it (import-to-existing-part,
+        millimetre units, position/scale, merge points, hatch/dimension/relation
+        toggles), then inserts the geometry via
+        ``IFeatureManager::InsertDwgOrDxfFile2``. The returned feature's
+        ``GetSpecificFeature2`` is the imported sketch, which callers cut.
+
+        Positioning/scaling notes:
+          * ``SetPosition("", swDwgEntitiesCentered, X, Y)`` centres the imported
+            geometry then offsets it by ``(X, Y)`` metres.
+          * ``SetSheetScale("", num, den)`` scales by ``num/den``; ``params.scale``
+            is passed as ``(scale, 1.0)``.
+          * ``LengthUnit``/``ImportMethod``/``ImportHatch``/``ImportDimensions``/
+            ``AddSketchConstraints`` are indexed *properties* (a ``Sheet`` arg),
+            not methods — under pywin32 late binding they are written via a
+            ``DISPATCH_PROPERTYPUT`` ``Invoke`` (see ``_put_indexed``). Each put is
+            best-effort: on failure SolidWorks falls back to the value it computes
+            from the file, which is logged, not fatal.
+
+        Args:
+            params: DXF/DWG import parameter bag.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: On success, ``data`` describes the
+            inserted DXF/DWG feature (``type`` ``"ImportedDxfDwg"``).
+        """
+        adapter = self._adapter(self)
+        if not adapter.currentModel:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR, error="No active model"
+            )
+        if not os.path.isfile(params.file_path):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"DXF/DWG file not found: {params.file_path}",
+            )
+
+        def _put_indexed(obj: Any, name: str, value: Any, sheet: str = "") -> bool:
+            """Write an indexed COM property (``prop(Sheet) = value``) via Invoke.
+
+            SolidWorks' ``IImportDxfDwgData`` exposes ``LengthUnit`` /
+            ``ImportMethod`` / ``ImportHatch`` etc. as parameterised properties;
+            pywin32 late binding cannot assign them with ``obj.name(sheet) =
+            value`` syntax, so drive ``IDispatch::Invoke`` directly with
+            ``DISPATCH_PROPERTYPUT``. Best-effort — returns ``False`` (logged) if
+            the put raises, letting the SolidWorks-computed default stand.
+            """
+            try:
+                dispid = obj._oleobj_.GetIDsOfNames(0, name)
+                obj._oleobj_.Invoke(
+                    dispid,
+                    0,
+                    pythoncom.DISPATCH_PROPERTYPUT,
+                    False,
+                    sheet,
+                    value,
+                )
+                return True
+            except Exception as exc:  # pragma: no cover - live COM only
+                logger.debug(
+                    "import_dxf_dwg: could not set %s=%r (%s); using default",
+                    name,
+                    value,
+                    exc,
+                )
+                return False
+
+        def _import() -> SolidWorksFeature:
+            app = adapter.swApp
+            model = adapter.currentModel
+            if app is None:
+                raise Exception("SolidWorks application is not connected")
+
+            # Select the placement plane (English name -> full SW plane name),
+            # mirroring create_sketch's resolution + SelectByID2 fallback.
+            plane_name_map = {
+                "Top": "Top Plane",
+                "Front": "Front Plane",
+                "Right": "Right Plane",
+                "XY": "Top Plane",
+                "XZ": "Front Plane",
+                "YZ": "Right Plane",
+            }
+            actual_plane = plane_name_map.get(params.plane, params.plane)
+            selected = False
+            plane_feature = adapter._attempt(
+                lambda: model.FeatureByName(actual_plane), default=None
+            )
+            if plane_feature:
+                selected = bool(
+                    adapter._attempt(
+                        lambda pf=plane_feature: pf.Select2(False, 0), default=False
+                    )
+                )
+            if not selected:
+                selected = bool(
+                    adapter._attempt(
+                        lambda: model.Extension.SelectByID2(
+                            actual_plane, "PLANE", 0, 0, 0, False, 0, null_callout(), 0
+                        ),
+                        default=False,
+                    )
+                )
+            if not selected:
+                raise Exception(f"Failed to select plane for DXF import: {actual_plane}")
+
+            import_data = app.GetImportFileData(params.file_path)
+            if import_data is None:
+                raise Exception(
+                    f"GetImportFileData returned None for {params.file_path}"
+                )
+
+            # swImportDxfDwg_ImportToExistingPart = 4; swMM = 0 (swLengthUnit_e).
+            _put_indexed(import_data, "ImportMethod", 4)
+            _put_indexed(import_data, "LengthUnit", 0)
+            _put_indexed(import_data, "ImportHatch", bool(params.import_hatch))
+            _put_indexed(import_data, "ImportDimensions", bool(params.import_dimensions))
+            _put_indexed(import_data, "AddSketchConstraints", bool(params.add_constraints))
+
+            # Position/scale are METHODS (no indexed-property marshalling needed).
+            # swDwgImportEntitiesPositioning_e.swDwgEntitiesCentered = 2.
+            px, py = (params.position or [0.0, 0.0])[:2]
+            adapter._attempt(
+                lambda: import_data.SetPosition(
+                    "", 2, float(px) / 1000.0, float(py) / 1000.0
+                ),
+                default=False,
+            )
+            if params.scale is not None:
+                adapter._attempt(
+                    lambda: import_data.SetSheetScale("", float(params.scale), 1.0),
+                    default=False,
+                )
+            if params.merge_points:
+                adapter._attempt(
+                    lambda: import_data.SetMergePoints(
+                        "", True, float(params.merge_distance) / 1000.0
+                    ),
+                    default=False,
+                )
+
+            feature = model.FeatureManager.InsertDwgOrDxfFile2(
+                params.file_path, import_data
+            )
+            if feature is None:
+                # Documented: returns null if the file contains solid-body data,
+                # or when no planar face/plane was selected.
+                raise Exception(
+                    "InsertDwgOrDxfFile2 returned None (unsupported file contents "
+                    "or no planar selection)"
+                )
+
+            name = adapter._attempt(lambda: feature.Name, default="") or "ImportedDxfDwg"
+            adapter._attempt(lambda: model.ClearSelection2(True))
+            return SolidWorksFeature(
+                id=name,
+                name=name,
+                type="ImportedDxfDwg",
+                parameters={
+                    "file_path": params.file_path,
+                    "plane": actual_plane,
+                    "scale": params.scale,
+                    "position": params.position,
+                },
+                properties={"created": datetime.now().isoformat()},
+            )
+
+        return cast(
+            AdapterResult[SolidWorksFeature],
+            adapter._handle_com_operation("import_dxf_dwg", _import),
         )
 
     async def get_dimension(self, name: str) -> AdapterResult[float]:
