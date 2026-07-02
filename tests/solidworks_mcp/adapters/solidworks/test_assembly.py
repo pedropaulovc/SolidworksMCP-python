@@ -2110,6 +2110,23 @@ def test_add_mate_rack_pinion_both_values_errors() -> None:
     assert "not both" in (result.error or "")
 
 
+def test_add_mate_rack_pinion_requires_a_value() -> None:
+    # A value-less rack_pinion mate cannot be derived by CreateMate (unlike the
+    # old AddMate5 path), so it is rejected up front rather than silently falling
+    # through to a standard mate that omits DiameterType/DiameterVal.
+    adapter = _adapter_with(_MateModel())
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="rack_pinion",
+            entities=_two_entities(),
+        ),
+    )
+    assert result.is_error
+    assert "require" in (result.error or "")
+    assert "pinion_pitch_diameter" in (result.error or "")
+
+
 def test_add_mate_screw_sets_distance_per_revolution() -> None:
     model = _MateModel()
     model.add_mate_name = "ScrewMate1"

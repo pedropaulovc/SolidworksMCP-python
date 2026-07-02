@@ -1624,6 +1624,12 @@ def _validate_mechanical_values(params: AddMateParameters) -> str:
         return (
             "set either pinion_pitch_diameter or rack_travel_per_revolution, not both"
         )
+    if params.mate_type == "rack_pinion" and not any(rack_values):
+        return (
+            "rack_pinion mates require pinion_pitch_diameter or "
+            "rack_travel_per_revolution (CreateMate cannot derive the value the "
+            "way AddMate5 did)"
+        )
     if any(float(value) < 0 for value in rack_values):
         return "rack_pinion values must be positive"
     if params.distance_per_revolution and params.mate_type != "screw":
@@ -1870,13 +1876,13 @@ def _add_mate_impl(
                     f"({ref.entity_type} at {located!r})"
                 )
 
-        # Rack-pinion mates that carry a pitch diameter / travel value must be
-        # built via CreateMateData -> CreateMate (AddMate5 cannot set the value,
-        # and a follow-up ModifyDefinition on the result fails). Entities are
-        # already pre-selected above under marks 64 (rack) / 128 (pinion).
-        if params.mate_type == "rack_pinion" and (
-            params.pinion_pitch_diameter or params.rack_travel_per_revolution
-        ):
+        # Rack-pinion mates must be built via CreateMateData -> CreateMate
+        # (AddMate5 cannot set the value, and a follow-up ModifyDefinition on the
+        # result fails). A pitch diameter / travel value is REQUIRED (enforced in
+        # _validate_mechanical_values) since CreateMate cannot derive it, so every
+        # rack_pinion routes here. Entities are already pre-selected above under
+        # marks 64 (rack) / 128 (pinion).
+        if params.mate_type == "rack_pinion":
             mate = _create_mechanical_mate(adapter, model, params, mate_type)
             adapter._attempt(lambda: model.ClearSelection2(True), default=None)
             name = _mate_feature_name(adapter, mate)
