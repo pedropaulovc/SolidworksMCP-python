@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -890,15 +891,10 @@ class _FakeMate:
         self.suppression_calls: list[tuple[int, int]] = []
         self.suppression_applies = True
         self.definition = SimpleNamespace()
-        self.modify_calls: list[object] = []
-        self.modify_result = True
+        self.mate_data: Any = None
 
     def GetDefinition(self):  # noqa: N802
         return self.definition
-
-    def ModifyDefinition(self, data, _model, _callout):  # noqa: N802
-        self.modify_calls.append(data)
-        return self.modify_result
 
     def GetTypeName2(self):  # noqa: N802
         return self._type_name
@@ -919,14 +915,58 @@ class _FakeMate:
         return True
 
 
-class _FakeRackPinionMateData:
-    """Stand-in for an ``IRackPinionMateFeatureData`` from ``CreateMateData``."""
+class _FakeMateData:
+    """Stand-in for a typed ``CreateMateData`` feature-data object.
+
+    Permissive by design: ``_create_standard_mate`` / ``_create_mechanical_mate``
+    set whichever typed properties the mate kind needs (``EntitiesToMate`` /
+    ``MateAlignment`` / ``Distance`` / ``FlipDimension`` / ``Angle`` /
+    ``LockRotation`` / ``GearRatio*`` / ``Reverse`` / limits / ``Revolution*`` /
+    ``Width*`` / ``Diameter*``); tests read them straight back off this object.
+    ``ErrorStatus`` defaults to "no error" (1) and is overwritten by
+    :meth:`_MateModel.CreateMate` when a failure is simulated.
+    """
 
     def __init__(self, mate_type) -> None:
         self.mate_type = mate_type
-        self.DiameterType = None
-        self.DiameterVal = None
-        self.Reverse = None
+        self.ErrorStatus = 1
+        # Entity attachment.
+        self.EntitiesToMate: Any = None
+        self.WidthSelection: Any = None
+        self.TabSelection: Any = None
+        self.ConstraintType: Any = None
+        # Shared / per-kind typed properties.
+        self.MateAlignment: Any = None
+        self.Distance: Any = None
+        self.FlipDimension: Any = None
+        self.Angle: Any = None
+        self.IsAdvancedMate: Any = None
+        self.MinimumDistance: Any = None
+        self.MaximumDistance: Any = None
+        self.MinimumAngle: Any = None
+        self.MaximumAngle: Any = None
+        self.LockRotation: Any = None
+        self.GearRatioNumerator: Any = None
+        self.GearRatioDenominator: Any = None
+        self.Reverse: Any = None
+        self.RevolutionType: Any = None
+        self.RevolutionVal: Any = None
+        self.DiameterType: Any = None
+        self.DiameterVal: Any = None
+
+
+class _FakeMateSelectionManager:
+    """Stand-in for ``ISelectionMgr`` feeding ``EntitiesToMate`` harvest.
+
+    ``_harvest_selected`` re-reads the pre-selected entities via
+    ``GetSelectedObject6(index, -1)`` (1-based); return a distinct sentinel per
+    index so the harvested list is non-empty and order-stable.
+    """
+
+    def GetSelectedObject6(self, index, mark):  # noqa: N802
+        if index < 1:
+            return None
+        return SimpleNamespace(selected_index=index, mark=mark)
 
 
 class _FakeMateGroup:
@@ -953,22 +993,25 @@ class _MateModel(_FakeAssemblyModel):
         super().__init__(select_result=select_result)
         self.mate_group = _FakeMateGroup(mates)
         self.FirstFeature = self.mate_group
-        self.mate_calls: list[tuple] = []
+        self.SelectionManager = _FakeMateSelectionManager()
         self.point_selections: list[tuple] = []
         self.add_mate_name = "Coincident1"
+        # swAddMateError_e returned via CreateMateData(...).ErrorStatus; 1 = ok.
         self.add_mate_status = 1
-        self.add_mate_modify_result = True
         self._last_feature = None
         self.create_mate_data_calls: list[int] = []
-        self.created_mate_data: list[_FakeRackPinionMateData] = []
+        self.created_mate_data: list[_FakeMateData] = []
 
     def CreateMateData(self, mate_type):  # noqa: N802
         self.create_mate_data_calls.append(mate_type)
-        data = _FakeRackPinionMateData(mate_type)
+        data = _FakeMateData(mate_type)
         self.created_mate_data.append(data)
         return data
 
     def CreateMate(self, data):  # noqa: N802
+        if self.add_mate_status != 1:
+            data.ErrorStatus = self.add_mate_status
+            return None
         mate = _FakeMate(self.add_mate_name)
         mate.mate_data = data
         self.mate_group.mates.append(mate)
@@ -992,52 +1035,15 @@ class _MateModel(_FakeAssemblyModel):
             self.mate_group.mates.remove(self._last_feature)
         return True
 
-    def AddMate5(  # noqa: N802
-        self,
-        mate_type,
-        alignment,
-        flip,
-        distance,
-        distance_upper,
-        distance_lower,
-        gear_numerator,
-        gear_denominator,
-        angle,
-        angle_upper,
-        angle_lower,
-        for_positioning,
-        lock_rotation,
-        width_option,
-        error_status,
-    ):
-        self.mate_calls.append(
-            (
-                mate_type,
-                alignment,
-                flip,
-                distance,
-                distance_upper,
-                distance_lower,
-                gear_numerator,
-                gear_denominator,
-                angle,
-                angle_upper,
-                angle_lower,
-                for_positioning,
-                lock_rotation,
-                width_option,
-            )
-        )
-        try:
-            error_status.value = self.add_mate_status
-        except AttributeError:
-            pass
-        if self.add_mate_status != 1:
-            return None
-        mate = _FakeMate(self.add_mate_name)
-        mate.modify_result = self.add_mate_modify_result
-        self.mate_group.mates.append(mate)
-        return mate
+
+def _harvested(value) -> list:
+    """Unwrap an ``EntitiesToMate`` value to a plain list.
+
+    ``dispatch_array`` returns a ``VT_ARRAY | VT_DISPATCH`` VARIANT on Windows
+    (where pywin32 is installed) and the bare list on CI; ``.value`` yields the
+    underlying sequence in the VARIANT case (mirrors ``_FakeMathUtility``).
+    """
+    return list(getattr(value, "value", value))
 
 
 def _two_entities() -> list[MateEntityRef]:
@@ -1132,10 +1138,11 @@ def test_add_mate_concentric_success_selects_and_names() -> None:
     # Names qualified and selected under the default standard mark 1
     assert ("Plane1@shaft-1@frame", "PLANE", 1) in model.selections
     assert ("Front Plane", "PLANE", 1) in model.selections
-    call = model.mate_calls[0]
-    assert call[0] == 1  # swMateCONCENTRIC
-    assert call[1] == 1  # anti_aligned
-    assert call[12] is True  # lock_rotation
+    assert model.create_mate_data_calls == [1]  # CreateMateData(swMateCONCENTRIC)
+    data = model.created_mate_data[0]
+    assert data.MateAlignment == 1  # anti_aligned
+    assert data.LockRotation is True
+    assert len(_harvested(data.EntitiesToMate)) == 2  # both entities harvested
     assert result.data == {
         "name": "Concentric1",
         "mate_type": "concentric",
@@ -1159,7 +1166,11 @@ def test_add_mate_width_uses_mark_16() -> None:
 
     assert result.is_success
     assert all(mark == 16 for (_, _, mark) in model.selections)
-    assert model.mate_calls[0][0] == 11  # swMateWIDTH
+    assert model.create_mate_data_calls == [11]  # CreateMateData(swMateWIDTH)
+    data = model.created_mate_data[0]
+    assert len(_harvested(data.WidthSelection)) == 2  # first two are the width faces
+    assert len(_harvested(data.TabSelection)) == 2  # remaining are the tab faces
+    assert data.ConstraintType == 1  # swMateWidthConstraint_Centered
 
 
 def test_add_mate_distance_converts_units_and_limits() -> None:
@@ -1179,12 +1190,13 @@ def test_add_mate_distance_converts_units_and_limits() -> None:
     )
 
     assert result.is_success
-    call = model.mate_calls[0]
-    assert abs(call[3] - 0.0254) < 1e-12  # distance in metres
-    assert abs(call[4] - 0.050) < 1e-12  # upper limit
-    assert abs(call[5] - 0.010) < 1e-12  # lower limit
-    assert abs(call[8] - math.radians(90.0)) < 1e-12  # angle in radians
-    assert abs(call[9] - math.radians(90.0)) < 1e-12  # no limits: upper = value
+    assert model.create_mate_data_calls == [5]  # CreateMateData(swMateDISTANCE)
+    data = model.created_mate_data[0]
+    assert abs(data.Distance - 0.0254) < 1e-12  # distance in metres
+    assert data.IsAdvancedMate is True  # limits promote to a LimitDistance mate
+    assert abs(data.MinimumDistance - 0.010) < 1e-12  # lower limit in metres
+    assert abs(data.MaximumDistance - 0.050) < 1e-12  # upper limit in metres
+    assert data.FlipDimension is False  # positive offset, default side
 
 
 def test_add_mate_by_point_converts_to_metres() -> None:
@@ -1216,13 +1228,9 @@ def test_add_mate_selection_failure_errors() -> None:
     assert "Failed to select mate entity 1" in (result.error or "")
 
 
-def test_add_mate_error_status_reports_reason(monkeypatch: pytest.MonkeyPatch) -> None:
-    # _byref_i4 yields a real win32com VARIANT on Windows but falls back to a
-    # bare int 0 on Linux (no pywin32), which can't carry the byref out-status —
-    # so the mock's `error_status.value = 4` is lost and the reason reads as
-    # "unknown error". Stub it with a settable holder so the status round-trips
-    # cross-platform and the real reason-mapping logic is exercised on CI.
-    monkeypatch.setattr(assembly_module, "_byref_i4", lambda: SimpleNamespace(value=0))
+def test_add_mate_error_status_reports_reason() -> None:
+    # A failed CreateMate returns None and reports the reason via the mate-data
+    # object's ErrorStatus (swAddMateError_e); 4 = incorrect selections.
     model = _MateModel()
     model.add_mate_status = 4
     adapter = _adapter_with(model)
@@ -1972,7 +1980,7 @@ async def test_mock_delete_and_suppress_mate_round_trip() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_add_mate_gear_passes_ratio_through_addmate5() -> None:
+def test_add_mate_gear_sets_ratio_on_mate_data() -> None:
     model = _MateModel()
     model.add_mate_name = "GearMate1"
     adapter = _adapter_with(model)
@@ -1985,10 +1993,10 @@ def test_add_mate_gear_passes_ratio_through_addmate5() -> None:
     )
 
     assert result.is_success
-    call = model.mate_calls[0]
-    assert call[0] == 10  # swMateGEAR
-    assert call[6] == 24.0  # GearRatioNumerator
-    assert call[7] == 12.0  # GearRatioDenominator
+    assert model.create_mate_data_calls == [10]  # CreateMateData(swMateGEAR)
+    data = model.created_mate_data[0]
+    assert data.GearRatioNumerator == 24.0
+    assert data.GearRatioDenominator == 12.0
     assert result.data["gear_ratio"] == [24.0, 12.0]
     # Gear entities use the standard mark 1
     assert all(mark == 1 for (_, _, mark) in model.selections)
@@ -2035,7 +2043,7 @@ def test_add_mate_cam_follower_uses_mark_8() -> None:
     )
 
     assert result.is_success
-    assert model.mate_calls[0][0] == 9  # swMateCAMFOLLOWER
+    assert model.create_mate_data_calls == [9]  # CreateMateData(swMateCAMFOLLOWER)
     assert all(mark == 8 for (_, _, mark) in model.selections)
 
 
@@ -2053,11 +2061,9 @@ def test_add_mate_rack_pinion_sets_pitch_diameter() -> None:
         ),
     )
 
-    # Rack-pinion mates carrying a value are built via CreateMateData ->
-    # CreateMate (AddMate5 cannot set the diameter; a follow-up ModifyDefinition
-    # fails), so AddMate5 is never called for this mate.
+    # Rack-pinion mates carrying a value take the dedicated mechanical builder:
+    # CreateMateData -> set the diameter members up front -> CreateMate.
     assert result.is_success
-    assert model.mate_calls == []
     assert model.create_mate_data_calls == [13]  # CreateMateData(swMateRACKPINION)
     data = model.created_mate_data[-1]
     assert data.DiameterType == 0  # swPinionPitchDiameter
@@ -2119,10 +2125,10 @@ def test_add_mate_screw_sets_distance_per_revolution() -> None:
     )
 
     assert result.is_success
-    assert model.mate_calls[0][0] == 17  # swMateSCREW
-    mate = model.mate_group.mates[-1]
-    assert mate.definition.RevolutionType == 1  # swDistancePerRevolution
-    assert abs(mate.definition.RevolutionVal - 0.002) < 1e-12
+    assert model.create_mate_data_calls == [17]  # CreateMateData(swMateSCREW)
+    data = model.created_mate_data[0]
+    assert data.RevolutionType == 1  # swDistancePerRevolution
+    assert abs(data.RevolutionVal - 0.002) < 1e-12
     assert result.data["distance_per_revolution"] == 2.0
 
 
@@ -2140,35 +2146,6 @@ def test_add_mate_mechanical_value_on_wrong_type_errors() -> None:
     assert "only valid for screw mates" in (result.error or "")
 
 
-def test_add_mate_modify_definition_failure_errors() -> None:
-    model = _MateModel()
-    model.add_mate_name = "ScrewMate1"
-    model.add_mate_modify_result = False
-    adapter = _adapter_with(model)
-
-    result = assembly_module._add_mate_impl(
-        adapter,
-        AddMateParameters(
-            mate_type="screw",
-            entities=_two_entities(),
-            distance_per_revolution=2.0,
-        ),
-    )
-    assert result.is_error
-    assert "ModifyDefinition failed" in (result.error or "")
-
-
-def test_add_mate_without_mechanical_values_skips_definition_edit() -> None:
-    model = _MateModel()
-    model.add_mate_name = "RackPinionMate1"
-    adapter = _adapter_with(model)
-
-    result = assembly_module._add_mate_impl(
-        adapter, AddMateParameters(mate_type="rack_pinion", entities=_two_entities())
-    )
-
-    assert result.is_success
-    assert model.mate_group.mates[-1].modify_calls == []
 
 
 @pytest.mark.asyncio

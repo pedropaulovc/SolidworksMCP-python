@@ -130,6 +130,33 @@ def double_array(values: list[float]) -> Any:
         return coerced
 
 
+def dispatch_array(values: list[Any]) -> Any:
+    """Return an array-of-objects VARIANT for ``object[]`` SAFEARRAY params.
+
+    SolidWorks methods/properties such as
+    ``IDistanceMateFeatureData::EntitiesToMate`` take an entity array typed as
+    ``System.object`` holding an ``IDispatch`` array. Under late binding a bare
+    Python list of dispatch objects does not marshal as a SAFEARRAY; it must be
+    wrapped as ``VT_ARRAY | VT_DISPATCH`` (mirrors :func:`double_array` /
+    :func:`bstr_array` for their element types).
+
+    Args:
+        values: The COM object pointers to marshal.
+
+    Returns:
+        Any: ``VARIANT(VT_ARRAY | VT_DISPATCH, values)`` on Windows with pywin32
+        available; the plain list as a fallback otherwise (CI never reaches a
+        real COM boundary).
+    """
+    try:
+        import pythoncom
+        from win32com.client import VARIANT
+
+        return VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, list(values))
+    except Exception:
+        return list(values)
+
+
 def empty_double_array() -> Any:
     """Return an empty array-of-doubles VARIANT for unused SAFEARRAY params.
 
