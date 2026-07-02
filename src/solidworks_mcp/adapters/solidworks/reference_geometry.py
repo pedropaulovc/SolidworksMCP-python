@@ -74,6 +74,31 @@ def _offset_plane_distance(offset_mm: float) -> tuple[float, int]:
     if distance_m < 0.0:
         return -distance_m, _PLANE_OPTION_FLIP
     return distance_m, 0
+
+
+def _angle_plane_constraint(angle_deg: float) -> tuple[float, int]:
+    """Resolve a signed angle-plane constraint to ``(angle_rad, flip_bits)``.
+
+    The angled-plane analogue of :func:`_offset_plane_distance`: the *magnitude*
+    of ``angle_deg`` is the tilt about the pivot edge and the *sign* selects
+    which of the two valid angled planes is built. A negative angle sets the
+    ``OptionFlip`` bit (the alternate plane -- exactly what the removed ``flip``
+    flag used to reach for a positive angle); a positive angle keeps the near
+    side. So, as with offset planes, the sign is the single side knob and there
+    is no separate ``flip`` flag.
+
+    Args:
+        angle_deg: Signed tilt from the base plane, in degrees. A negative value
+            builds the alternate angled plane.
+
+    Returns:
+        ``(angle_rad, flip_bits)`` -- a non-negative angle in radians and the
+        flip bits to OR into the Angle constraint.
+    """
+    angle_rad = math.radians(abs(float(angle_deg)))
+    if float(angle_deg) < 0.0:
+        return angle_rad, _PLANE_OPTION_FLIP
+    return angle_rad, 0
 _AXIS_MODES = ("two_planes", "cylindrical_face", "two_points", "edge")
 _POINT_MODES = ("face_center", "arc_center", "along_curve")
 
@@ -238,9 +263,10 @@ def _create_plane_impl(
                 raise Exception(
                     f"Failed to select pivot edge at point {params.edge_point} (mm)"
                 )
+            angle_rad, angle_flip = _angle_plane_constraint(params.angle)
             constraints = (
-                _PLANE_ANGLE,
-                math.radians(float(params.angle)),
+                _PLANE_ANGLE | angle_flip,
+                angle_rad,
                 _PLANE_COINCIDENT, 0.0, 0, 0.0,
             )
         elif params.mode == "three_point":
