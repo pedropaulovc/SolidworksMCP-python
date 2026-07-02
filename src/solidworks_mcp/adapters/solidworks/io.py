@@ -508,7 +508,11 @@ class SolidWorksIOMixin:
             _put_indexed(import_data, "AddSketchConstraints", bool(params.add_constraints))
 
             # Position/scale are METHODS (no indexed-property marshalling needed).
-            # swDwgImportEntitiesPositioning_e.swDwgEntitiesCentered = 2.
+            # swDwgImportEntitiesPositioning_e.swDwgEntitiesSpecifyPosition = 2:
+            # the (X, Y) is the absolute location the imported geometry's ORIGIN
+            # lands at (NOT a bbox-centred offset -- swDwgEntitiesCentered is 1);
+            # callers that want the artwork centred pass an origin offset computed
+            # from the file's bbox (see build_nameplate.ENGRAVING_POSITION).
             px, py = (params.position or [0.0, 0.0])[:2]
             adapter._attempt(
                 lambda: import_data.SetPosition(
