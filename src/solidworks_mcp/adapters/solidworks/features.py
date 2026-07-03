@@ -389,7 +389,7 @@ def _create_revolve_impl(
                 True,  # SingleDir
                 True,  # IsSolid
                 False,  # IsThin
-                False,  # IsCut
+                params.is_cut,  # IsCut
                 params.reverse_direction,  # ReverseDir
                 params.both_directions,  # BothDirUpToSame
                 0,
@@ -414,7 +414,7 @@ def _create_revolve_impl(
                 not params.both_directions,
                 True,
                 params.thin_feature,
-                False,
+                params.is_cut,
                 params.reverse_direction,
                 False,
                 adapter.constants["swEndCondBlind"],

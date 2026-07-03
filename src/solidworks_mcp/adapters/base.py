@@ -252,6 +252,11 @@ class RevolveParameters(BaseModel):
     Attributes:
         angle (float): The angle value.
         both_directions (bool): The both directions value.
+        is_cut (bool): Revolve as a CUT (material removal) instead of a boss —
+            ``FeatureRevolve2``'s ``IsCut``. Enables oblique cylindrical cuts
+            (a bore at an arbitrary angle: sketch a centreline along the bore
+            axis + a rectangle beside it, revolve-cut 360°) that an extruded
+            cut cannot produce without an angled reference plane.
         merge_result (bool): The merge result value.
         reverse_direction (bool): The reverse direction value.
         thin_feature (bool): The thin feature value.
@@ -261,6 +266,7 @@ class RevolveParameters(BaseModel):
     angle: float
     reverse_direction: bool = False
     both_directions: bool = False
+    is_cut: bool = False
     thin_feature: bool = False
     thin_thickness: float | None = None
     merge_result: bool = True
