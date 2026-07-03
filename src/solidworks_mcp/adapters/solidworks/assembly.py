@@ -45,7 +45,7 @@ from ..base import (
     SolidWorksFeature,
     SuppressMateParameters,
 )
-from ..com_variant import bstr_array, double_array, null_callout
+from ..com_variant import bstr_array, dispatch_array, double_array, null_callout
 from .features import (
     _feature_names,
     _flag_feature_methods,
@@ -87,6 +87,35 @@ _MATE_TYPES = {
 
 # swMateAlign_e
 _MATE_ALIGNMENTS = {"aligned": 0, "anti_aligned": 1, "closest": 2}
+
+# CreateMate mate-data interface per mate kind (cast target for late binding).
+# Every mate is built via CreateMateData -> set the typed data object's
+# properties -> CreateMate, superseding the obsolete AddMate5 primitive.
+_MATE_DATA_INTERFACE = {
+    "coincident": "ICoincidentMateFeatureData",
+    "concentric": "IConcentricMateFeatureData",
+    "perpendicular": "IPerpendicularMateFeatureData",
+    "parallel": "IParallelMateFeatureData",
+    "tangent": "ITangentMateFeatureData",
+    "distance": "IDistanceMateFeatureData",
+    "angle": "IAngleMateFeatureData",
+    "cam_follower": "ICamFollowerMateFeatureData",
+    "gear": "IGearMateFeatureData",
+    "width": "IWidthMateFeatureData",
+    "rack_pinion": "IRackPinionMateFeatureData",
+    "lock": "ILockMateFeatureData",
+    "screw": "IScrewMateFeatureData",
+}
+
+# Mate kinds whose typed data object exposes a MateAlignment property. The
+# others (perpendicular/gear/lock/width) have no alignment knob.
+_MATE_TYPES_WITH_ALIGNMENT = frozenset(
+    {"coincident", "concentric", "parallel", "tangent",
+     "distance", "angle", "cam_follower", "screw"}
+)
+
+# swMateWidthConstraintType_e — centered tab between the two width faces.
+_WIDTH_CENTERED = 1
 
 # AddMate5 selection marks: width tab faces 16, cam-follower 8, others 1
 _MATE_DEFAULT_MARKS = {"width": 16, "cam_follower": 8}
@@ -1595,6 +1624,12 @@ def _validate_mechanical_values(params: AddMateParameters) -> str:
         return (
             "set either pinion_pitch_diameter or rack_travel_per_revolution, not both"
         )
+    if params.mate_type == "rack_pinion" and not any(rack_values):
+        return (
+            "rack_pinion mates require pinion_pitch_diameter or "
+            "rack_travel_per_revolution (CreateMate cannot derive the value the "
+            "way AddMate5 did)"
+        )
     if any(float(value) < 0 for value in rack_values):
         return "rack_pinion values must be positive"
     if params.distance_per_revolution and params.mate_type != "screw":
@@ -1604,38 +1639,128 @@ def _validate_mechanical_values(params: AddMateParameters) -> str:
     return ""
 
 
-def _apply_mechanical_values(
-    adapter: Any, name: str, params: AddMateParameters
-) -> None:
-    """Write a screw mate's pitch value into the created mate's definition.
+def _harvest_selected(adapter: Any, model: Any, count: int) -> list[Any]:
+    """Return the first ``count`` selected objects as an entity list.
 
-    ``AddMate5`` has no parameter for the screw pitch — SolidWorks derives a
-    default from the selected geometry. When the caller provided a value, edit
-    the mate's feature data (``IFeature::GetDefinition`` → set
-    ``RevolutionType``/``RevolutionVal`` → ``IFeature::ModifyDefinition``).
-
-    Rack-pinion values are NOT applied here: a follow-up ``ModifyDefinition``
-    fails for a rack-pinion mate, so those mates are built up front via
-    ``_create_mechanical_mate`` (``CreateMateData`` → ``CreateMate``) and never
-    reach this path.
+    ``CreateMate`` attaches entities to the typed mate-data object via its
+    ``EntitiesToMate`` property (an ``IDispatch`` array) rather than consuming a
+    live selection the way ``AddMate5`` did. The caller pre-selects each entity
+    (reusing the existing per-mark selection logic); this harvests them back out
+    of the selection set with ``ISelectionMgr::GetSelectedObject6`` (1-based
+    index, ``-1`` = any mark), matching the *Create Limit Distance Mate* API
+    example.
 
     Args:
         adapter: A fully connected ``PyWin32Adapter``.
-        name: Name of the created mate feature.
-        params: Mate parameters carrying the optional mechanical values.
+        model: The active assembly model document (selection already made).
+        count: Number of selected entities to harvest.
+
+    Returns:
+        list[Any]: The resolved entity object pointers, in selection order.
 
     Raises:
-        Exception: When a value was requested but could not be applied.
+        Exception: When the selection manager or any entity does not resolve.
     """
-    if params.mate_type == "screw" and params.distance_per_revolution:
-        _modify_mate_definition(
-            adapter,
-            name,
-            {
-                "RevolutionType": _SCREW_DISTANCE_PER_REVOLUTION,
-                "RevolutionVal": float(params.distance_per_revolution) / 1000.0,
-            },
+    sel_mgr = adapter._attempt(lambda: model.SelectionManager, default=None)
+    if sel_mgr is None:
+        raise Exception("SelectionManager unavailable for mate-entity harvest")
+    _flag_feature_methods(sel_mgr, "ISelectionMgr")
+    entities: list[Any] = []
+    for index in range(1, count + 1):
+        entity = adapter._attempt(
+            lambda i=index: sel_mgr.GetSelectedObject6(i, -1), default=None
         )
+        if entity is None:
+            raise Exception(f"Mate entity {index} did not resolve from the selection")
+        entities.append(entity)
+    return entities
+
+
+def _create_standard_mate(
+    adapter: Any, model: Any, params: AddMateParameters, mate_type: int
+) -> Any:
+    """Create a standard/mechanical mate via ``CreateMateData`` → ``CreateMate``.
+
+    Supersedes the obsolete ``AddMate5``. The entities the caller pre-selected
+    are harvested into the typed feature-data object's ``EntitiesToMate``; the
+    type-specific properties (alignment, value, flip/reverse, limits) are set on
+    the data object, and the mate is created from it. The side of a
+    distance/angle mate is chosen by ``FlipDimension`` (in place, no
+    delete-and-re-add); a gear/screw's sense by ``Reverse``.
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        model: The active assembly model document.
+        params: Mate type, alignment and value options.
+        mate_type: ``swMateType_e`` value for the mate.
+
+    Returns:
+        The created mate ``IFeature``.
+
+    Raises:
+        Exception: When the feature-data or the mate cannot be created.
+    """
+    kind = params.mate_type
+    data = adapter._attempt(lambda: model.CreateMateData(mate_type), default=None)
+    if data is None:
+        raise Exception(f"CreateMateData({mate_type}) returned None for {kind} mate")
+    interface = _MATE_DATA_INTERFACE.get(kind)
+    if interface:
+        _flag_feature_methods(data, interface)
+
+    entities = _harvest_selected(adapter, model, len(params.entities))
+    if kind == "width":
+        # Width mate: first two selections are the width faces, the rest the tab
+        # faces to centre between them. Unexercised by this repo's assemblies —
+        # kept for API parity, not live-verified.
+        data.WidthSelection = dispatch_array(entities[:2])
+        data.TabSelection = dispatch_array(entities[2:])
+        data.ConstraintType = _WIDTH_CENTERED
+    else:
+        data.EntitiesToMate = dispatch_array(entities)
+
+    if kind in _MATE_TYPES_WITH_ALIGNMENT:
+        data.MateAlignment = _MATE_ALIGNMENTS[params.alignment]
+
+    if kind == "distance":
+        distance = float(params.distance) / 1000.0
+        data.FlipDimension = bool(params.flip)
+        data.Distance = distance
+        if params.distance_limits:
+            data.IsAdvancedMate = True
+            data.MinimumDistance = float(params.distance_limits[0]) / 1000.0
+            data.MaximumDistance = float(params.distance_limits[1]) / 1000.0
+    elif kind == "angle":
+        angle = math.radians(float(params.angle))
+        data.FlipDimension = bool(params.flip)
+        data.Angle = angle
+        if params.angle_limits:
+            data.IsAdvancedMate = True
+            data.MinimumAngle = math.radians(float(params.angle_limits[0]))
+            data.MaximumAngle = math.radians(float(params.angle_limits[1]))
+    elif kind == "concentric":
+        data.LockRotation = bool(params.lock_rotation)
+    elif kind == "gear":
+        numerator, denominator = (
+            [float(value) for value in params.gear_ratio]
+            if params.gear_ratio
+            else (1.0, 1.0)
+        )
+        data.GearRatioNumerator = numerator
+        data.GearRatioDenominator = denominator
+        data.Reverse = bool(params.flip)
+    elif kind == "screw":
+        data.Reverse = bool(params.flip)
+        if params.distance_per_revolution:
+            data.RevolutionType = _SCREW_DISTANCE_PER_REVOLUTION
+            data.RevolutionVal = float(params.distance_per_revolution) / 1000.0
+
+    mate = adapter._attempt(lambda: model.CreateMate(data), default=None)
+    if mate is None:
+        status = adapter._attempt(lambda: int(data.ErrorStatus), default=None)
+        reason = _MATE_ERRORS.get(status or 0, f"error status {status}")
+        raise Exception(f"CreateMate failed for {kind} mate: {reason}")
+    return mate
 
 
 def _create_mechanical_mate(
@@ -1681,45 +1806,19 @@ def _create_mechanical_mate(
     return mate
 
 
-def _modify_mate_definition(adapter: Any, name: str, members: dict[str, Any]) -> None:
-    """Set feature-data members on a mate and commit the edit.
-
-    Args:
-        adapter: A fully connected ``PyWin32Adapter``.
-        name: Mate feature name.
-        members: Feature-data member names and values to set.
-
-    Raises:
-        Exception: When the mate cannot be resolved or the edit fails.
-    """
-    feature = _mate_feature_by_name(adapter, name)
-    if feature is None:
-        raise Exception(f"Created mate not found for definition edit: {name!r}")
-    data = _read_member(feature, "GetDefinition")
-    if data is None:
-        raise Exception(f"GetDefinition failed for mate {name!r}")
-    for member, value in members.items():
-        setattr(data, member, value)
-    modified = adapter._attempt(
-        lambda: feature.ModifyDefinition(data, adapter.currentModel, null_callout()),
-        default=False,
-    )
-    if not modified:
-        raise Exception(f"ModifyDefinition failed for mate {name!r}")
-
-
 def _add_mate_impl(
     adapter: Any, params: AddMateParameters
 ) -> AdapterResult[dict[str, Any]]:
-    """Add a standard mate via ``IAssemblyDoc::AddMate5``.
+    """Add a standard or mechanical mate via ``IAssemblyDoc::CreateMate``.
 
-    ``AddMate5`` is selection-mark shaped (the right fit for late-bound
-    COM; the newer ``CreateMate`` needs typed mate-data objects): entities
-    are preselected under mark 1 (16 for width-mate tab faces), then the
-    call returns the mate and an ``out`` error status — passed as a
-    by-reference VARIANT under pywin32 late binding. A distance/angle
-    without limits sets the upper and lower limits equal to the value (per
-    the API remarks).
+    Entities are pre-selected per mark (mark 1 by default; 16 for width tab
+    faces, 8 for cam followers, 64/128 for rack/pinion) using the existing
+    selection logic, then handed to :func:`_create_standard_mate`, which
+    harvests them into a typed ``CreateMateData`` object's ``EntitiesToMate``,
+    sets the type-specific properties (alignment, value, ``FlipDimension`` /
+    ``Reverse`` for the side/sense, limits) and calls ``CreateMate``. This
+    supersedes the obsolete ``AddMate5``. Rack-pinion mates that carry a pitch
+    value keep their dedicated :func:`_create_mechanical_mate` builder.
 
     Args:
         adapter: A fully connected ``PyWin32Adapter``.
@@ -1777,13 +1876,13 @@ def _add_mate_impl(
                     f"({ref.entity_type} at {located!r})"
                 )
 
-        # Rack-pinion mates that carry a pitch diameter / travel value must be
-        # built via CreateMateData -> CreateMate (AddMate5 cannot set the value,
-        # and a follow-up ModifyDefinition on the result fails). Entities are
-        # already pre-selected above under marks 64 (rack) / 128 (pinion).
-        if params.mate_type == "rack_pinion" and (
-            params.pinion_pitch_diameter or params.rack_travel_per_revolution
-        ):
+        # Rack-pinion mates must be built via CreateMateData -> CreateMate
+        # (AddMate5 cannot set the value, and a follow-up ModifyDefinition on the
+        # result fails). A pitch diameter / travel value is REQUIRED (enforced in
+        # _validate_mechanical_values) since CreateMate cannot derive it, so every
+        # rack_pinion routes here. Entities are already pre-selected above under
+        # marks 64 (rack) / 128 (pinion).
+        if params.mate_type == "rack_pinion":
             mate = _create_mechanical_mate(adapter, model, params, mate_type)
             adapter._attempt(lambda: model.ClearSelection2(True), default=None)
             name = _mate_feature_name(adapter, mate)
@@ -1802,53 +1901,10 @@ def _add_mate_impl(
                 )
             return payload
 
-        distance = float(params.distance) / 1000.0
-        if params.distance_limits:
-            distance_lower = float(params.distance_limits[0]) / 1000.0
-            distance_upper = float(params.distance_limits[1]) / 1000.0
-        else:
-            distance_lower = distance_upper = distance
-        angle = math.radians(float(params.angle))
-        if params.angle_limits:
-            angle_lower = math.radians(float(params.angle_limits[0]))
-            angle_upper = math.radians(float(params.angle_limits[1]))
-        else:
-            angle_lower = angle_upper = angle
-
-        gear_numerator, gear_denominator = (
-            [float(value) for value in params.gear_ratio]
-            if params.gear_ratio
-            else (1.0, 1.0)
-        )
-
         _flag_feature_methods(model, "IAssemblyDoc")
-        error_status = _byref_i4()
-        mate = model.AddMate5(
-            mate_type,
-            alignment,
-            bool(params.flip),
-            distance,
-            distance_upper,
-            distance_lower,
-            gear_numerator,
-            gear_denominator,
-            angle,
-            angle_upper,
-            angle_lower,
-            False,  # ForPositioningOnly — keep the mate
-            bool(params.lock_rotation),
-            0,  # WidthMateOption (swWidthMateOption_Centered)
-            error_status,
-        )
+        mate = _create_standard_mate(adapter, model, params, mate_type)
         adapter._attempt(lambda: model.ClearSelection2(True), default=None)
-
-        status = adapter._attempt(lambda: int(error_status.value), default=None)
-        if status not in (None, 1) or (mate is None and status != 1):
-            reason = _MATE_ERRORS.get(status or 0, f"error status {status}")
-            raise Exception(f"AddMate5 failed: {reason}")
-
         name = _mate_feature_name(adapter, mate)
-        _apply_mechanical_values(adapter, name, params)
         adapter._attempt(lambda: model.EditRebuild3())
         payload = {
             "name": name,
@@ -1857,7 +1913,7 @@ def _add_mate_impl(
             "entities": len(params.entities),
         }
         if params.gear_ratio:
-            payload["gear_ratio"] = [gear_numerator, gear_denominator]
+            payload["gear_ratio"] = [float(value) for value in params.gear_ratio]
         if params.pinion_pitch_diameter:
             payload["pinion_pitch_diameter"] = float(params.pinion_pitch_diameter)
         if params.rack_travel_per_revolution:
