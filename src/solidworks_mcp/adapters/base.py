@@ -436,7 +436,14 @@ class CreatePlaneParameters(BaseModel):
             flag).
         angle (float): Rotation in degrees (``angle`` mode).
         edge_point (list[float]): Point ``[x, y, z]`` in millimetres on the
-            pivot edge (``angle`` mode).
+            pivot edge (``angle`` mode). Coordinate edge selection is
+            VIEW-DEPENDENT (SolidWorks picks at the screen projection), so an
+            edge sharing its projection with another can mis-select — prefer
+            ``pivot_axis`` when a named reference axis is available.
+        pivot_axis (str): Name of a reference-axis FEATURE (e.g. ``"Axis2"``)
+            to rotate about instead of a picked edge (``angle`` mode).
+            Name-based and therefore view-independent; wins over
+            ``edge_point`` when both are given.
         points (list[list[float]]): Vertex points ``[x, y, z]`` in
             millimetres — three for ``three_point``, one for
             ``parallel_point``.
@@ -447,6 +454,7 @@ class CreatePlaneParameters(BaseModel):
     offset: float = 0.0
     angle: float = 0.0
     edge_point: list[float] = []
+    pivot_axis: str = ""
     points: list[list[float]] = []
 
 

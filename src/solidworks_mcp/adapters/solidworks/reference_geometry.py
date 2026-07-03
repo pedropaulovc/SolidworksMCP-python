@@ -226,10 +226,10 @@ def _create_plane_impl(
             status=AdapterResultStatus.ERROR,
             error=f"create_plane mode {params.mode!r} requires 'base_plane'",
         )
-    if params.mode == "angle" and not params.edge_point:
+    if params.mode == "angle" and not params.edge_point and not params.pivot_axis:
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
-            error="create_plane mode 'angle' requires 'edge_point'",
+            error="create_plane mode 'angle' requires 'edge_point' or 'pivot_axis'",
         )
     if params.mode == "three_point" and len(params.points) != 3:
         return AdapterResult(
@@ -259,7 +259,12 @@ def _create_plane_impl(
         elif params.mode == "angle":
             if not _select_named_feature(adapter, params.base_plane, 0, True):
                 raise Exception(f"Failed to select base plane: {params.base_plane}")
-            if not _select_by_point(adapter, "EDGE", params.edge_point, 1, True):
+            if params.pivot_axis:
+                if not _select_named_feature(adapter, params.pivot_axis, 1, True):
+                    raise Exception(
+                        f"Failed to select pivot axis: {params.pivot_axis}"
+                    )
+            elif not _select_by_point(adapter, "EDGE", params.edge_point, 1, True):
                 raise Exception(
                     f"Failed to select pivot edge at point {params.edge_point} (mm)"
                 )
