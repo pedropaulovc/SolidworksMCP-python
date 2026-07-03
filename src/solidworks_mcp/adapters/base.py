@@ -424,14 +424,16 @@ class CreatePlaneParameters(BaseModel):
             ``"parallel_point"`` (parallel to ``base_plane`` through a vertex).
         base_plane (str): Name of the reference plane or planar face the new
             plane is built from (``offset``/``angle``/``parallel_point``).
-        offset (float): Offset distance in millimetres (``offset`` mode).
+        offset (float): Signed offset distance in millimetres (``offset``
+            mode); a negative value builds the plane on the far side of
+            ``base_plane`` (the side is carried by the sign, not a separate
+            flag).
         angle (float): Rotation in degrees (``angle`` mode).
         edge_point (list[float]): Point ``[x, y, z]`` in millimetres on the
             pivot edge (``angle`` mode).
         points (list[list[float]]): Vertex points ``[x, y, z]`` in
             millimetres — three for ``three_point``, one for
             ``parallel_point``.
-        flip (bool): Build to the other side (offset/angle modes).
     """
 
     mode: str
@@ -440,7 +442,6 @@ class CreatePlaneParameters(BaseModel):
     angle: float = 0.0
     edge_point: list[float] = []
     points: list[list[float]] = []
-    flip: bool = False
 
 
 class RenameFeatureParameters(BaseModel):

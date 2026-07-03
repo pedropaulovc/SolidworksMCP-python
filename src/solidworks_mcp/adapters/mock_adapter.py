@@ -987,7 +987,6 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 "base_plane": params.base_plane,
                 "offset": params.offset,
                 "angle": params.angle,
-                "flip": params.flip,
             },
         )
 

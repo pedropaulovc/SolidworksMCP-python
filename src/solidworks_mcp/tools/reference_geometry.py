@@ -36,7 +36,6 @@ class CreatePlaneInput(BaseModel):
         angle (float): The rotation angle in degrees.
         edge_point (list[float] | None): Point on the pivot edge in mm.
         points (list[list[float]]): Vertex points in mm.
-        flip (bool): Build to the other side.
     """
 
     mode: str = Field(
@@ -55,10 +54,19 @@ class CreatePlaneInput(BaseModel):
         ),
     )
     offset: float = Field(
-        default=0.0, description="Offset distance in millimetres (offset mode)"
+        default=0.0,
+        description=(
+            "Signed offset distance in millimetres (offset mode); the sign "
+            "selects the side of base_plane — negative builds the far side"
+        ),
     )
     angle: float = Field(
-        default=0.0, description="Rotation in degrees (angle mode)"
+        default=0.0,
+        description=(
+            "Signed rotation in degrees (angle mode); the sign selects which "
+            "of the two valid angled planes is built — negative builds the "
+            "alternate side"
+        ),
     )
     edge_point: list[float] | None = Field(
         default=None,
@@ -71,10 +79,6 @@ class CreatePlaneInput(BaseModel):
             "one for parallel_point mode"
         ),
     )
-    flip: bool = Field(
-        default=False, description="Build to the other side (offset/angle modes)"
-    )
-
     def model_post_init(self, __context: Any) -> None:
         """Validate mode-specific requirements.
 
@@ -314,7 +318,6 @@ async def register_reference_geometry_tools(
                     angle=input_data.angle,
                     edge_point=input_data.edge_point or [],
                     points=input_data.points,
-                    flip=input_data.flip,
                 )
             )
             if result.is_success:
