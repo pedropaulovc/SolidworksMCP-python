@@ -1046,6 +1046,7 @@ class TestPyWin32AdapterBranches:
                 thin_feature=False,
                 thin_thickness=None,
                 merge_result=True,
+                is_cut=False,
             )
         )
         cut = await adapter.create_cut_extrude(
@@ -1112,6 +1113,7 @@ class TestPyWin32AdapterBranches:
                 thin_feature=False,
                 thin_thickness=None,
                 merge_result=True,
+                is_cut=False,
             )
         )
         assert result.is_success
@@ -2822,6 +2824,7 @@ class TestPyWin32AdapterBranches:
                 thin_feature=False,
                 thin_thickness=None,
                 merge_result=True,
+                is_cut=False,
             )
         )
 

@@ -937,6 +937,59 @@ class ComponentCircularPatternParameters(BaseModel):
     axis_point: list[float] = []
 
 
+class ComponentChainPatternParameters(BaseModel):
+    """Parameters for a chain component pattern (roller chain, belt, etc.).
+
+    Patterns one or two seed components (alternating, for connected linkage)
+    along a sketch path via ``IFeatureManager::FeatureChainPattern``. The path
+    must be a single connected sketch SEGMENT (e.g. a closed spline) selected as
+    ``EXTSKETCHSEGMENT`` under mark 2 -- selecting the sketch feature yields an
+    invalid definition. Each group's path-link entities are the seed's two pin
+    axes; the alignment plane is a component plane parallel to the chain plane.
+
+    Attributes:
+        path_segment (str): Sketch-segment ref for the path, e.g.
+            ``"Spline1@Sketch1"`` (selected as ``EXTSKETCHSEGMENT``, mark 2).
+        group1_component (str): Group-1 seed component name (mark 1).
+        group1_link1 (str): Group-1 first path-link ref, e.g. ``"Axis1@link-1"``
+            (mark 256).
+        group1_link2 (str): Group-1 second path-link ref (mark 512); required for
+            distance-linkage and connected-linkage pitch methods.
+        group1_plane (str): Group-1 alignment plane ref, e.g.
+            ``"Front Plane@link-1"`` (mark 16384).
+        group2_component (str): Group-2 seed component (mark 2048); connected
+            linkage only. Empty selects a single-group pattern.
+        group2_link1 (str): Group-2 first path-link (mark 4096).
+        group2_link2 (str): Group-2 second path-link (mark 8192).
+        group2_plane (str): Group-2 alignment plane (mark 32768).
+        pitch_method (str): ``"distance"`` | ``"distance_linkage"`` |
+            ``"connected_linkage"``.
+        fill_path (bool): Fill the whole path (SolidWorks computes the count).
+        count (int): Instance count when ``fill_path`` is false.
+        spacing (float): Instance spacing in millimetres (distance methods).
+        align_method (str): ``"tangent"`` (align to the curve) | ``"seed"``.
+        options (str): ``"dynamic"`` (mate instances) | ``"static"``.
+        flip_direction (bool): Reverse the traversal direction along the path.
+    """
+
+    path_segment: str
+    group1_component: str
+    group1_link1: str
+    group1_link2: str = ""
+    group1_plane: str = ""
+    group2_component: str = ""
+    group2_link1: str = ""
+    group2_link2: str = ""
+    group2_plane: str = ""
+    pitch_method: str = "connected_linkage"
+    fill_path: bool = True
+    count: int = 0
+    spacing: float = 0.0
+    align_method: str = "tangent"
+    options: str = "dynamic"
+    flip_direction: bool = False
+
+
 class MateEntityRef(BaseModel):
     """A reference to one entity to mate, located by name or by point.
 
@@ -2483,6 +2536,25 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="pattern_components_circular is not implemented by this adapter",
+        )
+
+    async def pattern_components_chain(
+        self, params: ComponentChainPatternParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Create a chain component pattern (roller chain, belt) in the active
+        assembly along a sketch path.
+
+        Args:
+            params (ComponentChainPatternParameters): Path segment, one or two
+                seed groups (component + path-links + alignment plane), pitch
+                method, fill/count/spacing and options.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: Pattern feature or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="pattern_components_chain is not implemented by this adapter",
         )
 
     async def add_mate(
