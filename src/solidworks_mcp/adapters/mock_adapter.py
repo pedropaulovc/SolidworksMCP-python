@@ -25,6 +25,7 @@ from .base import (
     AddThreadParameters,
     ApplyMaterialParameters,
     CircularPatternParameters,
+    ComponentChainPatternParameters,
     ComponentCircularPatternParameters,
     ComponentLinearPatternParameters,
     ComponentRefParameters,
@@ -1819,6 +1820,54 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
                 "equal_spacing": params.equal_spacing,
                 "axis_name": params.axis_name,
                 "axis_point": params.axis_point,
+            },
+        )
+
+    _CHAIN_PITCH_METHODS = ("distance", "distance_linkage", "connected_linkage")
+
+    async def pattern_components_chain(
+        self, params: ComponentChainPatternParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock creating a chain component pattern.
+
+        Args:
+            params (ComponentChainPatternParameters): Pattern definition.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The pattern feature.
+        """
+        if not self._current_model:
+            return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+        if params.pitch_method not in self._CHAIN_PITCH_METHODS:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown pitch_method: {params.pitch_method!r}",
+            )
+        if not params.path_segment or not params.group1_component:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="path_segment and group1_component are required",
+            )
+        group2 = bool(params.group2_component)
+        if params.pitch_method == "connected_linkage" and not group2:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="connected_linkage requires group2_component",
+            )
+        for comp in (params.group1_component, params.group2_component):
+            if comp and comp.split("@", 1)[0] not in self._components:
+                return AdapterResult(
+                    status=AdapterResultStatus.ERROR,
+                    error=f"Component not found: {comp!r}",
+                )
+        return await self._mock_feature(
+            "LocalChainPattern",
+            {
+                "path_segment": params.path_segment,
+                "pitch_method": params.pitch_method,
+                "fill_path": params.fill_path,
+                "count": params.count,
+                "groups": 2 if group2 else 1,
             },
         )
 

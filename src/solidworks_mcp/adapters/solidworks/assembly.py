@@ -32,6 +32,7 @@ from ..base import (
     AdapterResult,
     AdapterResultStatus,
     AddMateParameters,
+    ComponentChainPatternParameters,
     ComponentCircularPatternParameters,
     ComponentLinearPatternParameters,
     ComponentRefParameters,
@@ -202,6 +203,11 @@ class SolidWorksAssemblyMixin:
         self, params: ComponentCircularPatternParameters
     ) -> AdapterResult[SolidWorksFeature]:
         return _pattern_components_circular_impl(self, params)
+
+    async def pattern_components_chain(
+        self, params: ComponentChainPatternParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        return _pattern_components_chain_impl(self, params)
 
     async def add_mate(
         self, params: AddMateParameters
@@ -1425,6 +1431,127 @@ def _pattern_components_circular_impl(
         adapter._handle_com_operation(
             "pattern_components_circular", _circular_operation
         ),
+    )
+
+
+# swChainPatternPitchMethod_e / swChainPatternAlignment_e / swChainPatternOptions_e
+_CHAIN_PITCH_METHOD = {"distance": 0, "distance_linkage": 1, "connected_linkage": 2}
+_CHAIN_ALIGN = {"seed": 0, "tangent": 1}
+_CHAIN_OPTIONS = {"static": 0, "dynamic": 1}
+
+
+def _pattern_components_chain_impl(
+    adapter: Any, params: ComponentChainPatternParameters
+) -> AdapterResult[SolidWorksFeature]:
+    """Chain component pattern via ``IFeatureManager::FeatureChainPattern``.
+
+    The documented ``CreateDefinition``/``CreateFeature`` route returns ``null``
+    under pywin32 late binding (a feature-data marshaling quirk; it works only in
+    early-bound C#/VBA). ``FeatureChainPattern`` is the one-call method that
+    consumes the pre-selection and works. The path must be a single connected
+    sketch SEGMENT (``EXTSKETCHSEGMENT``, mark 2) -- selecting the sketch feature
+    yields an invalid definition. Marks: path 2 | g1 comp 1/link1 256/link2 512/
+    plane 16384 | g2 comp 2048/link1 4096/link2 8192/plane 32768.
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Path segment, one or two seed groups, pitch/fill/options.
+
+    Returns:
+        AdapterResult[SolidWorksFeature]: ``data.type == "LocalChainPattern"``.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    if params.pitch_method not in _CHAIN_PITCH_METHOD:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown pitch_method: {params.pitch_method!r} "
+            f"(expected one of {sorted(_CHAIN_PITCH_METHOD)})",
+        )
+    if not params.path_segment or not params.group1_component:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="path_segment and group1_component are required",
+        )
+    group2 = bool(params.group2_component)
+    if params.pitch_method == "connected_linkage" and not group2:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="connected_linkage requires group2_component",
+        )
+
+    def _chain_operation() -> SolidWorksFeature:
+        model = adapter.currentModel
+        ext = model.Extension
+
+        def sel(name: str, etype: str, mark: int, append: bool) -> None:
+            ok = adapter._attempt(
+                lambda: ext.SelectByID2(
+                    name, etype, 0.0, 0.0, 0.0, append, mark, null_callout(), 0
+                ),
+                default=False,
+            )
+            if not ok:
+                raise Exception(f"Failed to select {etype} {name!r} (mark {mark})")
+
+        adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+        # Path (mark 2): the sketch SEGMENT, not the sketch feature.
+        sel(params.path_segment, "EXTSKETCHSEGMENT", 2, False)
+        # Group 1.
+        sel(_qualify_component(adapter, params.group1_component), "COMPONENT", 1, True)
+        sel(_qualify_entity_name(adapter, params.group1_link1), "AXIS", 256, True)
+        if params.group1_link2:
+            sel(_qualify_entity_name(adapter, params.group1_link2), "AXIS", 512, True)
+        if params.group1_plane:
+            sel(_qualify_entity_name(adapter, params.group1_plane), "PLANE", 16384, True)
+        # Group 2 (connected linkage).
+        if group2:
+            sel(_qualify_component(adapter, params.group2_component), "COMPONENT", 2048, True)
+            sel(_qualify_entity_name(adapter, params.group2_link1), "AXIS", 4096, True)
+            if params.group2_link2:
+                sel(_qualify_entity_name(adapter, params.group2_link2), "AXIS", 8192, True)
+            if params.group2_plane:
+                sel(_qualify_entity_name(adapter, params.group2_plane), "PLANE", 32768, True)
+
+        fm = model.FeatureManager
+        _flag_feature_methods(fm, "IFeatureManager")
+        names_before = _feature_names(adapter)
+        # FeatureChainPattern(PitchMethod, FlipDirection, FillPath, Number,
+        #   Spacing, GroupOneFlipPlane, GroupTwoChain, GroupTwoFlipPlane,
+        #   AlignMethod, Options)
+        feature = fm.FeatureChainPattern(
+            _CHAIN_PITCH_METHOD[params.pitch_method],
+            bool(params.flip_direction),
+            bool(params.fill_path),
+            int(params.count),
+            float(params.spacing) / 1000.0,
+            False,
+            group2,
+            False,
+            _CHAIN_ALIGN.get(params.align_method, 1),
+            _CHAIN_OPTIONS.get(params.options, 1),
+        )
+        feature = _resolve_feature(adapter, feature, names_before)
+        if not feature:
+            raise Exception("Failed to create chain component pattern")
+
+        return SolidWorksFeature(
+            name=str(_read_member(feature, "Name")),
+            type="LocalChainPattern",
+            id=adapter._get_feature_id(feature),
+            parameters={
+                "path_segment": params.path_segment,
+                "pitch_method": params.pitch_method,
+                "fill_path": bool(params.fill_path),
+                "count": int(params.count),
+                "groups": 2 if group2 else 1,
+            },
+            properties={"created": datetime.now().isoformat()},
+        )
+
+    return cast(
+        AdapterResult[SolidWorksFeature],
+        adapter._handle_com_operation("pattern_components_chain", _chain_operation),
     )
 
 
