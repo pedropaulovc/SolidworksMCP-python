@@ -914,8 +914,12 @@ class _BeltPulley:
         return SimpleNamespace(GetFaces=lambda: self._faces)
 
 
-def _belt_mate(dims_m=(0.024, 0.048)):
-    """A fake ``MateBeltDim`` coupling mate whose D1/D2 carry ``dims_m``."""
+def _belt_mate(dims_m=(0.012, 0.024)):
+    """A fake ``MateBeltDim`` coupling mate whose D1/D2 carry ``dims_m``.
+
+    The default is the live-observed AXIS-member scale: SW records the typed
+    diameters (0.024/0.048 in these tests) at HALF scale, i.e. radii. The
+    verification is scale-invariant (ratio compare), so this must pass."""
     params = {
         f"D{i}": SimpleNamespace(SystemValue=v)
         for i, v in enumerate(dims_m, start=1)
@@ -1177,9 +1181,34 @@ def test_belt_member_axis_not_found_errors() -> None:
     assert "Pulley member axis not found" in (result.error or "")
 
 
+def test_belt_engage_accepts_full_scale_mate() -> None:
+    # A mate carrying the typed diameters 1:1 (the face route on a plain
+    # cylindrical pulley whose face IS the pitch surface) also passes -- the
+    # check is scale-invariant.
+    t12 = _BeltPulley("t12-1", [_BeltFace(_BeltSurface(radius=0.012))])
+    t24 = _BeltPulley("t24-1", [_BeltFace(_BeltSurface(radius=0.024))])
+    model = _belt_model(
+        {"t12-1": t12, "t24-1": t24},
+        SimpleNamespace(Name="Belt1"),
+        mate=_belt_mate(dims_m=(0.024, 0.048)),
+    )
+    adapter = _adapter_with(model)
+
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["t12-1", "t24-1"],
+            pulley_diameters=[24.0, 48.0],
+            engage_belt=True,
+        ),
+    )
+    assert result.is_success
+
+
 def test_belt_engage_fails_when_mate_diameters_differ() -> None:
     # The coupling mate carries the picked faces' TIP diameters (the FACE-member
-    # trap) instead of the requested pitch diameters -> loud failure.
+    # trap) instead of the requested pitch diameters -> the RATIO is off (0.538
+    # vs 0.500) -> loud failure.
     t12 = _BeltPulley("t12-1", [_BeltFace(_BeltSurface(radius=0.014))])
     t24 = _BeltPulley("t24-1", [_BeltFace(_BeltSurface(radius=0.026))])
     model = _belt_model(
@@ -1198,7 +1227,7 @@ def test_belt_engage_fails_when_mate_diameters_differ() -> None:
         ),
     )
     assert result.is_error
-    assert "NOT the requested values" in (result.error or "")
+    assert "do NOT carry the requested ratio" in (result.error or "")
 
 
 def test_belt_engage_fails_when_no_coupling_mate() -> None:

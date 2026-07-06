@@ -1031,7 +1031,9 @@ class BeltChainParameters(BaseModel):
             PulleyDiameters + ModifyDefinition, ModifyMemberParameters, an
             EngageBelt re-author, and direct mate-dimension writes all leave
             the tip ratio). An AXIS member has no diameter to steal, so the
-            typed ``pulley_diameters`` drive the coupling exactly. Empty (the
+            typed ``pulley_diameters`` drive the coupling exactly (the mate
+            records them at RADIUS scale — half the typed value — so the
+            post-create check compares ratios, not absolutes). Empty (the
             default) keeps the face route for plain cylindrical pulleys.
         flip_sides (list[bool]): Per-pulley belt-side flip; empty defaults to all
             ``False``. When set, same length as ``pulley_components``.

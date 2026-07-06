@@ -1809,8 +1809,8 @@ def _insert_belt_chain_impl(
 
 
 def _verify_belt_mate_diameters(adapter: Any, diameters_m: list[float]) -> None:
-    """Assert the just-created EngageBelt coupling mate carries EXACTLY the
-    requested per-pulley diameters, raising otherwise.
+    """Assert the just-created EngageBelt coupling mate carries the requested
+    per-pulley diameter RATIOS, raising otherwise.
 
     The ``MateBeltDim`` mate's own ``D1``/``D2`` dimensions ARE the coupling
     ratio. With FACE pulley members SolidWorks bakes the picked faces'
@@ -1821,7 +1821,15 @@ def _verify_belt_mate_diameters(adapter: Any, diameters_m: list[float]) -> None:
     ModifyMemberParameters, an EngageBelt re-author, and direct writes to the
     mate dimensions all leave the face-derived ratio. Only AXIS pulley members
     make the typed diameters drive the mate, and THIS check proves it on every
-    build. Compared as a multiset (the mate does not preserve pulley order).
+    build.
+
+    Compared SCALE-invariant, as a sorted multiset: only the ratio couples the
+    pulleys (the absolute feed lives in other mates), and the recorded scale
+    varies by member kind -- a face-member mate stores DIAMETERS (measured
+    0.028/0.052 for 0.014/0.026 tip radii) while an axis-member mate stores
+    the typed values at HALF scale, i.e. radii (measured 0.012/0.024 for
+    typed diameters 0.024/0.048; the coupling still measures the exact typed
+    ratio). Order is not preserved by the mate either way.
     """
     from .. import sw_type_info
 
@@ -1846,11 +1854,18 @@ def _verify_belt_mate_diameters(adapter: Any, diameters_m: list[float]) -> None:
             dims.append(float(value))
     expected = sorted(diameters_m)
     actual = sorted(dims)
-    if len(actual) != len(expected) or any(
-        abs(a - e) > 1e-6 for a, e in zip(actual, expected, strict=True)
-    ):
+    proportional = (
+        len(actual) == len(expected)
+        and all(v > 0.0 for v in actual)
+        and all(v > 0.0 for v in expected)
+        and all(
+            abs(a / actual[0] - e / expected[0]) < 1e-4
+            for a, e in zip(actual, expected, strict=True)
+        )
+    )
+    if not proportional:
         raise Exception(
-            "belt coupling mate diameters are NOT the requested values: "
+            "belt coupling mate diameters do NOT carry the requested ratio: "
             f"mate carries {actual}, requested {expected} -- with FACE pulley "
             "members SW bakes the picked faces' (tip) diameters into the mate; "
             "pass pulley_member_axes (datum axes) so pulley_diameters drive"
