@@ -157,6 +157,33 @@ def dispatch_array(values: list[Any]) -> Any:
         return list(values)
 
 
+def bool_array(values: list[bool]) -> Any:
+    """Return an array-of-booleans VARIANT for ``bool[]`` SAFEARRAY params.
+
+    SolidWorks properties such as ``IBeltChainFeatureData::FlipSides`` take a
+    ``System.object`` holding a boolean array. Under late binding a bare Python
+    list marshals as ``VT_ARRAY | VT_VARIANT``, which the setter rejects; the
+    list must be wrapped as ``VT_ARRAY | VT_BOOL`` (mirrors :func:`double_array`
+    / :func:`dispatch_array` for their element types).
+
+    Args:
+        values: The booleans to marshal.
+
+    Returns:
+        Any: ``VARIANT(VT_ARRAY | VT_BOOL, values)`` on Windows with pywin32
+        available; the plain list as a fallback otherwise (CI never reaches a
+        real COM boundary).
+    """
+    coerced = [bool(v) for v in values]
+    try:
+        import pythoncom
+        from win32com.client import VARIANT
+
+        return VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_BOOL, coerced)
+    except Exception:
+        return coerced
+
+
 def empty_double_array() -> Any:
     """Return an empty array-of-doubles VARIANT for unused SAFEARRAY params.
 

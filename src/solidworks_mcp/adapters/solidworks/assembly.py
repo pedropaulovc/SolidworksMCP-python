@@ -32,6 +32,7 @@ from ..base import (
     AdapterResult,
     AdapterResultStatus,
     AddMateParameters,
+    BeltChainParameters,
     ComponentChainPatternParameters,
     ComponentCircularPatternParameters,
     ComponentLinearPatternParameters,
@@ -46,7 +47,13 @@ from ..base import (
     SolidWorksFeature,
     SuppressMateParameters,
 )
-from ..com_variant import bstr_array, dispatch_array, double_array, null_callout
+from ..com_variant import (
+    bool_array,
+    bstr_array,
+    dispatch_array,
+    double_array,
+    null_callout,
+)
 from .features import (
     _feature_names,
     _flag_feature_methods,
@@ -120,6 +127,10 @@ _WIDTH_CENTERED = 1
 
 # AddMate5 selection marks: width tab faces 16, cam-follower 8, others 1
 _MATE_DEFAULT_MARKS = {"width": 16, "cam_follower": 8}
+# Rack-pinion mates need DIFFERENT marks per entity (a single default mark on
+# both makes CreateMate reject the selection): rack=64, pinion=128, in that
+# entity order (SOLIDWORKS *Create Rack and Pinion Mate* API example).
+_RACK_PINION_MARKS = (64, 128)
 
 # swRackPinionMateDistanceOptions_e
 _RACK_PINION_PITCH_DIAMETER = 0
@@ -208,6 +219,11 @@ class SolidWorksAssemblyMixin:
         self, params: ComponentChainPatternParameters
     ) -> AdapterResult[SolidWorksFeature]:
         return _pattern_components_chain_impl(self, params)
+
+    async def insert_belt_chain(
+        self, params: BeltChainParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        return _insert_belt_chain_impl(self, params)
 
     async def add_mate(
         self, params: AddMateParameters
@@ -1439,6 +1455,13 @@ _CHAIN_PITCH_METHOD = {"distance": 0, "distance_linkage": 1, "connected_linkage"
 _CHAIN_ALIGN = {"seed": 0, "tangent": 1}
 _CHAIN_OPTIONS = {"static": 0, "dynamic": 1}
 
+# swFeatureNameID_e.swFmBeltAndChain (verified via .NET reflection on
+# SolidWorks.Interop.swconst.dll; swFmLocalChainPattern=112 cross-checked). A
+# wrong value makes CreateDefinition return null.
+_SW_FM_BELT_AND_CHAIN = 119
+# CylinderParams axis-component index (params = [ox,oy,oz, ax,ay,az, radius]).
+_PULLEY_AXIS_INDEX = {"x": 3, "y": 4, "z": 5}
+
 
 def _pattern_components_chain_impl(
     adapter: Any, params: ComponentChainPatternParameters
@@ -1553,6 +1576,227 @@ def _pattern_components_chain_impl(
         AdapterResult[SolidWorksFeature],
         adapter._handle_com_operation("pattern_components_chain", _chain_operation),
     )
+
+
+def _pulley_cylinder_face(adapter: Any, component: Any, axis_index: int) -> Any:
+    """Return a pulley's rotation-axis cylindrical face (largest coaxial radius).
+
+    The Belt/Chain feature's pulley member must be a cylindrical FACE, not the
+    component object (passing components makes ``CreateFeature`` silently null).
+    Walks the component body's faces for cylinders whose axis is ~parallel to
+    the belt-plane normal (``axis_index`` into ``CylinderParams`` = [ox,oy,oz,
+    ax,ay,az, r]) and returns the largest-radius one — the rim cylinder. The
+    picked radius does not matter (``PulleyDiameters`` sets the coupling ratio);
+    only the axis + centre are read from the face.
+
+    Args:
+        adapter: Connected adapter (for ``_attempt``).
+        component: An ``IComponent2`` dispatch (already flagged).
+        axis_index: 3/4/5 — which ``CylinderParams`` axis component to test.
+
+    Returns:
+        Any: the ``IFace2`` dispatch, or ``None`` if no coaxial cylinder found.
+    """
+    from .. import sw_type_info
+
+    sw_type_info.flag_methods(component, "IComponent2")
+    body = adapter._attempt(lambda: component.GetBody(), default=None)
+    if body is None:
+        return None
+    sw_type_info.flag_methods(body, "IBody2")
+    faces = adapter._attempt(lambda: body.GetFaces(), default=None) or []
+    best_face = None
+    best_radius = -1.0
+    for face in faces:
+        surf = adapter._attempt(
+            lambda f=face: sw_type_info.flagged(f, "IFace2").GetSurface(), default=None
+        )
+        if surf is None:
+            continue
+        sw_type_info.flag_methods(surf, "ISurface")
+        if not adapter._attempt(lambda s=surf: s.IsCylinder(), default=False):
+            continue
+        cyl = adapter._attempt(lambda s=surf: s.CylinderParams, default=None)
+        if not cyl:
+            continue
+        if abs(cyl[axis_index]) > 0.9 and cyl[6] > best_radius:
+            best_face, best_radius = face, cyl[6]
+    return best_face
+
+
+def _insert_belt_chain_impl(
+    adapter: Any, params: BeltChainParameters
+) -> AdapterResult[SolidWorksFeature]:
+    """Belt/Chain assembly feature via ``CreateDefinition``/``CreateFeature``.
+
+    Couples two or more pulley/sprocket components so they rotate together at
+    the ratio their ``pulley_diameters`` imply (``engage_belt`` adds the belt
+    MATES — only meaningful when the pulleys are FREE). Unlike the chain
+    *pattern* (which nulls under ``CreateFeature`` and uses the one-call
+    ``FeatureChainPattern`` instead), the belt feature-data DOES create under
+    pywin32 early binding — provided each pulley member is its cylindrical FACE,
+    not the component object (passing components makes ``CreateFeature`` silently
+    null; the setters lie pre-commit so "all props set" proves nothing).
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Pulley components + pitch diameters (mm), belt plane, flags.
+
+    Returns:
+        AdapterResult[SolidWorksFeature]: ``data.type == "BeltChain"``.
+    """
+    from .. import sw_type_info
+
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+    n = len(params.pulley_components)
+    if n < 2:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="insert_belt_chain requires at least 2 pulley_components",
+        )
+    if len(params.pulley_diameters) != n:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="pulley_diameters must match pulley_components length "
+            f"({len(params.pulley_diameters)} != {n})",
+        )
+    if params.flip_sides and len(params.flip_sides) != n:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="flip_sides, when set, must match pulley_components length "
+            f"({len(params.flip_sides)} != {n})",
+        )
+    axis_index = _PULLEY_AXIS_INDEX.get(params.pulley_axis.lower())
+    if axis_index is None:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown pulley_axis: {params.pulley_axis!r} (expected x/y/z)",
+        )
+
+    def _belt_operation() -> SolidWorksFeature:
+        model = adapter.currentModel
+
+        # Resolve each pulley to its rotation-axis cylindrical face.
+        faces = []
+        for name in params.pulley_components:
+            component = _get_component(adapter, name)
+            if component is None:
+                raise Exception(f"Pulley component not found: {name!r}")
+            face = _pulley_cylinder_face(adapter, component, axis_index)
+            if face is None:
+                raise Exception(
+                    f"No {params.pulley_axis}-axis cylindrical face on pulley {name!r}"
+                )
+            faces.append(face)
+
+        # Belt-location plane (normal to the pulley axes) -> IRefPlane.
+        plane_feat = adapter._attempt(
+            lambda: model.FeatureByName(params.location_plane), default=None
+        )
+        if plane_feat is None:
+            raise Exception(f"Belt-location plane not found: {params.location_plane!r}")
+        ref_plane = adapter._attempt(
+            lambda: sw_type_info.flagged(plane_feat, "IFeature").GetSpecificFeature2(),
+            default=None,
+        )
+        if ref_plane is None:
+            raise Exception(
+                f"Could not resolve {params.location_plane!r} to a reference plane"
+            )
+
+        fm = model.FeatureManager
+        _flag_feature_methods(fm, "IFeatureManager")
+        data = adapter._attempt(
+            lambda: fm.CreateDefinition(_SW_FM_BELT_AND_CHAIN), default=None
+        )
+        if data is None:
+            raise Exception(
+                f"CreateDefinition({_SW_FM_BELT_AND_CHAIN}) returned null "
+                "(belt/chain feature definition)"
+            )
+        typed = sw_type_info.early_bound(data, "IBeltChainFeatureData")
+        flips = params.flip_sides or [False] * n
+        diameters_m = [d / 1000.0 for d in params.pulley_diameters]
+        for attr, value in (
+            ("PulleyComponents", dispatch_array(faces)),
+            ("PulleyDiameters", double_array(diameters_m)),
+            ("FlipSides", bool_array(flips)),
+            ("BeltLocationPlane", ref_plane),
+            ("UseBeltThickness", bool(params.use_belt_thickness)),
+            ("BeltThickness", float(params.belt_thickness) / 1000.0),
+            ("CreateBeltPart", bool(params.create_belt_part)),
+            ("EngageBelt", bool(params.engage_belt)),
+        ):
+            adapter._attempt(
+                lambda t=typed, a=attr, v=value: setattr(t, a, v), default=None
+            )
+
+        names_before = _feature_names(adapter)
+        feature = adapter._attempt(lambda: fm.CreateFeature(data), default=None)
+        feature = _resolve_feature(adapter, feature, names_before)
+        if not feature:
+            errs = adapter._attempt(lambda: fm.GetCreateFeatureErrors(), default="?")
+            raise Exception(f"Failed to create belt/chain feature (errors={errs})")
+
+        feature_name = str(_read_member(feature, "Name"))
+
+        # Blank the auto-generated belt-path sketch (construction scaffolding).
+        if params.blank_sketch:
+            _blank_feature_sketches(adapter, feature)
+
+        return SolidWorksFeature(
+            name=feature_name,
+            type="BeltChain",
+            id=adapter._get_feature_id(feature),
+            parameters={
+                "pulleys": n,
+                "diameters_mm": list(params.pulley_diameters),
+                "engage_belt": bool(params.engage_belt),
+                "create_belt_part": bool(params.create_belt_part),
+            },
+            properties={"created": datetime.now().isoformat()},
+        )
+
+    return cast(
+        AdapterResult[SolidWorksFeature],
+        adapter._handle_com_operation("insert_belt_chain", _belt_operation),
+    )
+
+
+def _blank_feature_sketches(adapter: Any, feature: Any) -> None:
+    """Blank every sketch nested under ``feature`` (best-effort, never raises).
+
+    The Belt/Chain feature generates a belt-path sketch as a sub-feature; it is
+    construction scaffolding, so hide it. Walks the sub-feature chain, and for
+    each sketch selects it and calls ``IModelDoc2::BlankSketch`` (blanks the
+    selected sketch). Failures are swallowed — blanking is cosmetic.
+    """
+    from .. import sw_type_info
+
+    model = adapter.currentModel
+    ext = model.Extension
+    sub = adapter._attempt(
+        lambda: sw_type_info.flagged(feature, "IFeature").GetFirstSubFeature(),
+        default=None,
+    )
+    while sub is not None:
+        type_name = _read_member(sub, "GetTypeName2")
+        if type_name in ("ProfileFeature", "3DProfileFeature"):
+            sk_name = str(_read_member(sub, "Name"))
+            selected = adapter._attempt(
+                lambda nm=sk_name: ext.SelectByID2(
+                    nm, "SKETCH", 0.0, 0.0, 0.0, False, 0, null_callout(), 0
+                ),
+                default=False,
+            )
+            if selected:
+                adapter._attempt(lambda: model.BlankSketch(), default=None)
+                adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+        sub = adapter._attempt(
+            lambda s=sub: sw_type_info.flagged(s, "IFeature").GetNextSubFeature(),
+            default=None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1995,7 +2239,12 @@ def _add_mate_impl(
         adapter._attempt(lambda: model.ClearSelection2(True), default=None)
         default_mark = _MATE_DEFAULT_MARKS.get(params.mate_type, 1)
         for index, ref in enumerate(params.entities):
-            mark = ref.mark or default_mark
+            # Rack-pinion needs a distinct mark per entity (rack 64, pinion 128);
+            # other mates share one default mark. An explicit ref.mark still wins.
+            if params.mate_type == "rack_pinion" and not ref.mark and index < 2:
+                mark = _RACK_PINION_MARKS[index]
+            else:
+                mark = ref.mark or default_mark
             if not _select_mate_entity(adapter, ref, mark):
                 located = ref.name or ref.point
                 raise Exception(

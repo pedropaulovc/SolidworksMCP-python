@@ -24,6 +24,7 @@ from .base import (
     AddMateParameters,
     AddThreadParameters,
     ApplyMaterialParameters,
+    BeltChainParameters,
     CircularPatternParameters,
     ComponentChainPatternParameters,
     ComponentCircularPatternParameters,
@@ -157,6 +158,8 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         self._dimensions: dict[str, float] = {}
         self._equations: list[str] = []
         self._configurations: list[str] = ["Default"]
+        # Names of sketches hidden via blank_sketch (construction scaffolding).
+        self._blanked_sketches: list[str] = []
         # Assembly components keyed by instance name ("part-1"); each value
         # holds file_path/configuration/position/rotation/fixed state so the
         # Phase 7A component tools behave statefully in mock mode.
@@ -1871,6 +1874,60 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             },
         )
 
+    async def insert_belt_chain(
+        self, params: BeltChainParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Mock creating a Belt/Chain assembly feature.
+
+        Mirrors the live adapter's validation (>=2 pulleys, matching diameter/
+        flip-side lengths, known axis, resolvable components) so the mock rejects
+        exactly what the live adapter rejects.
+
+        Args:
+            params (BeltChainParameters): Belt feature definition.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: The belt feature.
+        """
+        if not self._current_model:
+            return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+        n = len(params.pulley_components)
+        if n < 2:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="insert_belt_chain requires at least 2 pulley_components",
+            )
+        if len(params.pulley_diameters) != n:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="pulley_diameters must match pulley_components length",
+            )
+        if params.flip_sides and len(params.flip_sides) != n:
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error="flip_sides, when set, must match pulley_components length",
+            )
+        if params.pulley_axis.lower() not in ("x", "y", "z"):
+            return AdapterResult(
+                status=AdapterResultStatus.ERROR,
+                error=f"Unknown pulley_axis: {params.pulley_axis!r}",
+            )
+        for comp in params.pulley_components:
+            if comp.split("@", 1)[0] not in self._components:
+                return AdapterResult(
+                    status=AdapterResultStatus.ERROR,
+                    error=f"Pulley component not found: {comp!r}",
+                )
+        return await self._mock_feature(
+            "BeltChain",
+            {
+                "pulleys": n,
+                "diameters_mm": list(params.pulley_diameters),
+                "engage_belt": params.engage_belt,
+                "create_belt_part": params.create_belt_part,
+            },
+        )
+
     # Mirrors assembly._MATE_TYPES / _MATE_ALIGNMENTS so mock validation
     # rejects exactly what the live adapter rejects.
     _MATE_TYPES = (
@@ -3291,6 +3348,20 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             data=None,
             execution_time=self._delays["sketch_operation"] / 2,
         )
+
+    async def blank_sketch(self, sketch: str) -> AdapterResult[None]:
+        """Mock hiding a named sketch.
+
+        Args:
+            sketch (str): The sketch feature name.
+
+        Returns:
+            AdapterResult[None]: SUCCESS, or ERROR when no model is active.
+        """
+        if not self._current_model:
+            return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+        self._blanked_sketches.append(sketch)
+        return AdapterResult(status=AdapterResultStatus.SUCCESS, data=None)
 
     async def check_sketch_fully_defined(
         self, sketch_name: str | None = None
