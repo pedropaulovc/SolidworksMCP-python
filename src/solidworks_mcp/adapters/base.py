@@ -1019,6 +1019,20 @@ class BeltChainParameters(BaseModel):
         pulley_axis (str): ``"x"`` | ``"y"`` | ``"z"`` — the pulleys' shared
             rotation axis in assembly space; picks each pulley's coaxial
             cylindrical face. Defaults to ``"z"``.
+        pulley_member_axes (list[str]): Named DATUM-AXIS entities (e.g.
+            ``"Axis1@sprocket-1"``) to use as the pulley members instead of the
+            cylindrical faces, one per pulley. REQUIRED for a correct
+            ``engage_belt`` coupling ratio on toothed wheels: with a FACE
+            member SolidWorks derives the coupling mate's per-pulley diameters
+            from the picked face (the tooth-TIP cylinder) and IGNORES
+            ``pulley_diameters`` for the mate — the definition commits them,
+            the belt PATH honours them, but the ``MateBeltDim``'s dimensions
+            stay face-derived and are not writable (measured live 2026-07-06:
+            PulleyDiameters + ModifyDefinition, ModifyMemberParameters, an
+            EngageBelt re-author, and direct mate-dimension writes all leave
+            the tip ratio). An AXIS member has no diameter to steal, so the
+            typed ``pulley_diameters`` drive the coupling exactly. Empty (the
+            default) keeps the face route for plain cylindrical pulleys.
         flip_sides (list[bool]): Per-pulley belt-side flip; empty defaults to all
             ``False``. When set, same length as ``pulley_components``.
         engage_belt (bool): Create the belt coupling mates (the operational
@@ -1036,6 +1050,7 @@ class BeltChainParameters(BaseModel):
     pulley_diameters: list[float]
     location_plane: str = "Front Plane"
     pulley_axis: str = "z"
+    pulley_member_axes: list[str] = []
     flip_sides: list[bool] = []
     engage_belt: bool = True
     create_belt_part: bool = False
