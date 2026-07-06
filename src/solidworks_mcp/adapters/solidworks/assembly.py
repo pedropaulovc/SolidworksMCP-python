@@ -127,6 +127,10 @@ _WIDTH_CENTERED = 1
 
 # AddMate5 selection marks: width tab faces 16, cam-follower 8, others 1
 _MATE_DEFAULT_MARKS = {"width": 16, "cam_follower": 8}
+# Rack-pinion mates need DIFFERENT marks per entity (a single default mark on
+# both makes CreateMate reject the selection): rack=64, pinion=128, in that
+# entity order (SOLIDWORKS *Create Rack and Pinion Mate* API example).
+_RACK_PINION_MARKS = (64, 128)
 
 # swRackPinionMateDistanceOptions_e
 _RACK_PINION_PITCH_DIAMETER = 0
@@ -2235,7 +2239,12 @@ def _add_mate_impl(
         adapter._attempt(lambda: model.ClearSelection2(True), default=None)
         default_mark = _MATE_DEFAULT_MARKS.get(params.mate_type, 1)
         for index, ref in enumerate(params.entities):
-            mark = ref.mark or default_mark
+            # Rack-pinion needs a distinct mark per entity (rack 64, pinion 128);
+            # other mates share one default mark. An explicit ref.mark still wins.
+            if params.mate_type == "rack_pinion" and not ref.mark and index < 2:
+                mark = _RACK_PINION_MARKS[index]
+            else:
+                mark = ref.mark or default_mark
             if not _select_mate_entity(adapter, ref, mark):
                 located = ref.name or ref.point
                 raise Exception(

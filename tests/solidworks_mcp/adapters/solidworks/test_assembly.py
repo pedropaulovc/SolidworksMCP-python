@@ -1448,6 +1448,55 @@ def test_add_mate_width_uses_mark_16() -> None:
     assert data.ConstraintType == 1  # swMateWidthConstraint_Centered
 
 
+def test_add_mate_rack_pinion_uses_marks_64_and_128() -> None:
+    # Rack-pinion needs DISTINCT marks per entity (rack 64, pinion 128); a single
+    # shared default mark makes CreateMate reject the selection.
+    model = _MateModel()
+    model.add_mate_name = "RackPinion1"
+    adapter = _adapter_with(model)
+
+    entities = [
+        MateEntityRef(entity_type="AXIS", name="Axis1@platen-1"),  # rack
+        MateEntityRef(entity_type="AXIS", name="Axis1@pinion-1"),  # pinion
+    ]
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="rack_pinion",
+            entities=entities,
+            rack_travel_per_revolution=63.84,
+        ),
+    )
+
+    assert result.is_success
+    marks = [mark for (_, _, mark) in model.selections]
+    assert marks == [64, 128]  # rack first (64), pinion second (128)
+    assert model.create_mate_data_calls == [13]  # CreateMateData(swMateRACKPINION)
+    data = model.created_mate_data[0]
+    assert data.DiameterType == assembly_module._RACK_PINION_TRAVEL_PER_REVOLUTION
+    assert abs(data.DiameterVal - 0.06384) < 1e-9  # travel in metres
+
+
+def test_add_mate_rack_pinion_explicit_marks_win() -> None:
+    # An explicit ref.mark overrides the rack/pinion default assignment.
+    model = _MateModel()
+    adapter = _adapter_with(model)
+    entities = [
+        MateEntityRef(entity_type="AXIS", name="Axis1@platen-1", mark=128),
+        MateEntityRef(entity_type="AXIS", name="Axis1@pinion-1", mark=64),
+    ]
+    result = assembly_module._add_mate_impl(
+        adapter,
+        AddMateParameters(
+            mate_type="rack_pinion",
+            entities=entities,
+            pinion_pitch_diameter=81.28,
+        ),
+    )
+    assert result.is_success
+    assert [mark for (_, _, mark) in model.selections] == [128, 64]
+
+
 def test_add_mate_distance_converts_units_and_limits() -> None:
     model = _MateModel()
     model.add_mate_name = "Distance1"
