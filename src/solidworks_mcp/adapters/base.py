@@ -2906,6 +2906,20 @@ class SolidWorksAdapter(ABC):
         """
         pass
 
+    async def blank_sketch(self, sketch: str) -> AdapterResult[None]:
+        """Hide a named sketch (construction scaffolding that should not render).
+
+        Args:
+            sketch (str): The sketch feature name.
+
+        Returns:
+            AdapterResult[None]: SUCCESS once blanked, or an error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="blank_sketch is not implemented by this adapter",
+        )
+
     # Analysis Operations
     @abstractmethod
     async def get_mass_properties(self) -> AdapterResult[MassProperties]:

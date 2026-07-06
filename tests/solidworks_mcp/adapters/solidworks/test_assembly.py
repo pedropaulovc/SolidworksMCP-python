@@ -2215,6 +2215,22 @@ async def test_mock_insert_belt_chain_requires_two_pulleys() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mock_blank_sketch_records_and_requires_model() -> None:
+    adapter = MockSolidWorksAdapter(
+        {"mock_connect_delay": 0, "mock_model_delay": 0, "mock_sketch_delay": 0}
+    )
+    await adapter.connect()
+    no_model = await adapter.blank_sketch("chain-path")
+    assert no_model.is_error
+    assert "No active model" in (no_model.error or "")
+
+    await adapter.create_assembly()
+    ok = await adapter.blank_sketch("chain-path")
+    assert ok.is_success
+    assert "chain-path" in adapter._blanked_sketches
+
+
+@pytest.mark.asyncio
 async def test_mock_insert_belt_chain_component_not_found() -> None:
     adapter, names = await _assembly_mock_with_two_components()
     result = await adapter.insert_belt_chain(

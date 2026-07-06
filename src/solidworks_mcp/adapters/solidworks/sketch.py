@@ -367,6 +367,9 @@ class SolidWorksSketchMixin:
     async def exit_sketch(self) -> AdapterResult[None]:
         return _exit_sketch_impl(self)
 
+    async def blank_sketch(self, sketch: str) -> AdapterResult[None]:
+        return _blank_sketch_impl(self, sketch)
+
     async def check_sketch_fully_defined(
         self, sketch_name: str | None = None
     ) -> AdapterResult[dict[str, Any]]:
@@ -2271,6 +2274,46 @@ def _sketch_offset_impl(
     return cast(
         AdapterResult[str],
         adapter._handle_com_operation("sketch_offset", _offset_operation),
+    )
+
+
+def _blank_sketch_impl(adapter: Any, sketch: str) -> AdapterResult[None]:
+    """Hide a named sketch via ``IModelDoc2::BlankSketch``.
+
+    Construction sketches (e.g. a chain-pattern path spline) are scaffolding that
+    should not render. Selects the sketch by name and blanks it; a sketch that
+    cannot be selected is a failure the caller sees, but blanking itself is a
+    void call. ``BlankSketch`` resolves as a method because the model was flagged
+    for ``IModelDoc2`` at open.
+
+    Args:
+        adapter: A ``PyWin32Adapter`` with a non-``None`` ``currentModel``.
+        sketch: The sketch feature name (e.g. ``"chain-path"``).
+
+    Returns:
+        AdapterResult[None]: SUCCESS once blanked; ERROR if no active model or
+        the sketch cannot be selected.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+
+    def _op() -> None:
+        model = adapter.currentModel
+        ext = model.Extension
+        adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+        ok = adapter._attempt(
+            lambda: ext.SelectByID2(
+                sketch, "SKETCH", 0.0, 0.0, 0.0, False, 0, null_callout(), 0
+            ),
+            default=False,
+        )
+        if not ok:
+            raise Exception(f"Failed to select sketch {sketch!r} to blank")
+        adapter._attempt(lambda: model.BlankSketch(), default=None)
+        adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+
+    return cast(
+        AdapterResult[None], adapter._handle_com_operation("blank_sketch", _op)
     )
 
 

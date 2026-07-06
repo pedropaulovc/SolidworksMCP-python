@@ -158,6 +158,8 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         self._dimensions: dict[str, float] = {}
         self._equations: list[str] = []
         self._configurations: list[str] = ["Default"]
+        # Names of sketches hidden via blank_sketch (construction scaffolding).
+        self._blanked_sketches: list[str] = []
         # Assembly components keyed by instance name ("part-1"); each value
         # holds file_path/configuration/position/rotation/fixed state so the
         # Phase 7A component tools behave statefully in mock mode.
@@ -3346,6 +3348,20 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             data=None,
             execution_time=self._delays["sketch_operation"] / 2,
         )
+
+    async def blank_sketch(self, sketch: str) -> AdapterResult[None]:
+        """Mock hiding a named sketch.
+
+        Args:
+            sketch (str): The sketch feature name.
+
+        Returns:
+            AdapterResult[None]: SUCCESS, or ERROR when no model is active.
+        """
+        if not self._current_model:
+            return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+        self._blanked_sketches.append(sketch)
+        return AdapterResult(status=AdapterResultStatus.SUCCESS, data=None)
 
     async def check_sketch_fully_defined(
         self, sketch_name: str | None = None
