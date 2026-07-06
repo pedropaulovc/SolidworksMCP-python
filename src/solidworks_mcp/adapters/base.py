@@ -990,6 +990,60 @@ class ComponentChainPatternParameters(BaseModel):
     flip_direction: bool = False
 
 
+class BeltChainParameters(BaseModel):
+    """Parameters for a Belt/Chain assembly feature (``swFmBeltAndChain``).
+
+    Creates a SolidWorks Belt/Chain feature coupling two or more pulley/sprocket
+    components: with ``engage_belt`` it adds the belt MATES that constrain the
+    pulleys to rotate together at the ratio their diameters imply (the coupling
+    is only meaningful when the pulleys are FREE, not grounded), plus a belt-path
+    sketch. This is the rotation coupling; the visual chain links are a separate
+    ``ComponentChainPatternParameters`` pattern.
+
+    The pulley member SolidWorks wants is each pulley's cylindrical FACE (its
+    rotation axis), NOT the component object — passing components makes
+    ``CreateFeature`` silently return null. The impl resolves each named
+    component to its largest-radius cylindrical face whose axis is parallel to
+    ``pulley_axis`` (the belt-plane normal).
+
+    Attributes:
+        pulley_components (list[str]): Component names of the pulleys/sprockets
+            in belt order, e.g. ``["transgear-removable-2",
+            "transgear-removable-1"]`` (any ``@assembly`` qualifier is stripped).
+            At least two are required.
+        pulley_diameters (list[float]): Effective (pitch) belt diameter per
+            pulley in MILLIMETRES, same order/length as ``pulley_components``.
+            Sets the coupling ratio independent of the picked face's radius.
+        location_plane (str): Assembly plane the belt lies in (normal to the
+            pulley axes), e.g. ``"Front Plane"``. Resolved to its ``IRefPlane``.
+        pulley_axis (str): ``"x"`` | ``"y"`` | ``"z"`` — the pulleys' shared
+            rotation axis in assembly space; picks each pulley's coaxial
+            cylindrical face. Defaults to ``"z"``.
+        flip_sides (list[bool]): Per-pulley belt-side flip; empty defaults to all
+            ``False``. When set, same length as ``pulley_components``.
+        engage_belt (bool): Create the belt coupling mates (the operational
+            point). Defaults to ``True``.
+        create_belt_part (bool): Insert a generated belt part. Defaults to
+            ``False`` (the chain-link pattern is the visual).
+        use_belt_thickness (bool): Honor a belt thickness. Defaults to ``False``.
+        belt_thickness (float): Belt thickness in millimetres when
+            ``use_belt_thickness`` is set.
+        blank_sketch (bool): Hide the generated belt-path sketch after creation.
+            Defaults to ``True`` (the sketch is construction scaffolding).
+    """
+
+    pulley_components: list[str]
+    pulley_diameters: list[float]
+    location_plane: str = "Front Plane"
+    pulley_axis: str = "z"
+    flip_sides: list[bool] = []
+    engage_belt: bool = True
+    create_belt_part: bool = False
+    use_belt_thickness: bool = False
+    belt_thickness: float = 0.0
+    blank_sketch: bool = True
+
+
 class MateEntityRef(BaseModel):
     """A reference to one entity to mate, located by name or by point.
 
@@ -2555,6 +2609,24 @@ class SolidWorksAdapter(ABC):
         return AdapterResult(
             status=AdapterResultStatus.ERROR,
             error="pattern_components_chain is not implemented by this adapter",
+        )
+
+    async def insert_belt_chain(
+        self, params: BeltChainParameters
+    ) -> AdapterResult[SolidWorksFeature]:
+        """Create a Belt/Chain assembly feature coupling pulley/sprocket
+        components in the active assembly.
+
+        Args:
+            params (BeltChainParameters): Pulley components + pitch diameters,
+                belt-location plane, engage/create-belt-part flags.
+
+        Returns:
+            AdapterResult[SolidWorksFeature]: Belt feature or error.
+        """
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="insert_belt_chain is not implemented by this adapter",
         )
 
     async def add_mate(

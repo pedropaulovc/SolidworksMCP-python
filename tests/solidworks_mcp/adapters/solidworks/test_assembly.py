@@ -12,6 +12,7 @@ from solidworks_mcp.adapters.base import (
     AdapterResult,
     AdapterResultStatus,
     AddMateParameters,
+    BeltChainParameters,
     ComponentCircularPatternParameters,
     ComponentLinearPatternParameters,
     ComponentRefParameters,
@@ -874,6 +875,280 @@ def test_pattern_circular_null_feature_errors() -> None:
     )
     assert result.is_error
     assert "Failed to create circular component pattern" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Belt/Chain feature (swFmBeltAndChain)
+# ---------------------------------------------------------------------------
+
+
+class _BeltSurface:
+    def __init__(self, axis=(0.0, 0.0, 1.0), radius=0.014, cylinder=True) -> None:
+        self._axis = axis
+        self._radius = radius
+        self._cylinder = cylinder
+
+    def IsCylinder(self):  # noqa: N802
+        return self._cylinder
+
+    @property
+    def CylinderParams(self):  # noqa: N802
+        ax, ay, az = self._axis
+        return [0.0, 0.0, 0.0, ax, ay, az, self._radius]
+
+
+class _BeltFace:
+    def __init__(self, surface) -> None:
+        self._surface = surface
+
+    def GetSurface(self):  # noqa: N802
+        return self._surface
+
+
+class _BeltPulley:
+    def __init__(self, name, faces) -> None:
+        self.Name2 = name
+        self._faces = faces
+
+    def GetBody(self):  # noqa: N802
+        return SimpleNamespace(GetFaces=lambda: self._faces)
+
+
+def _belt_model(pulleys, feature, plane_name="Front Plane"):
+    model = _FakeAssemblyModel(components=pulleys)
+    ref_plane = SimpleNamespace(_kind="refplane")
+    plane_feat = SimpleNamespace(GetSpecificFeature2=lambda: ref_plane)
+    model.FeatureByName = lambda name: plane_feat if name == plane_name else None
+    model.created_defs: list[int] = []
+    model.created_features: list[Any] = []
+
+    def _create_definition(feature_id):
+        model.created_defs.append(feature_id)
+        # A settable feature-data stand-in (early_bound passes it through since
+        # it has no _oleobj_); attributes are captured for assertions.
+        return SimpleNamespace()
+
+    def _create_feature(data):
+        model.created_features.append(data)
+        return feature
+
+    model.FeatureManager = SimpleNamespace(
+        CreateDefinition=_create_definition,
+        CreateFeature=_create_feature,
+        GetCreateFeatureErrors=lambda: 0,
+    )
+    model.blank_sketch_calls = []
+    model.BlankSketch = lambda: model.blank_sketch_calls.append(1)
+    return model
+
+
+def test_belt_requires_two_pulleys() -> None:
+    adapter = _adapter_with(_FakeAssemblyModel())
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(pulley_components=["a-1"], pulley_diameters=[24.0]),
+    )
+    assert result.is_error
+    assert "at least 2 pulley_components" in (result.error or "")
+
+
+def test_belt_diameters_length_mismatch() -> None:
+    adapter = _adapter_with(_FakeAssemblyModel())
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["a-1", "b-1"], pulley_diameters=[24.0]
+        ),
+    )
+    assert result.is_error
+    assert "pulley_diameters must match" in (result.error or "")
+
+
+def test_belt_flip_sides_length_mismatch() -> None:
+    adapter = _adapter_with(_FakeAssemblyModel())
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["a-1", "b-1"],
+            pulley_diameters=[24.0, 48.0],
+            flip_sides=[False],
+        ),
+    )
+    assert result.is_error
+    assert "flip_sides" in (result.error or "")
+
+
+def test_belt_unknown_axis_errors() -> None:
+    adapter = _adapter_with(_FakeAssemblyModel())
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["a-1", "b-1"],
+            pulley_diameters=[24.0, 48.0],
+            pulley_axis="w",
+        ),
+    )
+    assert result.is_error
+    assert "Unknown pulley_axis" in (result.error or "")
+
+
+def test_belt_no_active_model_errors() -> None:
+    adapter = _FakeAdapter()  # currentModel is None
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["a-1", "b-1"], pulley_diameters=[24.0, 48.0]
+        ),
+    )
+    assert result.is_error
+    assert "No active model" in (result.error or "")
+
+
+def test_belt_component_not_found_errors() -> None:
+    adapter = _adapter_with(_FakeAssemblyModel())  # no components
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["ghost-1", "b-1"], pulley_diameters=[24.0, 48.0]
+        ),
+    )
+    assert result.is_error
+    assert "Pulley component not found" in (result.error or "")
+
+
+def test_belt_no_axial_cylinder_errors() -> None:
+    # Only a radial (X-axis) cylinder -> no Z-axis pulley face.
+    radial = _BeltPulley("t12-1", [_BeltFace(_BeltSurface(axis=(1.0, 0.0, 0.0)))])
+    axial = _BeltPulley("t24-1", [_BeltFace(_BeltSurface(axis=(0.0, 0.0, 1.0)))])
+    model = _belt_model({"t12-1": radial, "t24-1": axial}, SimpleNamespace(Name="Belt1"))
+    adapter = _adapter_with(model)
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["t12-1", "t24-1"], pulley_diameters=[24.0, 48.0]
+        ),
+    )
+    assert result.is_error
+    assert "cylindrical face" in (result.error or "")
+
+
+def test_belt_plane_not_found_errors() -> None:
+    t12 = _BeltPulley("t12-1", [_BeltFace(_BeltSurface(radius=0.014))])
+    t24 = _BeltPulley("t24-1", [_BeltFace(_BeltSurface(radius=0.026))])
+    model = _belt_model({"t12-1": t12, "t24-1": t24}, SimpleNamespace(Name="Belt1"))
+    adapter = _adapter_with(model)
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["t12-1", "t24-1"],
+            pulley_diameters=[24.0, 48.0],
+            location_plane="Nonexistent Plane",
+        ),
+    )
+    assert result.is_error
+    assert "plane not found" in (result.error or "")
+
+
+def test_belt_success_sets_faces_diameters_and_engages() -> None:
+    # The larger-radius coaxial (Z) cylinder is the rim; a smaller bore cylinder
+    # must be ignored so PulleyComponents carries the rim faces.
+    t12 = _BeltPulley(
+        "t12-1",
+        [
+            _BeltFace(_BeltSurface(radius=0.005)),  # bore
+            _BeltFace(_BeltSurface(radius=0.014)),  # rim
+        ],
+    )
+    t24 = _BeltPulley("t24-1", [_BeltFace(_BeltSurface(radius=0.026))])
+    feature = SimpleNamespace(Name="Belt1")
+    model = _belt_model({"t12-1": t12, "t24-1": t24}, feature)
+    adapter = _adapter_with(model)
+
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["t12-1", "t24-1"],
+            pulley_diameters=[24.0, 48.0],
+            engage_belt=True,
+            create_belt_part=False,
+        ),
+    )
+
+    assert result.is_success
+    assert result.data.type == "BeltChain"
+    assert result.data.parameters["pulleys"] == 2
+    # CreateDefinition was called with the belt/chain enum, CreateFeature once.
+    assert model.created_defs == [assembly_module._SW_FM_BELT_AND_CHAIN]
+    assert len(model.created_features) == 1
+    data = model.created_features[0]
+    # The array helpers wrap in a VARIANT on Windows (pywin32) and fall back to a
+    # plain list on non-Windows CI; unwrap ``.value`` to read either.
+    def _seq(v):
+        return list(getattr(v, "value", v))
+
+    # Diameters were converted mm -> metres, same order as the pulleys.
+    assert _seq(data.PulleyDiameters) == [0.024, 0.048]
+    # Pulley members are the two rim FACES (not the components/bores).
+    assert len(_seq(data.PulleyComponents)) == 2
+    assert data.EngageBelt is True
+    assert data.CreateBeltPart is False
+
+
+def test_belt_blanks_generated_sketch() -> None:
+    t12 = _BeltPulley("t12-1", [_BeltFace(_BeltSurface(radius=0.014))])
+    t24 = _BeltPulley("t24-1", [_BeltFace(_BeltSurface(radius=0.026))])
+    # The belt feature exposes a generated belt-path sketch as its sub-feature.
+    sketch_sub = SimpleNamespace(
+        GetTypeName2=lambda: "ProfileFeature",
+        Name="Belt1Sketch",
+        GetNextSubFeature=lambda: None,
+    )
+    feature = SimpleNamespace(
+        Name="Belt1", GetFirstSubFeature=lambda: sketch_sub
+    )
+    model = _belt_model({"t12-1": t12, "t24-1": t24}, feature)
+    adapter = _adapter_with(model)
+
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["t12-1", "t24-1"],
+            pulley_diameters=[24.0, 48.0],
+            blank_sketch=True,
+        ),
+    )
+
+    assert result.is_success
+    # The generated sketch was selected (SKETCH mark 0) and blanked.
+    assert ("Belt1Sketch", "SKETCH", 0) in model.selections
+    assert model.blank_sketch_calls == [1]
+
+
+def test_belt_skips_blank_when_disabled() -> None:
+    t12 = _BeltPulley("t12-1", [_BeltFace(_BeltSurface(radius=0.014))])
+    t24 = _BeltPulley("t24-1", [_BeltFace(_BeltSurface(radius=0.026))])
+    sketch_sub = SimpleNamespace(
+        GetTypeName2=lambda: "ProfileFeature",
+        Name="Belt1Sketch",
+        GetNextSubFeature=lambda: None,
+    )
+    feature = SimpleNamespace(
+        Name="Belt1", GetFirstSubFeature=lambda: sketch_sub
+    )
+    model = _belt_model({"t12-1": t12, "t24-1": t24}, feature)
+    adapter = _adapter_with(model)
+
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["t12-1", "t24-1"],
+            pulley_diameters=[24.0, 48.0],
+            blank_sketch=False,
+        ),
+    )
+
+    assert result.is_success
+    assert model.blank_sketch_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -1845,6 +2120,62 @@ async def test_mock_set_component_solving_unknown_mode_errors() -> None:
     )
     assert result.is_error
     assert "Unknown solving mode" in (result.error or "")
+
+
+async def _assembly_mock_with_two_components() -> tuple[MockSolidWorksAdapter, list[str]]:
+    adapter = MockSolidWorksAdapter(
+        {"mock_connect_delay": 0, "mock_model_delay": 0, "mock_sketch_delay": 0}
+    )
+    await adapter.connect()
+    await adapter.create_assembly()
+    names = []
+    for path in ("C:/parts/sprocket-t12.sldprt", "C:/parts/sprocket-t24.sldprt"):
+        inserted = await adapter.insert_component(
+            InsertComponentParameters(file_path=path)
+        )
+        names.append(inserted.data["name"])
+    return adapter, names
+
+
+@pytest.mark.asyncio
+async def test_mock_insert_belt_chain_success() -> None:
+    adapter, names = await _assembly_mock_with_two_components()
+    result = await adapter.insert_belt_chain(
+        BeltChainParameters(
+            pulley_components=names,
+            pulley_diameters=[24.0, 48.0],
+            engage_belt=True,
+        )
+    )
+    assert result.is_success
+    assert result.data.type == "BeltChain"
+    assert result.data.parameters["pulleys"] == 2
+    assert result.data.parameters["engage_belt"] is True
+
+
+@pytest.mark.asyncio
+async def test_mock_insert_belt_chain_requires_two_pulleys() -> None:
+    adapter, names = await _assembly_mock_with_two_components()
+    result = await adapter.insert_belt_chain(
+        BeltChainParameters(
+            pulley_components=names[:1], pulley_diameters=[24.0]
+        )
+    )
+    assert result.is_error
+    assert "at least 2 pulley_components" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_mock_insert_belt_chain_component_not_found() -> None:
+    adapter, names = await _assembly_mock_with_two_components()
+    result = await adapter.insert_belt_chain(
+        BeltChainParameters(
+            pulley_components=[names[0], "ghost-1"],
+            pulley_diameters=[24.0, 48.0],
+        )
+    )
+    assert result.is_error
+    assert "Pulley component not found" in (result.error or "")
 
 
 @pytest.mark.asyncio
