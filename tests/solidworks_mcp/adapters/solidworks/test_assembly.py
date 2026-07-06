@@ -930,6 +930,9 @@ def _belt_model(pulleys, feature, plane_name="Front Plane"):
 
     def _create_feature(data):
         model.created_features.append(data)
+        # The real feature exposes the committed definition; the post-create
+        # diameter enforce reads PulleyDiameters back through it.
+        feature.GetDefinition = lambda: data
         return feature
 
     model.FeatureManager = SimpleNamespace(

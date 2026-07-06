@@ -1741,6 +1741,17 @@ def _insert_belt_chain_impl(
 
         feature_name = str(_read_member(feature, "Name"))
 
+        # Enforce the requested diameters POST-create: the pre-create property
+        # put on the definition silently no-ops (SolidWorks re-derives each
+        # pulley's belt diameter from the picked face when the definition
+        # commits -- on a sprocket that is the tooth-TIP cylinder, so the
+        # EngageBelt coupling ratio would be the tip ratio, not the requested
+        # pitch ratio). The official Create_Belt_Chain example changes the
+        # diameters after creation -- GetDefinition -> AccessSelections ->
+        # PulleyDiameters -> ModifyDefinition -- where the getters are
+        # reliable; do that, read back, and fail loud if they didn't take.
+        _enforce_pulley_diameters(adapter, feature, diameters_m)
+
         # Blank the auto-generated belt-path sketch (construction scaffolding).
         if params.blank_sketch:
             _blank_feature_sketches(adapter, feature)
@@ -1762,6 +1773,63 @@ def _insert_belt_chain_impl(
         AdapterResult[SolidWorksFeature],
         adapter._handle_com_operation("insert_belt_chain", _belt_operation),
     )
+
+
+def _enforce_pulley_diameters(
+    adapter: Any, feature: Any, diameters_m: list[float]
+) -> None:
+    """Force a belt/chain feature's ``PulleyDiameters`` to ``diameters_m`` and
+    verify the read-back, raising on any mismatch.
+
+    Post-create is the reliable window (the official example's route): the
+    definition's getters return real values and ``ModifyDefinition`` re-solves
+    the feature -- including the EngageBelt coupling-mate ratio -- from the new
+    diameters. Skips the commit when the created feature already carries the
+    requested values.
+    """
+    from .. import sw_type_info
+
+    model = adapter.currentModel
+    # EARLY-bound feature wrapper on purpose: GetDefinition/ModifyDefinition
+    # mismarshal under late binding (ModifyDefinition returns False; the same
+    # trap the chain-pattern probes hit) -- the typed wrapper resolves both.
+    feat_t = sw_type_info.early_bound(feature, "IFeature")
+
+    def _diams(defn: Any) -> list[float]:
+        typed = sw_type_info.early_bound(defn, "IBeltChainFeatureData")
+        vals = adapter._attempt(lambda: typed.PulleyDiameters, default=None)
+        vals = getattr(vals, "value", vals)  # unwrap a VARIANT-valued read-back
+        return [float(v) for v in (vals or [])]
+
+    def _close(a: list[float], b: list[float]) -> bool:
+        return len(a) == len(b) and all(
+            abs(x - y) < 1e-9 for x, y in zip(a, b, strict=True)
+        )
+
+    data = adapter._attempt(lambda: feat_t.GetDefinition(), default=None)
+    if data is None:
+        raise Exception("belt/chain GetDefinition returned null (diameter check)")
+    created = _diams(data)
+    if _close(created, diameters_m):
+        return
+    typed = sw_type_info.early_bound(data, "IBeltChainFeatureData")
+    if not adapter._attempt(lambda: typed.AccessSelections(model, None), default=False):
+        raise Exception("belt/chain AccessSelections failed (diameter enforce)")
+    adapter._attempt(
+        lambda: setattr(typed, "PulleyDiameters", double_array(diameters_m)),
+        default=None,
+    )
+    if not adapter._attempt(
+        lambda: feat_t.ModifyDefinition(data, model, None), default=False
+    ):
+        raise Exception("belt/chain ModifyDefinition failed (diameter enforce)")
+    data2 = adapter._attempt(lambda: feat_t.GetDefinition(), default=None)
+    final = _diams(data2) if data2 is not None else []
+    if not _close(final, diameters_m):
+        raise Exception(
+            "belt/chain PulleyDiameters did not take: requested "
+            f"{diameters_m}, created {created}, after ModifyDefinition {final}"
+        )
 
 
 def _blank_feature_sketches(adapter: Any, feature: Any) -> None:
