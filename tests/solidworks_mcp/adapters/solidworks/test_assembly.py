@@ -914,13 +914,32 @@ class _BeltPulley:
         return SimpleNamespace(GetFaces=lambda: self._faces)
 
 
-def _belt_model(pulleys, feature, plane_name="Front Plane"):
+def _belt_mate(dims_m=(0.012, 0.024)):
+    """A fake ``MateBeltDim`` coupling mate whose D1/D2 carry ``dims_m``.
+
+    The default is the live-observed AXIS-member scale: SW records the typed
+    diameters (0.024/0.048 in these tests) at HALF scale, i.e. radii. The
+    verification is scale-invariant (ratio compare), so this must pass."""
+    params = {
+        f"D{i}": SimpleNamespace(SystemValue=v)
+        for i, v in enumerate(dims_m, start=1)
+    }
+    return SimpleNamespace(
+        Name="BeltMate1",
+        GetTypeName2=lambda: "MateBeltDim",
+        GetNextSubFeature=lambda: None,
+        Parameter=lambda name: params.get(name),
+    )
+
+
+def _belt_model(pulleys, feature, plane_name="Front Plane", mate=None):
     model = _FakeAssemblyModel(components=pulleys)
     ref_plane = SimpleNamespace(_kind="refplane")
     plane_feat = SimpleNamespace(GetSpecificFeature2=lambda: ref_plane)
     model.FeatureByName = lambda name: plane_feat if name == plane_name else None
     model.created_defs: list[int] = []
     model.created_features: list[Any] = []
+    belt_mate = mate if mate is not None else _belt_mate()
 
     def _create_definition(feature_id):
         model.created_defs.append(feature_id)
@@ -930,6 +949,9 @@ def _belt_model(pulleys, feature, plane_name="Front Plane"):
 
     def _create_feature(data):
         model.created_features.append(data)
+        # EngageBelt materialises the coupling mate in the MateGroup; the
+        # post-create verification walks it to read the mate's D1/D2.
+        model.FirstFeature = _FakeMateGroup([belt_mate])
         return feature
 
     model.FeatureManager = SimpleNamespace(
@@ -1092,6 +1114,145 @@ def test_belt_success_sets_faces_diameters_and_engages() -> None:
     assert len(_seq(data.PulleyComponents)) == 2
     assert data.EngageBelt is True
     assert data.CreateBeltPart is False
+
+
+def test_belt_member_axes_length_mismatch() -> None:
+    adapter = _adapter_with(_FakeAssemblyModel())
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["a-1", "b-1"],
+            pulley_diameters=[24.0, 48.0],
+            pulley_member_axes=["Axis1@a-1"],
+        ),
+    )
+    assert result.is_error
+    assert "pulley_member_axes" in (result.error or "")
+
+
+def test_belt_member_axes_selects_datum_axes() -> None:
+    # No cylindrical faces at all: the axis route must not touch the face
+    # harvest, and PulleyComponents must carry the selected datum-axis
+    # entities instead.
+    t12 = _BeltPulley("t12-1", [])
+    t24 = _BeltPulley("t24-1", [])
+    model = _belt_model({"t12-1": t12, "t24-1": t24}, SimpleNamespace(Name="Belt1"))
+    model.SelectionManager = _FakeMateSelectionManager()
+    adapter = _adapter_with(model)
+
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["t12-1", "t24-1"],
+            pulley_diameters=[24.0, 48.0],
+            pulley_member_axes=["Axis1@t12-1", "Axis1@t24-1"],
+            engage_belt=True,
+        ),
+    )
+
+    assert result.is_success
+    # Each axis was selected by its assembly-qualified name as an AXIS.
+    assert ("Axis1@t12-1@frame", "AXIS", 0) in model.selections
+    assert ("Axis1@t24-1@frame", "AXIS", 0) in model.selections
+    data = model.created_features[0]
+    members = list(getattr(data.PulleyComponents, "value", data.PulleyComponents))
+    assert len(members) == 2
+    # The members are the selection-manager entities, not pulley faces.
+    assert all(hasattr(m, "selected_index") for m in members)
+
+
+def test_belt_member_axis_not_found_errors() -> None:
+    t12 = _BeltPulley("t12-1", [])
+    t24 = _BeltPulley("t24-1", [])
+    model = _belt_model({"t12-1": t12, "t24-1": t24}, SimpleNamespace(Name="Belt1"))
+    model.SelectionManager = _FakeMateSelectionManager()
+    model.select_result = False  # SelectByID2 fails -> no such datum axis
+    adapter = _adapter_with(model)
+
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["t12-1", "t24-1"],
+            pulley_diameters=[24.0, 48.0],
+            pulley_member_axes=["Ghost@t12-1", "Axis1@t24-1"],
+        ),
+    )
+    assert result.is_error
+    assert "Pulley member axis not found" in (result.error or "")
+
+
+def test_belt_engage_accepts_full_scale_mate() -> None:
+    # A mate carrying the typed diameters 1:1 (the face route on a plain
+    # cylindrical pulley whose face IS the pitch surface) also passes -- the
+    # check is scale-invariant.
+    t12 = _BeltPulley("t12-1", [_BeltFace(_BeltSurface(radius=0.012))])
+    t24 = _BeltPulley("t24-1", [_BeltFace(_BeltSurface(radius=0.024))])
+    model = _belt_model(
+        {"t12-1": t12, "t24-1": t24},
+        SimpleNamespace(Name="Belt1"),
+        mate=_belt_mate(dims_m=(0.024, 0.048)),
+    )
+    adapter = _adapter_with(model)
+
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["t12-1", "t24-1"],
+            pulley_diameters=[24.0, 48.0],
+            engage_belt=True,
+        ),
+    )
+    assert result.is_success
+
+
+def test_belt_engage_fails_when_mate_diameters_differ() -> None:
+    # The coupling mate carries the picked faces' TIP diameters (the FACE-member
+    # trap) instead of the requested pitch diameters -> the RATIO is off (0.538
+    # vs 0.500) -> loud failure.
+    t12 = _BeltPulley("t12-1", [_BeltFace(_BeltSurface(radius=0.014))])
+    t24 = _BeltPulley("t24-1", [_BeltFace(_BeltSurface(radius=0.026))])
+    model = _belt_model(
+        {"t12-1": t12, "t24-1": t24},
+        SimpleNamespace(Name="Belt1"),
+        mate=_belt_mate(dims_m=(0.028, 0.052)),  # tip, not pitch
+    )
+    adapter = _adapter_with(model)
+
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["t12-1", "t24-1"],
+            pulley_diameters=[24.0, 48.0],
+            engage_belt=True,
+        ),
+    )
+    assert result.is_error
+    assert "do NOT carry the requested ratio" in (result.error or "")
+
+
+def test_belt_engage_fails_when_no_coupling_mate() -> None:
+    t12 = _BeltPulley("t12-1", [_BeltFace(_BeltSurface(radius=0.014))])
+    t24 = _BeltPulley("t24-1", [_BeltFace(_BeltSurface(radius=0.026))])
+    feature = SimpleNamespace(Name="Belt1")
+    model = _belt_model({"t12-1": t12, "t24-1": t24}, feature)
+
+    def _create_feature_no_mate(data):
+        model.created_features.append(data)
+        return feature  # EngageBelt did not materialise a MateBeltDim
+
+    model.FeatureManager.CreateFeature = _create_feature_no_mate
+    adapter = _adapter_with(model)
+
+    result = assembly_module._insert_belt_chain_impl(
+        adapter,
+        BeltChainParameters(
+            pulley_components=["t12-1", "t24-1"],
+            pulley_diameters=[24.0, 48.0],
+            engage_belt=True,
+        ),
+    )
+    assert result.is_error
+    assert "no MateBeltDim" in (result.error or "")
 
 
 def test_belt_blanks_generated_sketch() -> None:

@@ -1667,6 +1667,12 @@ def _insert_belt_chain_impl(
             error="flip_sides, when set, must match pulley_components length "
             f"({len(params.flip_sides)} != {n})",
         )
+    if params.pulley_member_axes and len(params.pulley_member_axes) != n:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error="pulley_member_axes, when set, must match pulley_components "
+            f"length ({len(params.pulley_member_axes)} != {n})",
+        )
     axis_index = _PULLEY_AXIS_INDEX.get(params.pulley_axis.lower())
     if axis_index is None:
         return AdapterResult(
@@ -1677,18 +1683,47 @@ def _insert_belt_chain_impl(
     def _belt_operation() -> SolidWorksFeature:
         model = adapter.currentModel
 
-        # Resolve each pulley to its rotation-axis cylindrical face.
-        faces = []
-        for name in params.pulley_components:
-            component = _get_component(adapter, name)
-            if component is None:
-                raise Exception(f"Pulley component not found: {name!r}")
-            face = _pulley_cylinder_face(adapter, component, axis_index)
-            if face is None:
-                raise Exception(
-                    f"No {params.pulley_axis}-axis cylindrical face on pulley {name!r}"
+        # Resolve the pulley members: named datum AXES when given (the only
+        # route that makes the EngageBelt coupling honour pulley_diameters on
+        # toothed wheels -- see BeltChainParameters.pulley_member_axes), else
+        # each pulley's rotation-axis cylindrical face.
+        members = []
+        if params.pulley_member_axes:
+            ext = model.Extension
+            selmgr = model.SelectionManager
+            for axis_name in params.pulley_member_axes:
+                qualified = _qualify_entity_name(adapter, axis_name)
+                adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+                selected = adapter._attempt(
+                    lambda q=qualified: ext.SelectByID2(
+                        q, "AXIS", 0.0, 0.0, 0.0, False, 0, null_callout(), 0
+                    ),
+                    default=False,
                 )
-            faces.append(face)
+                if not selected:
+                    raise Exception(f"Pulley member axis not found: {qualified!r}")
+                entity = adapter._attempt(
+                    lambda: sw_type_info.flagged(
+                        selmgr, "ISelectionMgr"
+                    ).GetSelectedObject6(1, -1),
+                    default=None,
+                )
+                if entity is None:
+                    raise Exception(f"Could not fetch pulley axis: {qualified!r}")
+                members.append(entity)
+            adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+        else:
+            for name in params.pulley_components:
+                component = _get_component(adapter, name)
+                if component is None:
+                    raise Exception(f"Pulley component not found: {name!r}")
+                face = _pulley_cylinder_face(adapter, component, axis_index)
+                if face is None:
+                    raise Exception(
+                        f"No {params.pulley_axis}-axis cylindrical face on "
+                        f"pulley {name!r}"
+                    )
+                members.append(face)
 
         # Belt-location plane (normal to the pulley axes) -> IRefPlane.
         plane_feat = adapter._attempt(
@@ -1719,7 +1754,7 @@ def _insert_belt_chain_impl(
         flips = params.flip_sides or [False] * n
         diameters_m = [d / 1000.0 for d in params.pulley_diameters]
         for attr, value in (
-            ("PulleyComponents", dispatch_array(faces)),
+            ("PulleyComponents", dispatch_array(members)),
             ("PulleyDiameters", double_array(diameters_m)),
             ("FlipSides", bool_array(flips)),
             ("BeltLocationPlane", ref_plane),
@@ -1740,6 +1775,15 @@ def _insert_belt_chain_impl(
             raise Exception(f"Failed to create belt/chain feature (errors={errs})")
 
         feature_name = str(_read_member(feature, "Name"))
+
+        # Verify the COUPLING, not the definition: the definition's
+        # PulleyDiameters read back fine even when the EngageBelt mate is
+        # wrong (with FACE members the MateBeltDim bakes the picked faces'
+        # diameters and no definition-level route rewrites it -- measured
+        # live). The mate's own D1/D2 dimensions ARE the coupling, so read
+        # them and fail loud unless they match the request.
+        if params.engage_belt:
+            _verify_belt_mate_diameters(adapter, diameters_m)
 
         # Blank the auto-generated belt-path sketch (construction scaffolding).
         if params.blank_sketch:
@@ -1762,6 +1806,70 @@ def _insert_belt_chain_impl(
         AdapterResult[SolidWorksFeature],
         adapter._handle_com_operation("insert_belt_chain", _belt_operation),
     )
+
+
+def _verify_belt_mate_diameters(adapter: Any, diameters_m: list[float]) -> None:
+    """Assert the just-created EngageBelt coupling mate carries the requested
+    per-pulley diameter RATIOS, raising otherwise.
+
+    The ``MateBeltDim`` mate's own ``D1``/``D2`` dimensions ARE the coupling
+    ratio. With FACE pulley members SolidWorks bakes the picked faces'
+    diameters into them (the tooth-tip cylinder on a sprocket) and IGNORES the
+    definition's ``PulleyDiameters`` -- which still read back as requested, so
+    a definition-level check passes while the coupling is wrong. Verified
+    live (2026-07-06): PulleyDiameters + forced ModifyDefinition,
+    ModifyMemberParameters, an EngageBelt re-author, and direct writes to the
+    mate dimensions all leave the face-derived ratio. Only AXIS pulley members
+    make the typed diameters drive the mate, and THIS check proves it on every
+    build.
+
+    Compared SCALE-invariant, as a sorted multiset: only the ratio couples the
+    pulleys (the absolute feed lives in other mates), and the recorded scale
+    varies by member kind -- a face-member mate stores DIAMETERS (measured
+    0.028/0.052 for 0.014/0.026 tip radii) while an axis-member mate stores
+    the typed values at HALF scale, i.e. radii (measured 0.012/0.024 for
+    typed diameters 0.024/0.048; the coupling still measures the exact typed
+    ratio). Order is not preserved by the mate either way.
+    """
+    from .. import sw_type_info
+
+    belt_mates = [
+        feat
+        for feat in _mate_group_subfeatures(adapter)
+        if _read_member(feat, "GetTypeName2") == "MateBeltDim"
+    ]
+    if not belt_mates:
+        raise Exception("engage_belt set but no MateBeltDim coupling mate found")
+    feat = belt_mates[-1]  # the just-created belt's mate
+    dims: list[float] = []
+    for dname in ("D1", "D2", "D3", "D4"):
+        param = adapter._attempt(lambda f=feat, d=dname: f.Parameter(d), default=None)
+        if param is None:
+            break
+        value = adapter._attempt(
+            lambda p=param: sw_type_info.flagged(p, "IDimension").SystemValue,
+            default=None,
+        )
+        if value is not None:
+            dims.append(float(value))
+    expected = sorted(diameters_m)
+    actual = sorted(dims)
+    proportional = (
+        len(actual) == len(expected)
+        and all(v > 0.0 for v in actual)
+        and all(v > 0.0 for v in expected)
+        and all(
+            abs(a / actual[0] - e / expected[0]) < 1e-4
+            for a, e in zip(actual, expected, strict=True)
+        )
+    )
+    if not proportional:
+        raise Exception(
+            "belt coupling mate diameters do NOT carry the requested ratio: "
+            f"mate carries {actual}, requested {expected} -- with FACE pulley "
+            "members SW bakes the picked faces' (tip) diameters into the mate; "
+            "pass pulley_member_axes (datum axes) so pulley_diameters drive"
+        )
 
 
 def _blank_feature_sketches(adapter: Any, feature: Any) -> None:
