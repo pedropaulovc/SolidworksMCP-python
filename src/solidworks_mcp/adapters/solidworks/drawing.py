@@ -44,7 +44,16 @@ _SW_DOC_DRAWING = 3  # swDocumentTypes_e.swDocDRAWING
 # hard dependency on the generated swconst wrapper so it imports on any seat). --
 _SW_DWG_TEMPLATE_NONE = 13  # swDwgTemplates_e.swDwgTemplateNone
 _SW_DWG_TEMPLATE_ASIZE = 0  # swDwgTemplates_e.swDwgTemplateAsize (11x8.5 landscape)
+_SW_DWG_TEMPLATE_BSIZE = 2  # swDwgTemplates_e.swDwgTemplateBsize (17x11 landscape)
 _SW_PAPER_USER_DEFINED = 12  # swDwgPaperSizes_e.swDwgPapersUserDefined
+# swDwgTemplates_e and swDwgPaperSizes_e share the same ints for the standard sizes
+# (Asize=0, Bsize=2, ...), so a standard-size sheet setup passes ``template`` for BOTH
+# the size template AND the paper size — see setup_sheet.
+# Public size selectors for setup_sheet(template=...). NONE = a blank sheet (no
+# stock border/title-block); pair it with paper_width/paper_height for a custom size.
+SW_DWG_TEMPLATE_NONE = _SW_DWG_TEMPLATE_NONE
+SW_DWG_TEMPLATE_ASIZE = _SW_DWG_TEMPLATE_ASIZE
+SW_DWG_TEMPLATE_BSIZE = _SW_DWG_TEMPLATE_BSIZE
 _SW_IMPORT_FROM_ENTIRE_MODEL = 0  # swImportModelItemsSource_e
 _SW_INSERT_DIMS_MARKED = 0x8000  # swInsertAnnotation_e.swInsertDimensionsMarkedForDrawing
 _SW_INSERT_DIMS_NOTMARKED = 0x80000  # swInsertAnnotation_e.swInsertDimensionsNotMarkedForDrawing
@@ -241,16 +250,22 @@ def setup_sheet(
     """Configure the active drawing's first sheet via ``SetupSheet6``.
 
     Defaults to ASME **third-angle** projection (``first_angle=False``) on an
-    A-size landscape sheet at the given ``scale`` (numerator, denominator).
-    ``property_view`` names the model view whose custom properties feed
-    ``$PRPSHEET`` title-block links. Follows the API remark by issuing a
-    ``ForceRebuild3`` afterward so the projection change takes effect.
+    A-size landscape sheet at the given ``scale`` (numerator, denominator); pass
+    ``template=_SW_DWG_TEMPLATE_BSIZE`` for a 17x11 B-size sheet. ``property_view``
+    names the model view whose custom properties feed ``$PRPSHEET`` title-block
+    links. Follows the API remark by issuing a ``ForceRebuild3`` afterward so the
+    projection change takes effect.
+
+    The paper size tracks ``template``: a standard size template (Asize/Bsize/...)
+    passes its own int as the ``swDwgPaperSizes_e`` paper too (the enums align), so
+    the sheet is that physical size — NOT hard-wired to A, which silently shrank a
+    B-size setup back to 11x8.5.
     """
     draw = _draw(adapter)
     name = adapter._get_attr_or_call(draw, "GetCurrentSheet")
     sheet_name = adapter._attempt(lambda: adapter._get_attr_or_call(name, "GetName"))
     sheet_name = sheet_name if isinstance(sheet_name, str) else ""
-    paper = _SW_PAPER_USER_DEFINED if template == _SW_DWG_TEMPLATE_NONE else 0
+    paper = _SW_PAPER_USER_DEFINED if template == _SW_DWG_TEMPLATE_NONE else template
     ok = adapter._attempt(
         lambda: draw.SetupSheet6(
             sheet_name,
@@ -672,6 +687,28 @@ def dimension_name(adapter: Any, annotation: Any) -> str:
         return ""
     dim = _sw_type_info.flagged(dim, "IDimension")
     name = adapter._get_attr_or_call(dim, "Name")
+    return name if isinstance(name, str) else ""
+
+
+def dimension_full_name(adapter: Any, annotation: Any) -> str:
+    """Fully-qualified name of the model dimension behind a display annotation.
+
+    Returns e.g. ``"D2@Hole Thread1@pen-v-block.Part"`` (``IDimension::FullName``),
+    or ``""`` if the annotation is not a model dimension. Unlike
+    :func:`dimension_name` (the leading token only), this carries the FEATURE the
+    dimension belongs to — the reliable way to assert that a specific feature's
+    callout made it onto the sheet (e.g. a cosmetic-thread ``Hole Thread`` callout,
+    whose rendered "#5-40 UNC" text lives in the un-readable calculated-value part).
+    """
+    disp = adapter._attempt(lambda a=annotation: a.GetSpecificAnnotation())
+    if not disp:
+        return ""
+    disp = _sw_type_info.flagged(disp, "IDisplayDimension")
+    dim = adapter._attempt(lambda d=disp: d.GetDimension())
+    if not dim:
+        return ""
+    dim = _sw_type_info.flagged(dim, "IDimension")
+    name = adapter._get_attr_or_call(dim, "FullName")
     return name if isinstance(name, str) else ""
 
 
