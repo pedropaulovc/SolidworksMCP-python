@@ -932,6 +932,12 @@ class ComponentLinearPatternParameters(BaseModel):
             mark 2. Takes precedence over ``direction_point``.
         direction_point (list[float]): ``[x, y, z]`` in millimetres on the
             direction reference (linear edge or axis); selected under mark 2.
+        flip_direction (bool): Reverse the pattern direction
+            (``FeatureLinearPattern5`` ``FlipDir1``). The direction reference
+            fixes only the LINE; SolidWorks infers the sign, and the
+            inference is not contractual — callers must verify instance
+            transforms and retry flipped when the copies land on the wrong
+            side.
     """
 
     components: list[str]
@@ -939,6 +945,7 @@ class ComponentLinearPatternParameters(BaseModel):
     spacing: float
     direction_name: str = ""
     direction_point: list[float] = []
+    flip_direction: bool = False
 
 
 class ComponentCircularPatternParameters(BaseModel):
