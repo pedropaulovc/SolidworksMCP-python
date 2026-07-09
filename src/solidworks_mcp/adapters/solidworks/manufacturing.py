@@ -13,6 +13,7 @@ import glob
 from pathlib import Path
 from typing import Any, cast
 
+from .. import sw_type_info as _sw_type_info
 from ..base import (
     AdapterResult,
     AdapterResultStatus,
@@ -103,6 +104,11 @@ class SolidWorksManufacturingMixin:
         self, params: TappedHoleParameters
     ) -> AdapterResult[dict[str, Any]]:
         return _insert_tapped_hole_impl(self, params)
+
+    async def edit_hole_position(
+        self, hole_name: str, rename_sketch: str
+    ) -> AdapterResult[str]:
+        return _edit_hole_position_impl(self, hole_name, rename_sketch)
 
     async def create_bom(
         self, params: CreateBomParameters
@@ -320,6 +326,91 @@ def _insert_tapped_hole_impl(
     return cast(
         AdapterResult[dict[str, Any]],
         adapter._handle_com_operation("insert_tapped_hole", _hole_operation),
+    )
+
+
+def _edit_hole_position_impl(
+    adapter: Any, hole_name: str, rename_sketch: str
+) -> AdapterResult[str]:
+    """Open the positioning sketch of a Hole Wizard hole for dimensioning.
+
+    A ``HoleWzd`` feature places its location point on the selected face
+    UN-dimensioned (an under-defined pick), so its position is neither parametric
+    nor visible as a locator dimension on a drawing. This enters sketch-edit mode
+    on that internal positioning sketch — the wizard sub-feature that is a
+    ``ProfileFeature`` holding exactly one sketch point — after renaming it to
+    ``rename_sketch`` (a stable handle so equations can address its dims), sets
+    ``adapter.currentSketchManager`` / ``currentSketch`` so the ordinary
+    ``add_sketch_*`` helpers apply, registers the point, and returns its entity
+    id. The caller then anchors the point to the origin (X/Y driving dims) and
+    ``exit_sketch``; the hole becomes fully defined and its locators import to a
+    drawing like any other model dimension.
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        hole_name: ``Name`` of the ``HoleWzd`` feature to edit.
+        rename_sketch: New name for the positioning sketch feature.
+
+    Returns:
+        AdapterResult[str]: registered point entity id (e.g. ``"Point_1"``), or
+        error if the hole / its single-point positioning sketch is not found.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+
+    def _find() -> str:
+        model = adapter.currentModel
+        # Locate the HoleWzd feature by name.
+        feat = adapter._attempt(lambda: model.FirstFeature(), default=None)
+        wizard = None
+        while feat is not None:
+            feat = _sw_type_info.flagged(feat, "IFeature")
+            if str(_read_member(feat, "Name") or "") == hole_name and (
+                str(_read_member(feat, "GetTypeName2") or "") == "HoleWzd"
+            ):
+                wizard = feat
+                break
+            feat = adapter._attempt(lambda f=feat: f.GetNextFeature(), default=None)
+        if wizard is None:
+            raise Exception(f"HoleWzd feature {hole_name!r} not found")
+
+        # Its positioning sketch is the sub-feature that is a ProfileFeature
+        # holding exactly one sketch point (the hole profile has several).
+        sub = adapter._attempt(lambda: wizard.GetFirstSubFeature(), default=None)
+        pos_feat = pos_sketch = None
+        while sub is not None:
+            sub = _sw_type_info.flagged(sub, "IFeature")
+            if str(_read_member(sub, "GetTypeName2") or "") == "ProfileFeature":
+                spec = adapter._attempt(lambda s=sub: s.GetSpecificFeature2(), default=None)
+                spec = _sw_type_info.flagged(spec, "ISketch")
+                pts = adapter._attempt(lambda s=spec: s.GetSketchPoints2(), default=None) or []
+                if len(pts) == 1:
+                    pos_feat, pos_sketch = sub, spec
+                    break
+            sub = adapter._attempt(lambda s=sub: s.GetNextSubFeature(), default=None)
+        if pos_sketch is None:
+            raise Exception(
+                f"no single-point positioning sketch under HoleWzd {hole_name!r}"
+            )
+
+        # Rename for stable equation addressing, then enter sketch-edit mode.
+        adapter._attempt(lambda: setattr(pos_feat, "Name", rename_sketch))
+        adapter._attempt(lambda: model.ClearSelection2(True))
+        if not adapter._attempt(lambda: pos_feat.Select2(False, 0), default=False):
+            raise Exception(f"could not select positioning sketch {rename_sketch!r}")
+        adapter._attempt(lambda: model.EditSketch())
+        adapter.currentSketchManager = adapter._attempt(
+            lambda: model.SketchManager, default=None
+        )
+        adapter.currentSketch = pos_sketch
+        point = adapter._attempt(lambda s=pos_sketch: s.GetSketchPoints2()[0], default=None)
+        if point is None:
+            raise Exception("positioning sketch point vanished after EditSketch")
+        return cast(str, adapter._register_sketch_entity("Point", point))
+
+    return cast(
+        AdapterResult[str],
+        adapter._handle_com_operation("edit_hole_position", _find),
     )
 
 
