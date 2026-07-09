@@ -1305,7 +1305,7 @@ def _pattern_components_linear_impl(
             float(params.spacing) / 1000.0,  # Spacing1 (metres)
             1,  # Num2 (direction 2 unused)
             0.0,  # Spacing2
-            False,  # FlipDir1
+            bool(params.flip_direction),  # FlipDir1
             False,  # FlipDir2
             "",  # DName1
             "",  # DName2
