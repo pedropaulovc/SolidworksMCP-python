@@ -19,9 +19,32 @@ from ..base import (
     AddThreadParameters,
     ApplyMaterialParameters,
     CreateBomParameters,
+    TappedHoleParameters,
 )
 from .features import _flag_feature_methods, _read_member, _select_by_point
 from .parametrics import _active_configuration_name
+
+# swFeatureNameID_e.swFmHoleWzd — the feature-data type CreateDefinition mints for
+# a Hole Wizard hole. (All four hole-wizard enum ints below were validated by
+# reflection into SolidWorks.Interop.swconst.dll — the doc bundle lists the
+# swFeatureNameID_e members without integers.)
+_SW_FM_HOLE_WZD = 25
+
+# swWzdGeneralHoleTypes_e — the generic kind of hole.
+_WZD_HOLE_TYPES = {"tap": 4}  # swWzdTap (straight tapped hole)
+
+# swWzdHoleStandards_e — the fastener standard the size table is keyed to.
+_WZD_HOLE_STANDARDS = {"ansi_inch": 0}  # swStandardAnsiInch
+
+# swWzdHoleStandardFastenerTypes_e — the fastener/hole type within the standard.
+_WZD_FASTENER_TYPES = {"tapped_hole": 27}  # swStandardAnsiInchTappedHole
+
+# swEndConditions_e — how far the hole drills.
+_WZD_END_TYPES = {"through_all": 1}  # swEndCondThroughAll
+
+# NOTE: each map holds only combinations verified against the live Hole Wizard DB
+# (see the pen-v-block build). Extend by adding the enum int from the interop DLL
+# (or the swconst docs) — never guess a value; an invalid one fails CreateFeature.
 
 # swCosmeticStandardType_e
 _THREAD_STANDARDS = {
@@ -75,6 +98,11 @@ class SolidWorksManufacturingMixin:
         self, params: AddThreadParameters
     ) -> AdapterResult[dict[str, Any]]:
         return _add_thread_impl(self, params)
+
+    async def insert_tapped_hole(
+        self, params: TappedHoleParameters
+    ) -> AdapterResult[dict[str, Any]]:
+        return _insert_tapped_hole_impl(self, params)
 
     async def create_bom(
         self, params: CreateBomParameters
@@ -193,6 +221,105 @@ def _add_thread_impl(
     return cast(
         AdapterResult[dict[str, Any]],
         adapter._handle_com_operation("add_thread", _thread_operation),
+    )
+
+
+def _insert_tapped_hole_impl(
+    adapter: Any, params: TappedHoleParameters
+) -> AdapterResult[dict[str, Any]]:
+    """Create a Hole Wizard tapped hole on a face via the feature-data object.
+
+    Uses the ``CreateDefinition(swFmHoleWzd)`` -> ``InitializeHole`` ->
+    ``CreateFeature`` flow (the maintainable path; ``HoleWizard5`` takes 28
+    positional args with 12 opaque ``Value`` slots). The resulting ``HoleWzd``
+    feature carries the fastener designation, so a drawing gets a native hole
+    callout with no hard-coded thread map.
+
+    Args:
+        adapter: A fully connected ``PyWin32Adapter``.
+        params: Face point (mm), size token, standard/fastener/end/hole keys.
+
+    Returns:
+        AdapterResult[dict[str, Any]]: ``{name, type, standard, size}`` or error.
+    """
+    if not adapter.currentModel:
+        return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
+
+    hole_type = _WZD_HOLE_TYPES.get(params.hole_type)
+    if hole_type is None:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown hole_type: {params.hole_type!r} "
+            f"(expected one of {sorted(_WZD_HOLE_TYPES)})",
+        )
+    standard = _WZD_HOLE_STANDARDS.get(params.standard)
+    if standard is None:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown standard: {params.standard!r} "
+            f"(expected one of {sorted(_WZD_HOLE_STANDARDS)})",
+        )
+    fastener = _WZD_FASTENER_TYPES.get(params.fastener_type)
+    if fastener is None:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown fastener_type: {params.fastener_type!r} "
+            f"(expected one of {sorted(_WZD_FASTENER_TYPES)})",
+        )
+    end_type = _WZD_END_TYPES.get(params.end_type)
+    if end_type is None:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"Unknown end_type: {params.end_type!r} "
+            f"(expected one of {sorted(_WZD_END_TYPES)})",
+        )
+    if len(params.face_point) != 3:
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR,
+            error=f"face_point must be [x, y, z] mm, got {params.face_point!r}",
+        )
+    if not params.size.strip():
+        return AdapterResult(
+            status=AdapterResultStatus.ERROR, error="Hole size token is required"
+        )
+
+    def _hole_operation() -> dict[str, Any]:
+        adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True))
+        feature_manager = adapter.currentModel.FeatureManager
+        _flag_feature_methods(feature_manager, "IFeatureManager")
+
+        data = feature_manager.CreateDefinition(_SW_FM_HOLE_WZD)
+        if data is None:
+            raise Exception("CreateDefinition(swFmHoleWzd) returned None")
+        # InitializeHole seeds the data object; the placement face is selected
+        # AFTER (CreateFeature reads the current selection as the location).
+        data.InitializeHole(hole_type, standard, fastener, params.size, end_type)
+        if not _select_by_point(adapter, "FACE", params.face_point, 0, False):
+            raise Exception(
+                f"Failed to select the placement FACE at {params.face_point} mm "
+                "(is the point on a visible solid face?)"
+            )
+        feature = feature_manager.CreateFeature(data)
+        if feature is None:
+            raise Exception(
+                f"CreateFeature failed -- size {params.size!r} may be invalid for "
+                f"standard {params.standard!r}/{params.fastener_type!r}"
+            )
+        _flag_feature_methods(feature, "IFeature")
+        name = str(_read_member(feature, "Name") or "")
+        type_name = str(_read_member(feature, "GetTypeName2") or "")
+        if type_name != "HoleWzd":
+            raise Exception(f"created feature is {type_name!r}, not a HoleWzd")
+        return {
+            "name": name,
+            "type": type_name,
+            "standard": params.standard,
+            "size": params.size,
+        }
+
+    return cast(
+        AdapterResult[dict[str, Any]],
+        adapter._handle_com_operation("insert_tapped_hole", _hole_operation),
     )
 
 
