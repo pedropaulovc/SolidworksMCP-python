@@ -52,6 +52,12 @@ _SW_INSERT_DIMS_NOTMARKED = 0x80000  # swInsertAnnotation_e.swInsertDimensionsNo
 # not reliably flagged "marked for drawing", so the marked-only mask misses them.
 _SW_INSERT_DIMS_ALL = _SW_INSERT_DIMS_MARKED | _SW_INSERT_DIMS_NOTMARKED
 _SW_INSERT_HOLE_CALLOUT = 0x100000  # swInsertAnnotation_e.swInsertholeCallout
+# swInsertAnnotation_e.swInsertHoleWizardLocationDimensions — the LOCATION dims of a
+# Hole Wizard hole live on its absorbed positioning sketch, which the marked/unmarked
+# masks (even with HiddenFeatureDims) never pull; this dedicated bit is the ONLY way
+# to import them, so a dimensioned wizard-hole position shows its X/Y locators on the
+# drawing (verified live — without it the front view drops the set-screw locators).
+_SW_INSERT_HOLE_WZD_LOCATION = 0x20000
 _SW_CM_TYPE_HOLE = 0x1  # swAutoInsertCenterMarkTypes_e.swAutoInsertCenterMarkType_Hole
 _SW_CM_TYPE_SLOTS = 0x4  # swAutoInsertCenterMarkTypes_e.swAutoInsertCenterMarkType_Slots
 _SW_CM_CONN_NONE = 0  # swCenterMarkConnectionLine_e.swCenterMarkConnectionLine_None
@@ -112,6 +118,32 @@ def _resolve_drawing_template(adapter: Any) -> str:
             if entry.lower().endswith(".drwdot"):
                 return os.path.join(directory, entry)
     return ""
+
+
+def read_custom_properties(
+    adapter: Any, names: list[str], *, model: Any = None
+) -> dict[str, str]:
+    """Read file-level custom properties off a model by name.
+
+    Drives ``IModelDoc2.GetCustomInfoValue("", name)`` — the resolved-value read
+    the build's ``apply_custom_properties`` verifies its writes through — for each
+    requested name against ``model`` (defaults to ``adapter.currentModel``). Only
+    non-empty values land in the returned dict, so a caller can tell a stamped
+    property from a blank/absent one and fail loud on a missing make-critical field.
+
+    Read the SOURCE model (e.g. the ``.SLDPRT`` right after ``open_model``, while it
+    is still current) rather than the drawing: the drawing carries no custom
+    properties of its own until they are linked, but the part it references does.
+    """
+    doc = model if model is not None else adapter.currentModel
+    out: dict[str, str] = {}
+    for name in names:
+        val = adapter._attempt(
+            lambda n=name: doc.GetCustomInfoValue("", n), default=""
+        )
+        if isinstance(val, str) and val:
+            out[name] = val
+    return out
 
 
 def new_drawing(
@@ -455,6 +487,10 @@ def insert_model_dims(
     if not selected:
         logger.warning("view %r not selected for annotation insert", name)
     types = _SW_INSERT_DIMS_MARKED if marked_only else _SW_INSERT_DIMS_ALL
+    # Always pull Hole Wizard LOCATION dims — they sit on the wizard's absorbed
+    # positioning sketch, which no marked/unmarked mask reaches; this is a no-op
+    # when the model has no (dimensioned) wizard holes.
+    types |= _SW_INSERT_HOLE_WZD_LOCATION
     if hole_callouts:
         types |= _SW_INSERT_HOLE_CALLOUT
     result = adapter._attempt(
