@@ -115,20 +115,31 @@ def _resolve_drawing_template(adapter: Any) -> str:
 
 
 def new_drawing(
-    adapter: Any, *, width: float = 0.2794, height: float = 0.2159
+    adapter: Any,
+    *,
+    template: str | None = None,
+    width: float = 0.2794,
+    height: float = 0.2159,
 ) -> Any:
-    """Create a blank drawing document from the seat's default template.
+    """Create a blank drawing document from a template.
 
     Replacement for the adapter's ``create_drawing`` (which reads the wrong
-    template preference slot). Resolves the real ``.drwdot``, creates the doc,
-    flags it as a drawing, and sets it as ``adapter.currentModel``. ``width`` /
-    ``height`` (meters) default to A-size landscape (11 x 8.5 in) and are only
-    honored when the template leaves the sheet user-defined.
+    template preference slot). ``template`` is an explicit ``.drwdot`` path (e.g. a
+    project template checked into the repo); when omitted or missing, the seat's
+    configured default is resolved instead. Creates the doc, flags it as a drawing,
+    and sets it as ``adapter.currentModel``. ``width`` / ``height`` (meters) default
+    to A-size landscape (11 x 8.5 in) and are only honored when the template leaves
+    the sheet user-defined.
     """
     app = adapter.swApp
     if app is None:
         raise RuntimeError("SolidWorks application is not connected")
-    template = _resolve_drawing_template(adapter)
+    if template and os.path.isfile(template):
+        template = os.path.abspath(template)
+    else:
+        if template:
+            logger.warning("drawing template %r not found; using seat default", template)
+        template = _resolve_drawing_template(adapter)
     if not template:
         raise RuntimeError("No drawing template (.drwdot) configured on this seat")
     model = adapter._attempt(
@@ -478,6 +489,45 @@ def _delete_annotation(adapter: Any, annotation: Any) -> bool:
     return bool(ok)
 
 
+def _note_text(adapter: Any, annotation: Any) -> str:
+    """Text of a NOTE annotation (``INote::GetText``), or ``""`` for non-notes.
+
+    ``GetSpecificAnnotation`` -> ``INote`` for a note; other annotation kinds
+    (display dimensions, callouts) either lack a zero-arg ``GetText`` or raise,
+    so this returns ``""`` for them — exactly the filter we want when hunting a
+    stray descriptive note.
+    """
+    spec = adapter._attempt(lambda a=annotation: a.GetSpecificAnnotation(), default=None)
+    if spec is None:
+        return ""
+    spec = _sw_type_info.flagged(spec, "INote")
+    txt = adapter._attempt(lambda s=spec: s.GetText(), default=None)
+    return txt if isinstance(txt, str) else ""
+
+
+def remove_notes_matching(adapter: Any, substring: str) -> int:
+    """Delete every NOTE on the sheet whose text contains ``substring``.
+
+    SolidWorks auto-inserts a descriptive hole-callout note for a Hole Wizard
+    feature (e.g. ``"#5-40 Tapped Hole"``) alongside the leadered thread callout
+    — a duplicate on an ASME print. This removes those notes by text match.
+    Returns the number deleted. Case-insensitive.
+    """
+    target = substring.lower()
+    hits: list[Any] = []
+    for view in list(iter_views(adapter)):
+        vf = _sw_type_info.flagged(view, "IView")
+        an = adapter._attempt(lambda x=vf: x.GetFirstAnnotation3(), default=None)
+        while an is not None:
+            anf = _sw_type_info.flagged(an, "IAnnotation")
+            nxt = adapter._attempt(lambda x=anf: x.GetNext3(), default=None)
+            if target in _note_text(adapter, anf).lower():
+                hits.append(anf)
+            an = nxt
+    # Delete after traversal (EditDelete mutates the annotation linked list).
+    return sum(1 for anf in hits if _delete_annotation(adapter, anf))
+
+
 def annotate_holes_thru(
     adapter: Any,
     annotations: list[Any],
@@ -565,6 +615,122 @@ def annotate_holes_thru(
         for ann, _disp, _v in members[1:]:
             _delete_annotation(adapter, ann)
     return count
+
+
+def dimension_name(adapter: Any, annotation: Any) -> str:
+    """Short parametric name of the model dimension behind a display annotation.
+
+    Returns e.g. ``"TopRun"`` / ``"Bore1Z"`` (``IDimension::Name``), or ``""`` if the
+    annotation is not a model dimension. Curation keys on this STABLE per-feature name
+    rather than the DISPLAYED value: values like ``6.00`` / ``4.00`` recur across
+    unrelated features (chamfer legs, slit floor, hole locators), so a value match
+    would delete or move the wrong dimension. (``FullName`` would be
+    ``"Name@Feature@Model"``; ``Name`` is just the leading token.)
+    """
+    disp = adapter._attempt(lambda a=annotation: a.GetSpecificAnnotation())
+    if not disp:
+        return ""
+    disp = _sw_type_info.flagged(disp, "IDisplayDimension")
+    dim = adapter._attempt(lambda d=disp: d.GetDimension())
+    if not dim:
+        return ""
+    dim = _sw_type_info.flagged(dim, "IDimension")
+    name = adapter._get_attr_or_call(dim, "Name")
+    return name if isinstance(name, str) else ""
+
+
+def curate_dimensions(
+    adapter: Any,
+    annotations: list[Any],
+    *,
+    delete: tuple[str, ...] | frozenset[str] = (),
+    reposition: dict[str, tuple[float, float]] | None = None,
+) -> list[Any]:
+    """Prune / relocate auto-inserted model dimensions by PARAMETRIC NAME.
+
+    ``insert_model_dims(marked_only=False)`` pulls EVERY driven model dim, which
+    over-dimensions an ASME print (a redundant intermediate an overall already fixes,
+    a duplicated centreline on repeated features). Curate that result:
+
+    - ``delete`` — dim names to remove (e.g. a duplicate hole-centreline, or an
+      intermediate run an overall already sets). The feature stays fully defined by
+      the survivors; deleting an OVER-constraining dim is an ASME cleanup, not a loss
+      of information.
+    - ``reposition`` — ``{name: (x, y)}`` sheet positions (meters, sheet origin
+      bottom-left, via ``IAnnotation::SetPosition``) to move a crowded dim's text/
+      leader clear of its neighbours.
+
+    Matching is on :func:`dimension_name`. Returns the annotations that SURVIVE
+    (deleted ones dropped), so a caller can keep threading the curated list.
+    """
+    delete_set = set(delete)
+    moves = reposition or {}
+    draw = _draw(adapter)
+    survivors: list[Any] = []
+    for ann in annotations or []:
+        ann = _sw_type_info.flagged(ann, "IAnnotation")
+        nm = dimension_name(adapter, ann)
+        if nm and nm in delete_set:
+            _delete_annotation(adapter, ann)
+            continue
+        if nm and nm in moves:
+            x, y = moves[nm]
+            adapter._attempt(
+                lambda a=ann, X=x, Y=y: a.SetPosition(float(X), float(Y), 0.0)
+            )
+        survivors.append(ann)
+    adapter._attempt(lambda: draw.EditRebuild3())
+    return survivors
+
+
+def add_overall_dimension(
+    adapter: Any, view: Any, *, vertical: bool = True, offset: float = 0.012
+) -> Any:
+    """Add an explicit overall (bounding) linear dimension across a view's extremes.
+
+    Auto-inserted model dims can leave a direction defined only by an internal chain
+    (e.g. side-wall height + chamfer leg) with no single overall figure — ASME wants
+    an overall size in each direction. This selects the view's two extreme edges
+    (bottom+top for ``vertical``, else left+right; picked by sheet coordinate from the
+    view outline) and dimensions across them with ``AddDimension2``, placing the text
+    ``offset`` meters outside the view box.
+
+    Best-effort: returns the new dimension, or None if the coordinate-based edge
+    selection did not resolve two edges — the direction stays defined by its existing
+    chain, so this only ever ADDS an overall, never removes a definition. Activate/
+    select happen here; call after the views are placed and dims inserted.
+    """
+    draw = _draw(adapter)
+    box = view_outline(adapter, view)
+    if not box:
+        return None
+    xmin, ymin, xmax, ymax = box
+    midx = (xmin + xmax) / 2.0
+    midy = (ymin + ymax) / 2.0
+    ext = adapter._attempt(lambda: draw.Extension)
+    if ext is None:
+        return None
+    adapter._attempt(lambda: draw.ActivateView(view_name(adapter, view)))
+    adapter._attempt(lambda: draw.ClearSelection2(True))
+    if vertical:
+        (p0, p1), textpos = ((midx, ymin), (midx, ymax)), (xmin - offset, midy)
+    else:
+        (p0, p1), textpos = ((xmin, midy), (xmax, midy)), (midx, ymin - offset)
+    ok0 = adapter._attempt(
+        lambda: ext.SelectByID2("", "EDGE", p0[0], p0[1], 0.0, False, 0, null_callout(), 0),
+        default=False,
+    )
+    ok1 = adapter._attempt(
+        lambda: ext.SelectByID2("", "EDGE", p1[0], p1[1], 0.0, True, 0, null_callout(), 0),
+        default=False,
+    )
+    if not (ok0 and ok1):
+        logger.warning("overall-dim edge selection failed (bottom=%s top=%s)", ok0, ok1)
+        adapter._attempt(lambda: draw.ClearSelection2(True))
+        return None
+    dim = adapter._attempt(lambda: draw.AddDimension2(textpos[0], textpos[1], 0.0))
+    adapter._attempt(lambda: draw.EditRebuild3())
+    return dim
 
 
 def add_third_angle_symbol(
@@ -795,6 +961,54 @@ def draw_border_and_title_block(
         add_note(adapter, text, x0 + 0.004, y)
     adapter._attempt(lambda: draw.EditRebuild3())
     return True
+
+
+def delete_all_tables(adapter: Any) -> int:
+    """Delete every table annotation on the drawing; return the count removed.
+
+    A stock sheet format ships unused tables (revision / BOM / general / weldment)
+    that clutter a single-part print. Tables live per drawing view
+    (``IView::GetTableAnnotations``) AND on the sheet node itself, so this scans the
+    sheet (``GetFirstView``) plus every real view; each table is removed via its
+    ``IAnnotation`` (``ITableAnnotation::GetAnnotation`` -> Select2 + EditDelete).
+    Generic — a caller that wants to KEEP the title-block table should strip
+    selectively instead (by ``ITableAnnotation::Type``).
+    """
+    draw = _draw(adapter)
+    nodes: list[Any] = []
+    sheet_view = adapter._attempt(lambda: draw.GetFirstView())  # the sheet node
+    if sheet_view:
+        nodes.append(_sw_type_info.flagged(sheet_view, "IView"))
+    nodes.extend(iter_views(adapter))
+    removed = 0
+    for view in nodes:
+        tables = adapter._attempt(lambda v=view: v.GetTableAnnotations())
+        if not tables or isinstance(tables, str):
+            continue
+        for tbl in list(tables):
+            if not tbl:
+                continue
+            tbl = _sw_type_info.flagged(tbl, "ITableAnnotation")
+            ann = adapter._attempt(lambda t=tbl: t.GetAnnotation())
+            if ann and _delete_annotation(adapter, _sw_type_info.flagged(ann, "IAnnotation")):
+                removed += 1
+    adapter._attempt(lambda: draw.EditRebuild3())
+    return removed
+
+
+def save_as_template(adapter: Any, path: str) -> str:
+    """Save the current drawing as a reusable ``.drwdot`` template (SaveAs3 by
+    extension). Deletes any stale target, then gates on the file existing (SaveAs3's
+    return code is unreliable). Returns the absolute path; raises if nothing landed.
+    """
+    draw = _draw(adapter)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    if os.path.exists(path):
+        adapter._attempt(lambda p=path: os.remove(p))
+    adapter._attempt(lambda p=path: draw.SaveAs3(os.path.abspath(p), 0, 0))
+    if not os.path.exists(path):
+        raise RuntimeError(f"template SaveAs3 produced no file: {path}")
+    return os.path.abspath(path)
 
 
 def save_drawing(

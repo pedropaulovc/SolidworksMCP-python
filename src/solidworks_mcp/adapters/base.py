@@ -767,6 +767,36 @@ class AddThreadParameters(BaseModel):
     note: str = ""
 
 
+class TappedHoleParameters(BaseModel):
+    """Parameters for a Hole Wizard *tapped* hole placed on a face by point.
+
+    A real (``HoleWzd``) tapped hole — as opposed to a plain cut + cosmetic
+    thread — so the model itself carries the thread designation and a drawing
+    reads a native hole callout (e.g. ``#5-40 UNC-2B THRU``) with no hard-coded
+    map. The hole is placed at the point on the selected face; ``through_all``
+    drills the full body.
+
+    Attributes:
+        face_point (list[float]): ``[x, y, z]`` in millimetres on the face the
+            hole enters. The hole location is that point's projection.
+        size (str): Fastener size token, exactly as it appears in the Hole
+            Wizard table for the standard (e.g. ``"#5-40"``, ``"1/4-20"``).
+        standard (str): Hole Wizard standard — currently ``"ansi_inch"``.
+        fastener_type (str): Fastener/hole type within the standard — currently
+            ``"tapped_hole"``.
+        end_type (str): ``"through_all"`` (only verified value today).
+        hole_type (str): Generic Hole Wizard type — currently ``"tap"`` (a
+            straight tapped hole).
+    """
+
+    face_point: list[float]
+    size: str
+    standard: str = "ansi_inch"
+    fastener_type: str = "tapped_hole"
+    end_type: str = "through_all"
+    hole_type: str = "tap"
+
+
 class CreateBomParameters(BaseModel):
     """Parameters for inserting a BOM table into the active document.
 
