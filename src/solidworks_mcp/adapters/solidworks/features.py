@@ -598,10 +598,10 @@ def _profile_feature_names(adapter: Any) -> list[str]:
 
     Walks ``FirstFeature`` → ``GetNextFeature`` reading ``GetTypeName2`` and
     collecting features whose type is ``"ProfileFeature"`` (a 2D/3D sketch).
-    Mirrors the tree walk used by :func:`_create_cut_extrude_impl`, but flags
-    each feature for ``IFeature`` and reads members through
-    :func:`_read_member` so it is robust to pywin32's method-vs-property
-    late-binding ambiguity.
+    Mirrors the tree walk used by :func:`_create_cut_extrude_impl`, flagging
+    only the two methods the walk calls (see the loop comment) and reading
+    members through :func:`_read_member` so it is robust to pywin32's
+    method-vs-property late-binding ambiguity.
 
     Args:
         adapter: A connected adapter with a valid ``currentModel``.
@@ -618,7 +618,20 @@ def _profile_feature_names(adapter: Any) -> list[str]:
         for _ in range(5000):
             if not feat:
                 break
-            _flag_feature_methods(feat, "IFeature")
+            # Flag only the two methods the walk CALLS (the _feature_objects
+            # fix, c992057): full IFeature flagging costs a GetIDsOfNames
+            # round-trip per method name per feature, uncached across walks
+            # because every GetNextFeature returns a fresh CDispatch — which
+            # taxed each cut/sweep profile lookup with an O(features) flag
+            # storm. ``GetTypeName2`` MUST stay method-dispatched: resolved
+            # as a property it returns a bound-method object, the comparison
+            # below goes False, and profile selection silently falls back to
+            # the stale ``_last_sketch_name``. ``Name`` is a property and
+            # needs no flag (``_read_member`` tolerates either resolution).
+            try:
+                feat._FlagAsMethod("GetTypeName2", "GetNextFeature")
+            except Exception:
+                pass
             try:
                 if _read_member(feat, "GetTypeName2") == "ProfileFeature":
                     names.append(str(_read_member(feat, "Name")))
