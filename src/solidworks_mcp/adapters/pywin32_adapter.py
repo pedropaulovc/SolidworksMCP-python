@@ -67,6 +67,12 @@ from loguru import logger  # noqa: E402
 
 T = TypeVar("T")
 
+# Registry prefixes whose entity is a single sketch segment (not a group/list or
+# a dimension/relation), eligible for derived-interface re-binding on register.
+_SEGMENT_PREFIXES = frozenset(
+    {"Line", "Arc", "Circle", "Spline", "Centerline", "Ellipse"}
+)
+
 
 def _load_pillow_image() -> Any:
     """Return ``PIL.Image`` when Pillow is installed, else ``None``.
@@ -535,6 +541,14 @@ class _SketchGeometryService:
         """
         self._adapter._sketch_entity_counter += 1
         entity_id = f"{prefix}_{self._adapter._sketch_entity_counter}"
+        # Re-bind single segments to their derived interface up front, so every
+        # downstream reader (point/dimension/constraint resolution) sees an
+        # ISketchLine/ISketchArc/… with its point accessors as declared methods
+        # rather than the base ISketchSegment makepy wraps the create-call return
+        # in. Groups (rectangle/polygon -> list) and non-segments (dimension/
+        # relation) are stored untouched.
+        if prefix in _SEGMENT_PREFIXES and not isinstance(entity, (list, tuple)):
+            entity = sw_type_info.concrete_sketch_segment(entity)
         self._adapter._sketch_entities[entity_id] = entity
         return entity_id
 

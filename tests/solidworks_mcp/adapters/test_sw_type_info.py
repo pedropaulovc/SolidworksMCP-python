@@ -6,6 +6,8 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_import_handles_missing_pywin32(monkeypatch) -> None:
     """Import should handle missing win32com gracefully."""
@@ -225,25 +227,35 @@ def test_early_bound_passes_through_when_wrapper_unloaded(monkeypatch) -> None:
     assert sw_type_info.early_bound(obj, "IModelDocExtension") is obj
 
 
-def test_early_bound_passes_through_when_interface_absent(monkeypatch) -> None:
-    """An interface class missing from the wrapper module is a no-op."""
+def test_early_bound_raises_when_interface_absent(monkeypatch) -> None:
+    """A loaded wrapper missing the requested interface fails loud, not silently.
+
+    Silently returning the unwrapped dispatch defers the failure to a confusing
+    downstream error (a base-interface method missing, a property read as a
+    method); raising here names the bad interface at the point it is requested.
+    """
     from solidworks_mcp.adapters import sw_type_info
 
     monkeypatch.setattr(sw_type_info, "_ensure_loaded", lambda: None)
     monkeypatch.setattr(sw_type_info, "_wrapper_module", SimpleNamespace())
     obj = SimpleNamespace(_oleobj_=object())
-    assert sw_type_info.early_bound(obj, "IModelDocExtension") is obj
+    with pytest.raises(ValueError, match="IModelDocExtension"):
+        sw_type_info.early_bound(obj, "IModelDocExtension")
 
 
 def test_early_bound_passes_through_when_no_oleobj(monkeypatch) -> None:
     """A dispatch without _oleobj_ cannot be re-wrapped, so it is returned as-is."""
     from solidworks_mcp.adapters import sw_type_info
 
+    class _IModelDocExtension:
+        def __init__(self, oleobj):
+            self.__dict__["_oleobj_"] = oleobj
+
     monkeypatch.setattr(sw_type_info, "_ensure_loaded", lambda: None)
     monkeypatch.setattr(
         sw_type_info,
         "_wrapper_module",
-        SimpleNamespace(IModelDocExtension=lambda raw: ("wrapped", raw)),
+        SimpleNamespace(IModelDocExtension=_IModelDocExtension),
     )
     obj = object()  # no _oleobj_
     assert sw_type_info.early_bound(obj, "IModelDocExtension") is obj
@@ -316,12 +328,13 @@ def test_early_bound_swallows_wrapper_construction_failure(monkeypatch) -> None:
     """If the wrapper class raises, the original object is returned unchanged."""
     from solidworks_mcp.adapters import sw_type_info
 
-    def _boom(_oleobj):
-        raise RuntimeError("bad dispatch")
+    class _Boom:
+        def __init__(self, _oleobj):
+            raise RuntimeError("bad dispatch")
 
     monkeypatch.setattr(sw_type_info, "_ensure_loaded", lambda: None)
     monkeypatch.setattr(
-        sw_type_info, "_wrapper_module", SimpleNamespace(IModelDocExtension=_boom)
+        sw_type_info, "_wrapper_module", SimpleNamespace(IModelDocExtension=_Boom)
     )
     obj = SimpleNamespace(_oleobj_=object())
     assert sw_type_info.early_bound(obj, "IModelDocExtension") is obj

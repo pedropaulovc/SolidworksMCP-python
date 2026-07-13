@@ -27,6 +27,21 @@ class SolidWorksIOMixin:
         return cast(Any, obj)
 
     @staticmethod
+    def _bind_document(model: Any) -> Any:
+        """Early-bind a freshly acquired document to ``IModelDoc2``.
+
+        The base interface carries the members call sites invoke directly
+        (``GetEquationMgr``, ``GetActiveConfiguration``, ``ClearSelection2``,
+        ``Extension`` …); doc-type members (``IPartDoc.GetBodies2``,
+        ``IAssemblyDoc.GetComponents``, ``IDrawingDoc`` …) resolve through the
+        wrapper's late-bound fallback. Without this, ``currentModel`` is a raw
+        dispatch on which a zero-arg method like ``GetEquationMgr()`` resolves
+        as a *property* and the direct call raises — the old code masked this by
+        flagging the whole document interface on open.
+        """
+        return _sw_type_info.early_bound(model, "IModelDoc2")
+
+    @staticmethod
     def _is_success(value: Any) -> bool:
         """Interpret SolidWorks save API return values consistently.
 
@@ -158,6 +173,7 @@ class SolidWorksIOMixin:
                     f"(errors={open_errors}, warnings={open_warnings})"
                 )
 
+            model = self._bind_document(model)
             adapter.currentModel = model
             title = self._read_model_title(model)
             active_config = adapter._attempt(lambda: model.GetActiveConfiguration())
@@ -260,6 +276,7 @@ class SolidWorksIOMixin:
             if not model:
                 raise Exception("Failed to create new part")
 
+            model = self._bind_document(model)
             adapter.currentModel = model
             title = self._read_model_title(model)
             return SolidWorksModel(
@@ -314,6 +331,7 @@ class SolidWorksIOMixin:
             if not model:
                 raise Exception("Failed to create new assembly")
 
+            model = self._bind_document(model)
             adapter.currentModel = model
             title = self._read_model_title(model)
             return SolidWorksModel(
@@ -364,6 +382,7 @@ class SolidWorksIOMixin:
             if not model:
                 raise Exception("Failed to create new drawing")
 
+            model = self._bind_document(model)
             adapter.currentModel = model
             title = self._read_model_title(model)
             return SolidWorksModel(

@@ -412,10 +412,21 @@ def early_bound(obj: Any, interface: str) -> Any:
     if obj is None or _wrapper_module is None:
         return obj
     cls = getattr(_wrapper_module, interface, None)
+    if cls is None or not inspect.isclass(cls):
+        # The wrapper IS loaded but the requested interface is absent — a wrong
+        # name or an incomplete wrapper. Fail loud rather than silently return an
+        # unwrapped dispatch that breaks with a confusing error much later.
+        raise ValueError(
+            f"early_bound: interface {interface!r} is not defined in the loaded "
+            f"SolidWorks wrapper ({getattr(_wrapper_module, '__name__', '?')}). "
+            "Check the interface name against the type library, or regenerate the "
+            "checked-in wrapper after a SolidWorks version upgrade."
+        )
     oleobj = getattr(obj, "_oleobj_", None)
-    if cls is None or oleobj is None:
+    if oleobj is None:
+        # Not a real COM dispatch (a mock/test double) — nothing to wrap.
         return obj
-    if inspect.isclass(cls) and isinstance(obj, cls):
+    if isinstance(obj, cls):
         return obj
     try:
         return _fallback_subclass(cls)(oleobj)
@@ -430,6 +441,50 @@ def is_early_bound(obj: Any, interface: str) -> bool:
         return False
     cls = getattr(_wrapper_module, interface, None)
     return bool(inspect.isclass(cls) and isinstance(obj, cls))
+
+
+# swSketchSegments_e value -> the derived ``ISketch*`` interface that DECLARES
+# the segment's point accessors (``GetStartPoint2``/``GetEndPoint2``/
+# ``GetCenterPoint2``/``GetStartPoint``/``GetEndPoint`` …). swSketchTEXT (4) and
+# swSketchPARABOLA (5) carry no such accessors and are left as ISketchSegment.
+_SKETCH_SEGMENT_INTERFACE: dict[int, str] = {
+    0: "ISketchLine",  # swSketchLINE
+    1: "ISketchArc",  # swSketchARC (also full circles)
+    2: "ISketchEllipse",  # swSketchELLIPSE
+    3: "ISketchSpline",  # swSketchSPLINE
+}
+
+
+def concrete_sketch_segment(obj: Any) -> Any:
+    """Re-bind a sketch segment from base ``ISketchSegment`` to its derived class.
+
+    makepy wraps ``CreateLine``/``CreateArc``/… results as the *base*
+    ``ISketchSegment``, whose generated class does NOT expose the derived point
+    accessors (``GetStartPoint2``, ``GetCenterPoint2``, …) — those live on
+    ``ISketchLine`` / ``ISketchArc`` / …. ``ISketchSegment.GetType()`` names the
+    concrete type (``swSketchSegments_e``), so this re-binds ``obj`` to the
+    matching generated interface, where the accessors are declared DISPID
+    methods — the pattern the ``swSketchSegments_e`` Remarks prescribe ("obtain
+    the appropriate derived class … and call the appropriate derived class
+    functions"). Non-segment dispatches (or a session without the wrapper) pass
+    through unchanged.
+
+    Args:
+        obj: A pywin32 dispatch for a sketch segment (line/arc/circle/spline/
+            ellipse), typically the base ``ISketchSegment`` makepy wrapper.
+
+    Returns:
+        The segment re-bound to its derived interface, or the base
+        ``ISketchSegment`` for the point-less types (``swSketchTEXT`` /
+        ``swSketchPARABOLA``). Raises rather than silently returning an
+        unusable base wrapper when the segment type cannot be read.
+    """
+    segment = early_bound(obj, "ISketchSegment")
+    if not is_early_bound(segment, "ISketchSegment"):
+        return obj  # wrapper module not loaded (mock/degraded) — leave untouched
+    seg_type = int(segment.GetType())
+    interface = _SKETCH_SEGMENT_INTERFACE.get(seg_type)
+    return early_bound(obj, interface) if interface else segment
 
 
 def early_bound_or_flag(obj: Any, interface: str, *method_names: str) -> Any:

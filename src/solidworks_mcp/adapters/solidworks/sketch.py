@@ -170,17 +170,18 @@ def _resolve_entity_ref(adapter: Any, ref: str) -> Any:
             "instead."
         )
 
-    try:
-        from .. import sw_type_info as _sw_type_info
-    except ImportError:
-        _sw_type_info = None  # type: ignore[assignment]
-    if _sw_type_info is not None:
-        # Registry entries can be lines, arcs, ellipses, or splines.  Their
-        # point methods use interface-specific DISPIDs, so wrapping an
-        # unknown segment as the wrong generated class is unsafe.  Exact-name
-        # flagging is the correct fallback for this heterogeneous dispatch.
-        _sw_type_info.flag_method_names(entity, accessor)
-    point = adapter._attempt(lambda: getattr(entity, accessor)(), default=None)
+    # Registry entries are heterogeneous (lines, arcs, ellipses, splines).
+    # ``concrete_sketch_segment`` re-binds a segment from the base
+    # ``ISketchSegment`` makepy wraps create-call returns in to its derived
+    # ``ISketchLine``/``ISketchArc``/… class, where ``GetStartPoint2``/etc. are
+    # declared DISPID methods. Segments are already re-bound at registration
+    # (register_entity), so this is normally a no-op; re-bind defensively here
+    # too — the call is idempotent — in case a dispatch reached the registry by
+    # another path.
+    from .. import sw_type_info as _sw_type_info
+
+    typed = _sw_type_info.concrete_sketch_segment(entity)
+    point = adapter._attempt(lambda: getattr(typed, accessor)(), default=None)
     if point is None:
         raise Exception(
             f"Could not resolve point '{ref}' — '{base}' has no {accessor} "
