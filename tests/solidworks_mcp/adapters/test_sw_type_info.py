@@ -264,7 +264,7 @@ def test_early_bound_passes_through_when_no_oleobj(monkeypatch) -> None:
 def test_early_bound_wraps_via_dispid(monkeypatch) -> None:
     """The raw _oleobj_ is wrapped by the interface class (dispid invocation).
 
-    ``early_bound`` wraps through a :func:`_fallback_subclass` of the makepy
+    ``early_bound`` wraps through a :func:`_strict_subclass` of the makepy
     class, so the returned object is an instance of that class holding the raw
     ``_oleobj_`` — not the original late-bound dispatch.
     """
@@ -340,28 +340,16 @@ def test_early_bound_swallows_wrapper_construction_failure(monkeypatch) -> None:
     assert sw_type_info.early_bound(obj, "IModelDocExtension") is obj
 
 
-def test_early_bound_fallback_forwards_off_interface_members(monkeypatch) -> None:
-    """A member absent from the makepy interface class degrades to late binding.
+def test_strict_subclass_fails_loud_on_off_interface_members() -> None:
+    """A member absent from the makepy interface class raises AttributeError.
 
     Real SW dispatches are polymorphic (IFace2's Select2 lives on IEntity;
-    a part model's GetBodies2 lives on IPartDoc), so the early-bound wrapper
-    must forward undeclared members to a late-bound dispatch on the same
-    object instead of raising AttributeError.
+    a part model's GetBodies2 lives on IPartDoc). Task #7 rebound every call
+    site to the interface that DECLARES the member it calls, so the strict
+    wrapper must FAIL LOUD on an undeclared member instead of silently
+    degrading it to late binding — a surviving off-interface access is a bug.
     """
-    # The fallback path (and this test's monkeypatch of its Dispatch) needs
-    # pywin32; skip on platforms without it (e.g. the Linux mock-only CI).
-    pytest.importorskip("win32com.client.dynamic")
-
     from solidworks_mcp.adapters import sw_type_info
-
-    class _FakeLate:
-        """Stands in for ``dynamic.Dispatch(oleobj)`` — carries the members
-        the interface class does not declare."""
-
-        def OffMethod(self, x):
-            return ("off", x)
-
-    late = _FakeLate()
 
     class _FakeBase:
         """Mimics the makepy ``DispatchBaseClass`` contract: a real declared
@@ -387,34 +375,33 @@ def test_early_bound_fallback_forwards_off_interface_members(monkeypatch) -> Non
                 return
             raise AttributeError(attr)
 
-    monkeypatch.setattr(
-        "win32com.client.dynamic.Dispatch", lambda _oleobj: late, raising=False
-    )
+    wrapped = sw_type_info._strict_subclass(_FakeBase)(object())
 
-    wrapped = sw_type_info._fallback_subclass(_FakeBase)(object())
-
-    # Declared method: found by normal lookup, never touches the fallback.
+    # Declared method: found by normal lookup, never touches the strict path.
     assert wrapped.DeclaredMethod() == "declared-method"
     # Declared property: resolved by the makepy base __getattr__.
     assert wrapped.DeclaredProp == "declared-prop"
-    # Undeclared member: forwarded to the late-bound dispatch.
-    assert wrapped.OffMethod(5) == ("off", 5)
-    # The fallback dispatch is built once and reused.
-    assert wrapped.__dict__["_late_bound_dispatch"] is late
-    # Undeclared attribute set also forwards to the late-bound dispatch.
-    wrapped.OffAttr = 7
-    assert late.OffAttr == 7
+    # Undeclared member: raises, and the message names the interface + member so
+    # the fix (rebind the call site) is obvious.
+    with pytest.raises(AttributeError, match=r"_FakeBase.*OffMethod"):
+        _ = wrapped.OffMethod
+    # Underscore/dunder probes still raise a bare AttributeError (no COM probe).
+    with pytest.raises(AttributeError):
+        _ = wrapped._FlagAsMethod
+    # Undeclared attribute set also fails loud.
+    with pytest.raises(AttributeError, match=r"_FakeBase.*OffAttr"):
+        wrapped.OffAttr = 7
 
 
-def test_early_bound_fallback_reuses_subclass_per_base() -> None:
-    """The same makepy base yields one cached fallback subclass."""
+def test_strict_subclass_reuses_subclass_per_base() -> None:
+    """The same makepy base yields one cached strict subclass."""
     from solidworks_mcp.adapters import sw_type_info
 
     class _Base:
         def __init__(self, oleobj):
             self.__dict__["_oleobj_"] = oleobj
 
-    first = sw_type_info._fallback_subclass(_Base)
-    second = sw_type_info._fallback_subclass(_Base)
+    first = sw_type_info._strict_subclass(_Base)
+    second = sw_type_info._strict_subclass(_Base)
     assert first is second
     assert issubclass(first, _Base)
