@@ -2008,20 +2008,28 @@ class PyWin32Adapter(
         """
         import ntpath
 
-        from .com_variant import byref_long
-
         path, title = self._document_identity(target_doc)
         # SolidWorks paths are always Windows-style; ntpath keeps the
         # basename split correct when the mock suite runs on Linux CI.
         name = ntpath.basename(path) if path else title
         if not name:
             return target_doc
-        activated = self._attempt(
+        # Early-bound ISldWorks::ActivateDoc3 returns (model, errors): pass literal
+        # 0 for the [out] Errors and consume the tuple. The retval is a DYNAMIC
+        # dispatch (no resultCLSID), so rebind it to IModelDoc2 before handing it to
+        # SaveBMP/SaveAs3 -- a raw tuple here silently defeated the activation this
+        # method exists for.
+        result = self._attempt(
             # swRebuildOnActivation_e.swDontRebuildActiveDoc = 1
-            lambda: self.swApp.ActivateDoc3(name, False, 1, byref_long()),
+            lambda: self.swApp.ActivateDoc3(name, False, 1, 0),
             default=None,
         )
-        return activated if activated is not None else target_doc
+        if not result:
+            return target_doc
+        activated, _errors = result
+        if activated is None:
+            return target_doc
+        return sw_type_info.early_bound(activated, "IModelDoc2")
 
     def _save_screenshot_with_savebmp(
         self, target_doc: Any, resolved_path: str, width: int, height: int
@@ -2283,22 +2291,25 @@ class PyWin32Adapter(
         Returns:
             True if file was created, False otherwise.
         """
-        from .com_variant import byref_long, null_dispatch
+        from .com_variant import null_dispatch
 
         def _save(export_data: Any) -> Any:
-            errors = byref_long()
-            warnings = byref_long()
             # swSaveAsVersion_e.swSaveAsCurrentVersion = 0
             # swSaveAsOptions_e.swSaveAsOptions_Silent = 2
-            ok = ext.SaveAs2(
-                resolved_path, 0, 2, export_data, "", False, errors, warnings
+            # Early-bound IModelDocExtension::SaveAs2 returns its two [out] codes in
+            # the tuple (ok, errors, warnings): pass literal 0 for those slots and
+            # consume the tuple (the byref-VARIANT idiom left `ok` a truthy tuple, so
+            # the failure warning could never fire).
+            result = ext.SaveAs2(resolved_path, 0, 2, export_data, "", False, 0, 0)
+            ok, errors, warnings = (
+                result if isinstance(result, tuple) else (result, None, None)
             )
             if not ok:
                 logger.warning(
                     "[pywin32.export_file] Extension.SaveAs2 returned False "
                     "(errors={}, warnings={})",
-                    getattr(errors, "value", None),
-                    getattr(warnings, "value", None),
+                    errors,
+                    warnings,
                 )
             return ok
 
