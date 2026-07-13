@@ -3470,6 +3470,43 @@ class TestPyWin32AdapterBranches:
         )
         assert adapter._select_sketch_entity(entity, append=False) is expected
 
+    def test_select_entity_rebinds_only_segments_not_points(self, monkeypatch) -> None:
+        """select_entity rebinds a DERIVED segment (ISketchArc/ISketchLine) to
+        ISketchSegment (which declares Select*), but leaves a sketch POINT alone —
+        a point is ISketchPoint (Select4 DISPID 25); forcing ISketchSegment
+        (Select4 65562) on it calls a DISPID its dispinterface lacks and the
+        select fails. Regression guard for the `Line_1.start` dimension bug.
+        """
+        import solidworks_mcp.adapters.pywin32_adapter as pw
+
+        adapter = self._build_adapter(monkeypatch)
+        rebound: list[str] = []
+        monkeypatch.setattr(
+            pw.sw_type_info,
+            "early_bound",
+            lambda obj, iface: (rebound.append(iface), obj)[1],
+        )
+
+        # Derived segment -> is_early_bound True for a segment iface -> rebind.
+        monkeypatch.setattr(
+            pw.sw_type_info, "is_early_bound", lambda obj, iface: iface == "ISketchLine"
+        )
+        seg = SimpleNamespace(
+            Select4=Mock(return_value=True), Select2=Mock(), Select=Mock()
+        )
+        assert adapter._select_sketch_entity(seg, append=False) is True
+        assert "ISketchSegment" in rebound
+
+        # Point -> is_early_bound False for every segment iface -> NO rebind.
+        rebound.clear()
+        monkeypatch.setattr(pw.sw_type_info, "is_early_bound", lambda obj, iface: False)
+        pt = SimpleNamespace(
+            Select4=Mock(return_value=True), Select2=Mock(), Select=Mock()
+        )
+        assert adapter._select_sketch_entity(pt, append=False) is True
+        assert "ISketchSegment" not in rebound
+        pt.Select4.assert_called_once()
+
     def test_sketch_geometry_set_display_dimension_value_fallbacks(
         self, monkeypatch
     ) -> None:

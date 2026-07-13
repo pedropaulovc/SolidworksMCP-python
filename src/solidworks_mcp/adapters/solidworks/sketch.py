@@ -131,6 +131,10 @@ def _resolve_origin_point(adapter: Any) -> Any:
             "Could not select the sketch origin ('Point1@Origin' as "
             "EXTSKETCHPOINT) — is a sketch active on a part document?"
         )
+    # Bind to ISketchPoint (which declares Select*/Select2/Select4 by DISPID) so a
+    # downstream origin select resolves early instead of through the fallback.
+    if _sw_type_info is not None:
+        origin_obj = _sw_type_info.early_bound(origin_obj, "ISketchPoint")
     adapter._sketch_origin_point = origin_obj
     return origin_obj
 
@@ -189,7 +193,9 @@ def _resolve_entity_ref(adapter: Any, ref: str) -> Any:
             "dispatch ('.center' needs a circle/arc/ellipse; '.start'/'.end' "
             "need a line/arc/spline)."
         )
-    return point
+    # Bind to ISketchPoint so a downstream select resolves Select*/Select2/Select4
+    # by DISPID (declared there, DISPID 25/19/7) instead of through the fallback.
+    return _sw_type_info.early_bound(point, "ISketchPoint")
 
 
 # swConstrainedStatus_e values (SolidWorks.Interop.swconst) returned by

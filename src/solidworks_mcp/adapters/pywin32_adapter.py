@@ -73,6 +73,17 @@ _SEGMENT_PREFIXES = frozenset(
     {"Line", "Arc", "Circle", "Spline", "Centerline", "Ellipse"}
 )
 
+# The DERIVED sketch-segment makepy classes a registered segment is bound to
+# (`register_entity` -> `concrete_sketch_segment`). None of them declare
+# `Select`/`Select2`/`Select4`, so a select must rebind them to `ISketchSegment`.
+# (Sketch POINTS, by contrast, are `ISketchPoint`, which DOES declare them.)
+_DERIVED_SKETCH_SEGMENT_INTERFACES = (
+    "ISketchLine",
+    "ISketchArc",
+    "ISketchEllipse",
+    "ISketchSpline",
+)
+
 
 def _load_pillow_image() -> Any:
     """Return ``PIL.Image`` when Pillow is installed, else ``None``.
@@ -570,21 +581,30 @@ class _SketchGeometryService:
             bool: ``True`` if any of the three select methods succeeded;
             ``False`` if all failed or raised.
         """
-        # A registered sketch segment is rebound to a DERIVED
-        # ``ISketchArc``/``ISketchLine`` (which declares no ``Select*``); bind to
-        # ``ISketchSegment`` — which owns ``Select``/``Select2``/``Select4`` — for
-        # the DISPID-fast select. (NOT ``IEntity``: its ``Select4`` DISPID 65556
-        # collides with ``ISketchSegment.Select2``.)
-        seg = sw_type_info.early_bound(entity, "ISketchSegment")
+        # Bind to the interface that declares ``Select``/``Select2``/``Select4``
+        # for THIS entity's type, so the select resolves by DISPID:
+        #  - a registered segment is bound to a DERIVED ``ISketchArc``/
+        #    ``ISketchLine``/… (which declares no ``Select*``) -> ``ISketchSegment``
+        #    (``Select4`` DISPID 65562);
+        #  - a sketch POINT already carries them (``ISketchPoint``, ``Select4``
+        #    DISPID 25) and passes through untouched.
+        # NEVER rebind a segment to ``IEntity``: its ``Select4`` (65556) aliases
+        # ``ISketchSegment.Select2`` on the object's dispinterface.
+        target = entity
+        if any(
+            sw_type_info.is_early_bound(entity, iface)
+            for iface in _DERIVED_SKETCH_SEGMENT_INTERFACES
+        ):
+            target = sw_type_info.early_bound(entity, "ISketchSegment")
         selected = self._adapter._attempt(
-            lambda: bool(seg.Select4(append, None)),
+            lambda: bool(target.Select4(append, None)),
             default=False,
         )
         if selected:
             return True
 
         selected = self._adapter._attempt(
-            lambda: bool(seg.Select2(append, 0)),
+            lambda: bool(target.Select2(append, 0)),
             default=False,
         )
         if selected:
@@ -592,7 +612,7 @@ class _SketchGeometryService:
 
         return bool(
             self._adapter._attempt(
-                lambda: bool(seg.Select(append)),
+                lambda: bool(target.Select(append)),
                 default=False,
             )
         )
