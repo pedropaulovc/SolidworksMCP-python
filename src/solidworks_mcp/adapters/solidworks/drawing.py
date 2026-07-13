@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 # create_part/create_assembly probes in io.py).
 _SW_PREF_TEMPLATE_PART = 8
 _SW_PREF_TEMPLATE_DRAWING = 10
-_SW_DOC_DRAWING = 3  # swDocumentTypes_e.swDocDRAWING
 
 # --- swconst values used below (documented inline; this module stays free of a
 # hard dependency on the generated swconst wrapper so it imports on any seat). --
