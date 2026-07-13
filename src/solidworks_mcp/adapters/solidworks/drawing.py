@@ -370,7 +370,6 @@ def place_view(
     ``x``/``y`` are the view-center position on the sheet, in METERS.
     ``scale`` (num, den) overrides the sheet scale for this view.
     """
-    draw = _draw(adapter)
     view = adapter._attempt(
         lambda: _ddoc(adapter).CreateDrawViewFromModelView3(
             model_path, view_name, float(x), float(y), 0.0
@@ -410,7 +409,6 @@ def iter_views(adapter: Any):
     ``GetFirstView`` returns the sheet itself; the first ``GetNextView`` is the
     first actual drawing view, so we skip the sheet and iterate from there.
     """
-    draw = _draw(adapter)
     node = adapter._attempt(lambda: _ddoc(adapter).GetFirstView())  # the sheet
     if not node:
         return
