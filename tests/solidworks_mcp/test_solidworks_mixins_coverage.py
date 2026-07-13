@@ -145,6 +145,11 @@ class TestSolidWorksIOMixinNotConnected:
                 return "Default"
 
         model = MagicMock()
+        # No real COM dispatch: a None _oleobj_ makes _bind_document's
+        # early_bound() pass the mock through unchanged, so the stubbed
+        # GetActiveConfiguration below is what open_model reads (an early-bound
+        # re-wrap would instead InvokeTypes on the mock and lose the stub).
+        model._oleobj_ = None
         model.GetActiveConfiguration.return_value = _Cfg()
         app = MagicMock()
         app.OpenDoc6.return_value = (model, 0, 2)

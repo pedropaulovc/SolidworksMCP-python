@@ -348,6 +348,10 @@ def test_early_bound_fallback_forwards_off_interface_members(monkeypatch) -> Non
     must forward undeclared members to a late-bound dispatch on the same
     object instead of raising AttributeError.
     """
+    # The fallback path (and this test's monkeypatch of its Dispatch) needs
+    # pywin32; skip on platforms without it (e.g. the Linux mock-only CI).
+    pytest.importorskip("win32com.client.dynamic")
+
     from solidworks_mcp.adapters import sw_type_info
 
     class _FakeLate:
