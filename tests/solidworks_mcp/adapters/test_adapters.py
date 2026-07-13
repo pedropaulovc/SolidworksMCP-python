@@ -1732,12 +1732,12 @@ class TestPyWin32AdapterBranches:
     async def test_zoom_to_fit_calls_view_zoom_to_fit2_success(
         self, monkeypatch
     ) -> None:
-        """_zoom_to_fit should call ViewZoomToFit2 and succeed."""
+        """_zoom_to_fit should call ViewZoomtofit2 and succeed."""
         adapter = self._build_adapter(monkeypatch)
         active_view = SimpleNamespace(ZoomToFit=Mock())
-        target_doc = SimpleNamespace(ViewZoomToFit2=Mock(), ActiveView=active_view)
+        target_doc = SimpleNamespace(ViewZoomtofit2=Mock(), ActiveView=active_view)
         adapter._zoom_to_fit(target_doc)
-        target_doc.ViewZoomToFit2.assert_called_once()
+        target_doc.ViewZoomtofit2.assert_called_once()
         active_view.ZoomToFit.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1748,11 +1748,11 @@ class TestPyWin32AdapterBranches:
         adapter = self._build_adapter(monkeypatch)
         active_view = SimpleNamespace(ZoomToFit=Mock())
         target_doc = SimpleNamespace(
-            ViewZoomToFit2=Mock(side_effect=RuntimeError("COM error")),
+            ViewZoomtofit2=Mock(side_effect=RuntimeError("COM error")),
             ActiveView=active_view,
         )
         adapter._zoom_to_fit(target_doc)
-        assert target_doc.ViewZoomToFit2.called
+        assert target_doc.ViewZoomtofit2.called
         assert active_view.ZoomToFit.called
 
     @pytest.mark.asyncio
@@ -1765,11 +1765,11 @@ class TestPyWin32AdapterBranches:
             ZoomToFit=Mock(side_effect=RuntimeError("COM error"))
         )
         target_doc = SimpleNamespace(
-            ViewZoomToFit2=Mock(side_effect=RuntimeError("COM error")),
+            ViewZoomtofit2=Mock(side_effect=RuntimeError("COM error")),
             ActiveView=active_view,
         )
         adapter._zoom_to_fit(target_doc)
-        assert target_doc.ViewZoomToFit2.called
+        assert target_doc.ViewZoomtofit2.called
         assert active_view.ZoomToFit.called
 
     def test_save_screenshot_with_savebmp_bmp_direct(
@@ -2168,7 +2168,7 @@ class TestPyWin32AdapterBranches:
         target_doc = SimpleNamespace(
             SaveBMP=Mock(side_effect=_save_bmp),
             ShowNamedView2=Mock(),
-            ViewZoomToFit2=Mock(),
+            ViewZoomtofit2=Mock(),
         )
         adapter.currentModel = target_doc
         adapter.swApp = SimpleNamespace(
@@ -2192,7 +2192,7 @@ class TestPyWin32AdapterBranches:
         assert result.data["dimensions"] == "640x480"
         assert result.data["view"] == "front"
         target_doc.ShowNamedView2.assert_called_once_with("", 1)
-        target_doc.ViewZoomToFit2.assert_called_once()
+        target_doc.ViewZoomtofit2.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_export_image_current_preserves_viewport(
@@ -2209,7 +2209,7 @@ class TestPyWin32AdapterBranches:
         target_doc = SimpleNamespace(
             SaveBMP=Mock(side_effect=_save_bmp),
             ShowNamedView2=Mock(),
-            ViewZoomToFit2=Mock(),
+            ViewZoomtofit2=Mock(),
         )
         adapter.currentModel = target_doc
         adapter.swApp = SimpleNamespace(
@@ -2229,7 +2229,7 @@ class TestPyWin32AdapterBranches:
 
         assert result.is_success
         target_doc.ShowNamedView2.assert_not_called()
-        target_doc.ViewZoomToFit2.assert_not_called()
+        target_doc.ViewZoomtofit2.assert_not_called()
 
     def test_prepare_stl_export_data_paths(self, monkeypatch) -> None:
         """_prepare_stl_export_data should handle missing app, missing data, and success."""

@@ -2669,14 +2669,9 @@ def _check_sketch_fully_defined_impl(
         # speculative attribute probes below remain only as a fallback for
         # builds whose type info does not expose it.
         if sketch_obj is not None:
-            try:
-                from .. import sw_type_info as _sw_type_info
-            except ImportError:
-                _sw_type_info = None  # type: ignore[assignment]
-            if _sw_type_info is not None:
-                sketch_obj = _sw_type_info.early_bound_or_flag(
-                    sketch_obj, "ISketch", "GetConstrainedStatus"
-                )
+            sketch_obj = _sw_type_info.early_bound_or_flag(
+                sketch_obj, "ISketch", "GetConstrainedStatus"
+            )
 
             # Late-bound dispatches sometimes resolve ``GetConstrainedStatus``
             # as a property instead of a method (verified live on SW 2026:
