@@ -6,6 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
+from .. import sw_type_info as _sw_type_info
 from ..base import (
     AdapterResult,
     AdapterResultStatus,
@@ -490,7 +491,8 @@ def _select_named_feature(
     """
     bare = name.split("@", 1)[0]
     feature = adapter._attempt(
-        lambda: adapter.currentModel.FeatureByName(bare), default=None
+        lambda: _sw_type_info.early_bound_doc(adapter.currentModel).FeatureByName(bare),
+        default=None,
     )
     if not feature:
         return False
@@ -1379,7 +1381,7 @@ def _resolve_feature(adapter: Any, returned: Any, names_before: set[str]) -> Any
 
 def _all_body_edges(adapter: Any) -> list[Any]:
     """Every edge of every solid body in the active model (flagged for late bind)."""
-    model = adapter.currentModel
+    model = _sw_type_info.early_bound(adapter.currentModel, "IPartDoc")  # GetBodies2
     bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
     edges: list[Any] = []
     for body in bodies:
@@ -1444,7 +1446,7 @@ def _select_edges_geometric(
 
 def _all_body_faces(adapter: Any) -> list[Any]:
     """Every face of every solid body in the active model (flagged for late bind)."""
-    model = adapter.currentModel
+    model = _sw_type_info.early_bound(adapter.currentModel, "IPartDoc")  # GetBodies2
     bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
     faces: list[Any] = []
     for body in bodies:

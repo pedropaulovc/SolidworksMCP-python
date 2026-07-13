@@ -28,6 +28,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
+from .. import sw_type_info
 from ..base import (
     AdapterResult,
     AdapterResultStatus,
@@ -467,7 +468,10 @@ def _find_component_by_name2(adapter: Any, name2: str) -> Any:
         Any: The matching ``IComponent2`` dispatch, or ``None``.
     """
     components = adapter._attempt(
-        lambda: adapter.currentModel.GetComponents(False), default=None
+        lambda: _flag_feature_methods(
+            adapter.currentModel, "IAssemblyDoc"
+        ).GetComponents(False),
+        default=None,
     )
     for component in components or []:
         if str(_read_member(component, "Name2")) == name2:
@@ -560,8 +564,8 @@ def _apply_component_transform(
     Raises:
         Exception: When the transform cannot be applied.
     """
-    model = adapter.currentModel
-    model = _flag_feature_methods(model, "IAssemblyDoc")
+    model_doc = adapter.currentModel  # IModelDoc2 — for EditRebuild3
+    model = _flag_feature_methods(model_doc, "IAssemblyDoc")  # Fix/UnfixComponent
     was_fixed = bool(_read_member(component, "IsFixed"))
     if was_fixed:
         if not _select_component(adapter, name, 0, False):
@@ -582,7 +586,7 @@ def _apply_component_transform(
 
     if not applied:
         raise Exception(f"Failed to set the transform of component {name!r}")
-    adapter._attempt(lambda: model.EditRebuild3())
+    adapter._attempt(lambda: model_doc.EditRebuild3())
     return _component_transform_array(adapter, component)
 
 
@@ -1731,7 +1735,10 @@ def _insert_belt_chain_impl(
 
         # Belt-location plane (normal to the pulley axes) -> IRefPlane.
         plane_feat = adapter._attempt(
-            lambda: model.FeatureByName(params.location_plane), default=None
+            lambda: _flag_feature_methods(model, "IAssemblyDoc").FeatureByName(
+                params.location_plane
+            ),
+            default=None,
         )
         if plane_feat is None:
             raise Exception(f"Belt-location plane not found: {params.location_plane!r}")
@@ -2043,7 +2050,10 @@ def _mate_feature_by_name(adapter: Any, name: str, model: Any = None) -> Any:
         Any: The mate feature dispatch or ``None``.
     """
     model = model or adapter.currentModel
-    feature = adapter._attempt(lambda: model.FeatureByName(name), default=None)
+    feature = adapter._attempt(
+        lambda: _flag_feature_methods(model, "IAssemblyDoc").FeatureByName(name),
+        default=None,
+    )
     if feature:
         return _flag_feature_methods(feature, "IFeature")
     for mate in _mate_group_subfeatures(adapter, model):
@@ -2150,7 +2160,12 @@ def _harvest_selected(adapter: Any, model: Any, count: int) -> list[Any]:
     Raises:
         Exception: When the selection manager or any entity does not resolve.
     """
-    sel_mgr = adapter._attempt(lambda: model.SelectionManager, default=None)
+    # ``SelectionManager`` is an ``IModelDoc2`` property; callers pass an
+    # ``IAssemblyDoc``-bound ``model``, so rebind to ``IModelDoc2`` to read it.
+    sel_mgr = adapter._attempt(
+        lambda: sw_type_info.early_bound(model, "IModelDoc2").SelectionManager,
+        default=None,
+    )
     if sel_mgr is None:
         raise Exception("SelectionManager unavailable for mate-entity harvest")
     sel_mgr = _flag_feature_methods(sel_mgr, "ISelectionMgr")
@@ -2377,7 +2392,10 @@ def _add_mate_impl(
         # rack_pinion routes here. Entities are already pre-selected above under
         # marks 64 (rack) / 128 (pinion).
         if params.mate_type == "rack_pinion":
-            mate = _create_mechanical_mate(adapter, model, params, mate_type)
+            # ``model`` stays ``IModelDoc2``; ``CreateMate*`` need ``IAssemblyDoc``.
+            mate = _create_mechanical_mate(
+                adapter, _flag_feature_methods(model, "IAssemblyDoc"), params, mate_type
+            )
             adapter._attempt(lambda: model.ClearSelection2(True), default=None)
             name = _mate_feature_name(adapter, mate)
             adapter._attempt(lambda: model.EditRebuild3())
@@ -2395,8 +2413,11 @@ def _add_mate_impl(
                 )
             return payload
 
-        model = _flag_feature_methods(model, "IAssemblyDoc")
-        mate = _create_standard_mate(adapter, model, params, mate_type)
+        # ``model`` stays ``IModelDoc2`` (for ClearSelection2/EditRebuild3);
+        # ``CreateMate*`` are ``IAssemblyDoc`` members, so pass a doc-typed handle.
+        mate = _create_standard_mate(
+            adapter, _flag_feature_methods(model, "IAssemblyDoc"), params, mate_type
+        )
         adapter._attempt(lambda: model.ClearSelection2(True), default=None)
         name = _mate_feature_name(adapter, mate)
         adapter._attempt(lambda: model.EditRebuild3())
@@ -2493,7 +2514,10 @@ def _delete_mate_impl(
         # the MateGroup-walk alternative costs ~20 s at 30 mates — an
         # O(mates) tax on every successful delete just to prove absence.
         still_there = adapter._attempt(
-            lambda: model.FeatureByName(params.name), default=None
+            lambda: _flag_feature_methods(model, "IAssemblyDoc").FeatureByName(
+                params.name
+            ),
+            default=None,
         )
         if still_there is not None:
             raise Exception(f"Mate {params.name!r} is still present after delete")
@@ -2771,7 +2795,10 @@ def _component_named_feature(adapter: Any, name: str, feature_name: str) -> Any:
     part = adapter._attempt(lambda: comp.GetModelDoc2(), default=None)
     if part is None:
         return None
-    feat = adapter._attempt(lambda p=part: p.FeatureByName(feature_name), default=None)
+    feat = adapter._attempt(
+        lambda p=part: sw_type_info.early_bound_doc(p).FeatureByName(feature_name),
+        default=None,
+    )
     if feat is None:
         return None
     mapped = adapter._attempt(lambda: comp.GetCorresponding(feat), default=None)
@@ -2808,7 +2835,10 @@ def _component_cylindrical_face(
     if part is None:
         return None
     bodies = adapter._attempt(
-        lambda: part.GetBodies2(_SW_SOLID_BODY, False), default=None
+        lambda: sw_type_info.early_bound(part, "IPartDoc").GetBodies2(
+            _SW_SOLID_BODY, False
+        ),
+        default=None,
     )
     if bodies is None:
         return None

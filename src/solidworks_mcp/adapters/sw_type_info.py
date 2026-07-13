@@ -584,6 +584,48 @@ def concrete_sketch_segment(obj: Any) -> Any:
     return early_bound(obj, interface) if interface else segment
 
 
+# swDocumentTypes_e value -> the concrete document interface that DECLARES the
+# doc-type-specific members (``FeatureByName``, ``GetComponents``,
+# ``GetFirstView`` …) that ``IModelDoc2`` does NOT. ``currentModel`` is always
+# bound to ``IModelDoc2`` (``io._bind_document``), so such a member must be
+# reached through the matching derived interface.
+_DOCUMENT_INTERFACE: dict[int, str] = {
+    1: "IPartDoc",  # swDocPART
+    2: "IAssemblyDoc",  # swDocASSEMBLY
+    3: "IDrawingDoc",  # swDocDRAWING
+}
+
+
+def early_bound_doc(obj: Any) -> Any:
+    """Re-bind a model dispatch to its concrete document interface.
+
+    ``IModelDoc2`` does not declare the doc-type-specific members
+    (``FeatureByName``, ``GetComponents``, ``GetFirstView`` …); those live on
+    ``IPartDoc`` / ``IAssemblyDoc`` / ``IDrawingDoc``. ``currentModel`` is always
+    bound to ``IModelDoc2`` (``io._bind_document``), so calling such a member on
+    it resolves through the late-bound fallback. ``IModelDoc2.GetType()`` names
+    the document type (``swDocumentTypes_e``), so this re-binds ``obj`` to the
+    matching derived interface — where the member is a declared DISPID method.
+    Non-document dispatches (or a session without the wrapper) pass through
+    unchanged.
+
+    Args:
+        obj: A pywin32 dispatch for a SolidWorks document (part/assembly/
+            drawing), typically ``adapter.currentModel`` (``IModelDoc2``) or a
+            ``IComponent2.GetModelDoc2()`` result.
+
+    Returns:
+        The model re-bound to its derived document interface, or the object
+        unchanged when the wrapper module is unavailable (mock/degraded) or the
+        document type is unknown.
+    """
+    model = early_bound(obj, "IModelDoc2")
+    if not is_early_bound(model, "IModelDoc2"):
+        return obj  # wrapper module not loaded (mock/degraded) — leave untouched
+    interface = _DOCUMENT_INTERFACE.get(int(model.GetType()))
+    return early_bound(obj, interface) if interface else model
+
+
 def early_bound_or_flag(obj: Any, interface: str, *method_names: str) -> Any:
     """Use the generated interface, or selectively flag exact fallback methods."""
     typed = early_bound(obj, interface)

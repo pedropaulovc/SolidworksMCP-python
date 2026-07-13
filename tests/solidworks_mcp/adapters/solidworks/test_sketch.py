@@ -276,6 +276,9 @@ def _make_pattern_adapter() -> tuple[_FakeSketchAdapter, Mock, Mock, Mock, Mock]
     """
     adapter = _FakeSketchAdapter()
     seed_entity = Mock()
+    # No real COM dispatch — early_bound(..., "ISketchSegment") passes it through
+    # unchanged (the mock stands in for an already-typed segment).
+    seed_entity._oleobj_ = None
     seed_entity.Select4 = Mock(return_value=True)
     adapter._sketch_entities = {"Line_1": seed_entity}
 
@@ -378,6 +381,9 @@ def _make_offset_adapter() -> tuple[_FakeSketchAdapter, Mock, Mock]:
     """
     adapter = _FakeSketchAdapter()
     seed_entity = Mock()
+    # No real COM dispatch — early_bound(..., "ISketchSegment") passes it through
+    # unchanged (the mock stands in for an already-typed segment).
+    seed_entity._oleobj_ = None
     seed_entity.Select4 = Mock(return_value=True)
     adapter._sketch_entities = {"Line_1": seed_entity}
 

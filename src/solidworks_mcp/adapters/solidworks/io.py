@@ -190,10 +190,12 @@ class SolidWorksIOMixin:
                 is_active=True,
                 configuration=config,
                 properties={
-                    "last_modified": (
-                        model.GetSaveTime()
-                        if callable(getattr(model, "GetSaveTime", None))
-                        else None
+                    # swSumInfoSaveDate2 (9). ``GetSaveTime`` is absent from the
+                    # makepy wrapper's name table (not early-bindable); ``SummaryInfo``
+                    # is a declared ``IModelDoc2`` method returning the localized
+                    # last-saved date string.
+                    "last_modified": adapter._attempt(
+                        lambda: model.SummaryInfo(9), default=None
                     ),
                 },
             )
@@ -457,7 +459,8 @@ class SolidWorksIOMixin:
             actual_plane = plane_name_map.get(params.plane, params.plane)
             selected = False
             plane_feature = adapter._attempt(
-                lambda: model.FeatureByName(actual_plane), default=None
+                lambda: _sw_type_info.early_bound_doc(model).FeatureByName(actual_plane),
+                default=None,
             )
             if plane_feature:
                 selected = bool(

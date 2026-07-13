@@ -7,6 +7,7 @@ import sys
 import time
 from typing import Any, cast
 
+from .. import sw_type_info as _sw_type_info
 from ..base import AdapterResult, AdapterResultStatus
 from ..com_variant import null_callout
 
@@ -130,6 +131,10 @@ def _resolve_origin_point(adapter: Any) -> Any:
             "Could not select the sketch origin ('Point1@Origin' as "
             "EXTSKETCHPOINT) — is a sketch active on a part document?"
         )
+    # Bind to ISketchPoint (which declares Select*/Select2/Select4 by DISPID) so a
+    # downstream origin select resolves early instead of through the fallback.
+    if _sw_type_info is not None:
+        origin_obj = _sw_type_info.early_bound(origin_obj, "ISketchPoint")
     adapter._sketch_origin_point = origin_obj
     return origin_obj
 
@@ -188,7 +193,9 @@ def _resolve_entity_ref(adapter: Any, ref: str) -> Any:
             "dispatch ('.center' needs a circle/arc/ellipse; '.start'/'.end' "
             "need a line/arc/spline)."
         )
-    return point
+    # Bind to ISketchPoint so a downstream select resolves Select*/Select2/Select4
+    # by DISPID (declared there, DISPID 25/19/7) instead of through the fallback.
+    return _sw_type_info.early_bound(point, "ISketchPoint")
 
 
 # swConstrainedStatus_e values (SolidWorks.Interop.swconst) returned by
@@ -474,7 +481,9 @@ def _create_sketch_impl(adapter: Any, plane: str) -> AdapterResult[str]:
             if not candidate:
                 continue
             plane_feature, selection_error_candidate = adapter._attempt_with_error(
-                lambda c=candidate: adapter.currentModel.FeatureByName(c)
+                lambda c=candidate: _sw_type_info.early_bound_doc(
+                    adapter.currentModel
+                ).FeatureByName(c)
             )
             if selection_error_candidate:
                 selection_error = selection_error_candidate
@@ -1702,13 +1711,24 @@ def _select_sketch_entities(adapter: Any, entity_ids: list[str], mark: int) -> N
         # original Select4 path.
         if isinstance(entity, (list, tuple)):
             for segment in entity:
-                ok = segment.Select4(True, select_data)
+                # ``Select2``/``Select4`` live on ``ISketchSegment`` (and
+                # ``IEntity``); a registered single segment is rebound to a
+                # DERIVED ``ISketchArc``/``ISketchLine`` (which declares neither),
+                # and a polygon-group element is an un-rebound raw dispatch — so
+                # bind to ``ISketchSegment`` for the DISPID-fast select. (NOT
+                # ``IEntity``: its ``Select4`` DISPID 65556 collides with
+                # ``ISketchSegment.Select2``.)
+                ok = _sw_type_info.early_bound(segment, "ISketchSegment").Select4(
+                    True, select_data
+                )
                 if not ok:
                     raise Exception(
                         f"Failed to select segment of sketch entity '{ent_id}'"
                     )
         else:
-            ok = entity.Select4(True, select_data)
+            ok = _sw_type_info.early_bound(entity, "ISketchSegment").Select4(
+                True, select_data
+            )
             if not ok:
                 raise Exception(f"Failed to select sketch entity '{ent_id}'")
 
@@ -2610,7 +2630,10 @@ def _check_sketch_fully_defined_impl(
 
         if sketch_name:
             sketch_feature = adapter._attempt(
-                lambda: adapter.currentModel.FeatureByName(sketch_name), default=None
+                lambda: _sw_type_info.early_bound_doc(
+                    adapter.currentModel
+                ).FeatureByName(sketch_name),
+                default=None,
             )
             if not sketch_feature:
                 raise Exception(f"Sketch not found: {sketch_name}")
@@ -2629,9 +2652,9 @@ def _check_sketch_fully_defined_impl(
             )
             if sketch_obj is None and adapter._last_sketch_name:
                 sketch_feature = adapter._attempt(
-                    lambda: adapter.currentModel.FeatureByName(
-                        adapter._last_sketch_name
-                    ),
+                    lambda: _sw_type_info.early_bound_doc(
+                        adapter.currentModel
+                    ).FeatureByName(adapter._last_sketch_name),
                     default=None,
                 )
                 sketch_obj = adapter._attempt(
@@ -2652,14 +2675,9 @@ def _check_sketch_fully_defined_impl(
         # speculative attribute probes below remain only as a fallback for
         # builds whose type info does not expose it.
         if sketch_obj is not None:
-            try:
-                from .. import sw_type_info as _sw_type_info
-            except ImportError:
-                _sw_type_info = None  # type: ignore[assignment]
-            if _sw_type_info is not None:
-                sketch_obj = _sw_type_info.early_bound_or_flag(
-                    sketch_obj, "ISketch", "GetConstrainedStatus"
-                )
+            sketch_obj = _sw_type_info.early_bound_or_flag(
+                sketch_obj, "ISketch", "GetConstrainedStatus"
+            )
 
             # Late-bound dispatches sometimes resolve ``GetConstrainedStatus``
             # as a property instead of a method (verified live on SW 2026:
