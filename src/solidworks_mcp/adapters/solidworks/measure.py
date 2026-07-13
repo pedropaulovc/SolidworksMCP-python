@@ -210,9 +210,9 @@ def _measure_impl(
             try:
                 calculated = bool(measure.Calculate(None))
             except Exception:
-                from ..com_variant import null_dispatch
+                from ..com_variant import null_variant
 
-                calculated = bool(measure.Calculate(null_dispatch()))
+                calculated = bool(measure.Calculate(null_variant()))
             if not calculated:
                 raise Exception(
                     "Measure failed: invalid combination of selected entities"

@@ -37,6 +37,34 @@ def null_dispatch() -> Any:
     return None
 
 
+def null_variant() -> Any:
+    """Return the null value for an optional ``System.object`` (VT_VARIANT) param.
+
+    Unlike :func:`null_dispatch` (for a typed ``(9,x)`` ``VT_DISPATCH``
+    object-pointer, where early-bound ``InvokeTypes`` wants a bare ``None``),
+    this is for a param the type library declares as ``(12,x)`` **VT_VARIANT** —
+    ``IEquationMgr::Add3``'s ``ConfigNames``, ``IFeature::SetSuppression2``'s
+    ``Config_names``, ``IMeasure::Calculate``'s ``Entities`` (all "unused /
+    use-selection" when null). For a VT_VARIANT slot pywin32 honors an explicit
+    ``VARIANT`` wrapper, whereas a bare ``None`` marshals as ``VT_NULL`` and the
+    call misbehaves (a silently-unset equation / suppression) — so the
+    ``VARIANT(VT_DISPATCH, None)`` form is REQUIRED here under BOTH binding
+    modes, the opposite of :func:`null_dispatch`.
+
+    Returns:
+        Any: ``VARIANT(VT_DISPATCH, None)`` on Windows with pywin32 available;
+        plain ``None`` as a fallback otherwise (CI never reaches a real COM
+        boundary).
+    """
+    try:
+        import pythoncom
+        from win32com.client import VARIANT
+
+        return VARIANT(pythoncom.VT_DISPATCH, None)
+    except Exception:
+        return None
+
+
 def null_callout() -> Any:
     """Return a typed-null ``Callout`` argument for ``SelectByID2``.
 

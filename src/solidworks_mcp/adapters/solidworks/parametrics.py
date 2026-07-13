@@ -19,7 +19,7 @@ from ..base import (
     CreateEquationParameters,
     SetGlobalVariableParameters,
 )
-from ..com_variant import bstr_array, null_dispatch
+from ..com_variant import bstr_array, null_variant
 from .features import _flag_feature_methods, _read_member
 
 # swInConfigurationOpts_e
@@ -128,7 +128,7 @@ def _configuration_scope(configuration: str) -> tuple[int, Any]:
     """
     if configuration:
         return _SPECIFY_CONFIGURATION, bstr_array([configuration])
-    return _ALL_CONFIGURATIONS, null_dispatch()
+    return _ALL_CONFIGURATIONS, null_variant()
 
 
 def _equation_index_by_lhs(manager: Any, lhs: str) -> int:

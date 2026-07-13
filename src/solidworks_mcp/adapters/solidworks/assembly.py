@@ -53,6 +53,7 @@ from ..com_variant import (
     dispatch_array,
     double_array,
     null_callout,
+    null_variant,
 )
 from .features import (
     _feature_names,
@@ -2573,7 +2574,7 @@ def _suppress_mate_impl(
         if params.configuration:
             which, names = _SPECIFY_CONFIGURATION, bstr_array([params.configuration])
         else:
-            which, names = _ALL_CONFIGURATIONS, null_callout()
+            which, names = _ALL_CONFIGURATIONS, null_variant()
         adapter._attempt(
             lambda: feature.SetSuppression2(action, which, names),
             default=False,
