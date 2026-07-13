@@ -25,8 +25,8 @@ spring free angle is degrees (converted to radians).
 The Motion interfaces live in the SwMotionStudy type library, not
 sldworks.tlb, so ``sw_type_info.flag_methods`` does not cover them. Their
 zero-argument methods (``Activate``, ``Calculate``, ``CreateMotionStudy``)
-are flagged here directly via ``_FlagAsMethod`` so pywin32 invokes them
-instead of mis-resolving them as properties.
+use the cached exact-name fallback in ``sw_type_info.flag_method_names`` so
+pywin32 invokes them instead of mis-resolving them as properties.
 """
 
 from __future__ import annotations
@@ -211,26 +211,16 @@ def _flag_motion_methods(obj: Any) -> None:
     and pywin32 resolves them as *property gets* — ``study.Calculate()`` then
     fails with ``TypeError: 'bool' object is not callable`` (the propget runs
     the method, returns its bool, and Python tries to call the bool).
-    ``_FlagAsMethod`` forces method dispatch.
+    Exact-name flagging forces method dispatch.
 
-    Each name is flagged **individually**: ``_FlagAsMethod`` does a
-    ``GetIDsOfNames`` round-trip per name, so passing a name the object does
-    not expose (e.g. a manager-only name to a study dispatch) raises and would
-    abort a single multi-name call, leaving the valid names — including
-    ``Calculate`` — unflagged. Per-name try/except mirrors
-    ``sw_type_info.flag_methods``.
+    Each name is flagged individually and cached by ``flag_method_names``;
+    unavailable manager-only/study-only names are skipped without preventing
+    valid names such as ``Calculate`` from being registered.
 
     Args:
         obj: A Motion COM dispatch (manager or study).
     """
-    flag = getattr(obj, "_FlagAsMethod", None)
-    if flag is None:
-        return
-    for name in _MOTION_METHODS:
-        try:
-            flag(name)
-        except Exception:  # noqa: BLE001 - name not on this dispatch; skip
-            pass
+    sw_type_info.flag_method_names(obj, *_MOTION_METHODS)
 
 
 def _motion_manager(adapter: Any) -> Any:
@@ -748,12 +738,9 @@ def _restore_sw_window(adapter: Any) -> None:
     if not hasattr(win32gui, "ShowWindow"):
         return
     try:
-        frame = adapter.swApp.Frame()
-        for name in ("GetHWndx64", "GetHWnd"):
-            try:
-                frame._FlagAsMethod(name)
-            except Exception:  # noqa: BLE001
-                pass
+        frame = sw_type_info.early_bound_or_flag(
+            adapter.swApp.Frame(), "IFrame", "GetHWndx64", "GetHWnd"
+        )
         try:
             hwnd = int(frame.GetHWndx64())
         except Exception:  # noqa: BLE001

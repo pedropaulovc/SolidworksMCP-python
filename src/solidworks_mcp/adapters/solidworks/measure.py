@@ -196,11 +196,11 @@ def _measure_impl(
             _select_measure_entities(adapter, params)
 
             extension = adapter.currentModel.Extension
-            _flag_feature_methods(extension, "IModelDocExtension")
+            extension = _flag_feature_methods(extension, "IModelDocExtension")
             measure = extension.CreateMeasure()
             if measure is None:
                 raise Exception("Failed to create the measure tool")
-            _flag_feature_methods(measure, "IMeasure")
+            measure = _flag_feature_methods(measure, "IMeasure")
 
             measure.ArcOption = arc_option
             # Calculate(NULL) measures the current selection. Bare None

@@ -90,8 +90,8 @@ def _resolve_origin_point(adapter: Any) -> Any:
     except ImportError:
         _sw_type_info = None  # type: ignore[assignment]
     if _sw_type_info is not None:
-        adapter._attempt(
-            lambda: _sw_type_info.flag_methods(model, "IModelDoc2"), default=0
+        model = _sw_type_info.early_bound_or_flag(
+            model, "IModelDoc2", "ClearSelection2"
         )
 
     ext = adapter._attempt(lambda: model.Extension, default=None)
@@ -99,11 +99,11 @@ def _resolve_origin_point(adapter: Any) -> Any:
     if ext is None or sel_mgr is None:
         raise Exception("Active model has no Extension/SelectionManager")
     if _sw_type_info is not None:
-        adapter._attempt(
-            lambda: _sw_type_info.flag_methods(ext, "IModelDocExtension"), default=0
+        ext = _sw_type_info.early_bound_or_flag(
+            ext, "IModelDocExtension", "SelectByID2"
         )
-        adapter._attempt(
-            lambda: _sw_type_info.flag_methods(sel_mgr, "ISelectionMgr"), default=0
+        sel_mgr = _sw_type_info.early_bound_or_flag(
+            sel_mgr, "ISelectionMgr", "GetSelectedObject6"
         )
 
     origin_obj = None
@@ -175,12 +175,11 @@ def _resolve_entity_ref(adapter: Any, ref: str) -> Any:
     except ImportError:
         _sw_type_info = None  # type: ignore[assignment]
     if _sw_type_info is not None:
-        adapter._attempt(
-            lambda: _sw_type_info.flag_methods(
-                entity, "ISketchArc", "ISketchLine", "ISketchEllipse", "ISketchSpline"
-            ),
-            default=0,
-        )
+        # Registry entries can be lines, arcs, ellipses, or splines.  Their
+        # point methods use interface-specific DISPIDs, so wrapping an
+        # unknown segment as the wrong generated class is unsafe.  Exact-name
+        # flagging is the correct fallback for this heterogeneous dispatch.
+        _sw_type_info.flag_method_names(entity, accessor)
     point = adapter._attempt(lambda: getattr(entity, accessor)(), default=None)
     if point is None:
         raise Exception(
@@ -1187,17 +1186,18 @@ def _add_sketch_constraint_impl(
         except ImportError:
             _sw_type_info = None  # type: ignore[assignment]
         if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(adapter.currentModel, "IModelDoc2"),
-                default=0,
+            model = _sw_type_info.early_bound_or_flag(
+                adapter.currentModel, "IModelDoc2", "GetActiveSketch2"
             )
+        else:
+            model = adapter.currentModel
 
         # Prefer the method-flagged ``currentModel`` dispatch (flagged just
         # above); a bare ``swApp.ActiveDoc`` is unflagged, so on a drifted
         # gen_py cache its ``GetActiveSketch2`` raises ``Member not found``
         # or resolves non-callable and yields ``None`` (issue #29).
         active_sketch = adapter._attempt(
-            lambda: adapter.currentModel.GetActiveSketch2(), default=None
+            lambda: model.GetActiveSketch2(), default=None
         ) or adapter._attempt(
             lambda: adapter.swApp.ActiveDoc.GetActiveSketch2(), default=None
         )
@@ -1206,20 +1206,9 @@ def _add_sketch_constraint_impl(
                 "No active sketch on the model — create_sketch first or "
                 "open the existing sketch for edit."
             )
-        if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(active_sketch, "ISketch"),
-                default=0,
-            )
-
         relmgr = adapter._attempt(lambda: active_sketch.RelationManager, default=None)
         if relmgr is None:
             raise Exception("Active sketch has no RelationManager")
-        if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(relmgr, "ISketchRelationManager"),
-                default=0,
-            )
 
         # pywin32 won't auto-marshal a Python list of CDispatch entities to a
         # SAFEARRAY — the VT_ARRAY|VT_DISPATCH variant is the shape SolidWorks
@@ -1689,9 +1678,8 @@ def _select_sketch_entities(adapter: Any, entity_ids: list[str], mark: int) -> N
 
     sel_mgr = adapter.currentModel.SelectionManager
     if _sw_type_info is not None:
-        adapter._attempt(
-            lambda: _sw_type_info.flag_methods(sel_mgr, "ISelectionMgr"),
-            default=0,
+        sel_mgr = _sw_type_info.early_bound_or_flag(
+            sel_mgr, "ISelectionMgr", "CreateSelectData"
         )
     select_data = sel_mgr.CreateSelectData()
     select_data.Mark = mark
@@ -1986,14 +1974,9 @@ def _sketch_circular_pattern_impl(
                 # type — without this, an ellipse seed silently resolves
                 # GetCenterPoint as a property and the pattern is laid out
                 # at a bogus 1 mm radius.
-                adapter._attempt(
-                    lambda: _sw_type_info.flag_methods(
-                        first_entity,
-                        "ISketchArc",
-                        "ISketchEllipse",
-                    ),
-                    default=0,
-                )
+                # The registry does not retain whether this dispatch is an
+                # ISketchArc or ISketchEllipse; their DISPIDs need not match.
+                _sw_type_info.flag_method_names(first_entity, "GetCenterPoint")
                 point = adapter._attempt(lambda: first_entity.GetCenterPoint())
                 if point is not None and hasattr(point, "__len__") and len(point) >= 2:
                     seed_xy = (float(point[0]) * 1000.0, float(point[1]) * 1000.0)
@@ -2375,15 +2358,16 @@ def _exit_sketch_impl(adapter: Any) -> AdapterResult[None]:
         # and SW returns ``Member not found`` — the same root cause as
         # the cross-thread bugs in runbook #5.
         if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(adapter.currentModel, "IModelDoc2"),
-                default=0,
+            model = _sw_type_info.early_bound_or_flag(
+                adapter.currentModel, "IModelDoc2", "GetActiveSketch2"
             )
+        else:
+            model = adapter.currentModel
 
         # Flagged ``currentModel`` first; unflagged ``ActiveDoc`` only as a
         # fallback (issue #29 — gencache-state-dependent ``Member not found``).
         sw_active = adapter._attempt(
-            lambda: adapter.currentModel.GetActiveSketch2()
+            lambda: model.GetActiveSketch2()
         ) or adapter._attempt(lambda: adapter.swApp.ActiveDoc.GetActiveSketch2())
         adapter_active = adapter.currentSketchManager
 
@@ -2400,9 +2384,8 @@ def _exit_sketch_impl(adapter: Any) -> AdapterResult[None]:
         # for the SW-only state case.
         sketch_manager = adapter_active or adapter.currentModel.SketchManager
         if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(sketch_manager, "ISketchManager"),
-                default=0,
+            sketch_manager = _sw_type_info.early_bound_or_flag(
+                sketch_manager, "ISketchManager", "InsertSketch"
             )
         sketch_manager.InsertSketch(True)
         adapter.currentSketch = None
@@ -2673,9 +2656,8 @@ def _check_sketch_fully_defined_impl(
             except ImportError:
                 _sw_type_info = None  # type: ignore[assignment]
             if _sw_type_info is not None:
-                adapter._attempt(
-                    lambda: _sw_type_info.flag_methods(sketch_obj, "ISketch"),
-                    default=0,
+                sketch_obj = _sw_type_info.early_bound_or_flag(
+                    sketch_obj, "ISketch", "GetConstrainedStatus"
                 )
 
             # Late-bound dispatches sometimes resolve ``GetConstrainedStatus``
@@ -2810,13 +2792,14 @@ def _get_over_defining_relations_impl(adapter: Any) -> AdapterResult[dict[str, A
         except ImportError:
             _sw_type_info = None  # type: ignore[assignment]
         if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(adapter.currentModel, "IModelDoc2"),
-                default=0,
+            model = _sw_type_info.early_bound_or_flag(
+                adapter.currentModel, "IModelDoc2", "GetActiveSketch2"
             )
+        else:
+            model = adapter.currentModel
 
         active_sketch = adapter._attempt(
-            lambda: adapter.currentModel.GetActiveSketch2(), default=None
+            lambda: model.GetActiveSketch2(), default=None
         ) or adapter._attempt(
             lambda: adapter.swApp.ActiveDoc.GetActiveSketch2(), default=None
         )
@@ -2826,18 +2809,16 @@ def _get_over_defining_relations_impl(adapter: Any) -> AdapterResult[dict[str, A
                 "open the existing sketch for edit."
             )
         if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(active_sketch, "ISketch"),
-                default=0,
+            active_sketch = _sw_type_info.early_bound_or_flag(
+                active_sketch, "ISketch"
             )
 
         relmgr = adapter._attempt(lambda: active_sketch.RelationManager, default=None)
         if relmgr is None:
             raise Exception("Active sketch has no RelationManager")
         if _sw_type_info is not None:
-            adapter._attempt(
-                lambda: _sw_type_info.flag_methods(relmgr, "ISketchRelationManager"),
-                default=0,
+            relmgr = _sw_type_info.early_bound_or_flag(
+                relmgr, "ISketchRelationManager", "GetRelations"
             )
 
         raw = adapter._attempt(
@@ -2848,11 +2829,9 @@ def _get_over_defining_relations_impl(adapter: Any) -> AdapterResult[dict[str, A
             if relation is None:  # API docs: array members may be NULL
                 continue
             if _sw_type_info is not None:
-                adapter._attempt(
-                    lambda r=relation: _sw_type_info.flag_methods(r, "ISketchRelation"),
-                    default=0,
+                relation = _sw_type_info.early_bound_or_flag(
+                    relation, "ISketchRelation", "GetRelationType"
                 )
-
             def _relation_type(r: Any = relation) -> Any:
                 member = getattr(r, "GetRelationType", None)
                 return member() if callable(member) else member

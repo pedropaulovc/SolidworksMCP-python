@@ -112,8 +112,7 @@ def _equation_manager(adapter: Any) -> Any:
     )
     if manager is None:
         raise Exception("Equation manager unavailable on the active model")
-    _flag_feature_methods(manager, "IEquationMgr")
-    return manager
+    return _flag_feature_methods(manager, "IEquationMgr")
 
 
 def _configuration_scope(configuration: str) -> tuple[int, Any]:
@@ -377,7 +376,7 @@ def _create_configuration_impl(
         )
         if manager is None:
             raise Exception("Configuration manager unavailable on the active model")
-        _flag_feature_methods(manager, "IConfigurationManager")
+        manager = _flag_feature_methods(manager, "IConfigurationManager")
 
         configuration = manager.AddConfiguration2(
             params.name,

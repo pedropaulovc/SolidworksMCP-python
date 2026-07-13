@@ -456,12 +456,12 @@ def _get_component(adapter: Any, name: str) -> Any:
     """
     bare = name.split("@", 1)[0]
     model = adapter.currentModel
-    _flag_feature_methods(model, "IAssemblyDoc")
+    model = _flag_feature_methods(model, "IAssemblyDoc")
     component = adapter._attempt(lambda: model.GetComponentByName(bare), default=None)
     if component is None:
         component = _find_component_by_name2(adapter, bare)
     if component:
-        _flag_feature_methods(component, "IComponent2")
+        component = _flag_feature_methods(component, "IComponent2")
     return component
 
 
@@ -533,7 +533,7 @@ def _create_math_transform(adapter: Any, array16: list[float]) -> Any:
     utility = adapter._attempt(lambda: adapter.swApp.GetMathUtility(), default=None)
     if utility is None:
         raise Exception("Failed to get the SolidWorks math utility")
-    _flag_feature_methods(utility, "IMathUtility")
+    utility = _flag_feature_methods(utility, "IMathUtility")
     # The array MUST be a typed VT_ARRAY|VT_R8 VARIANT: a plain list marshals
     # as VT_ARRAY|VT_VARIANT, which CreateTransform silently ignores and
     # returns an identity transform instead of an error.
@@ -570,7 +570,7 @@ def _apply_component_transform(
         Exception: When the transform cannot be applied.
     """
     model = adapter.currentModel
-    _flag_feature_methods(model, "IAssemblyDoc")
+    model = _flag_feature_methods(model, "IAssemblyDoc")
     was_fixed = bool(_read_member(component, "IsFixed"))
     if was_fixed:
         if not _select_component(adapter, name, 0, False):
@@ -910,7 +910,7 @@ def _insert_component_impl(
         _preload_component_file(adapter, resolved)
 
         model = adapter.currentModel
-        _flag_feature_methods(model, "IAssemblyDoc")
+        model = _flag_feature_methods(model, "IAssemblyDoc")
         component = model.AddComponent5(
             resolved,
             0,  # swAddComponentConfigOptions_CurrentSelectedConfig
@@ -926,7 +926,7 @@ def _insert_component_impl(
                 f"AddComponent5 failed for {resolved} (the file must load "
                 "cleanly and the configuration must exist)"
             )
-        _flag_feature_methods(component, "IComponent2")
+        component = _flag_feature_methods(component, "IComponent2")
         name = _component_name(adapter, component, os.path.basename(resolved))
 
         rotation = _euler_xyz_matrix(params.rotation)
@@ -1029,7 +1029,7 @@ def _replace_component_impl(
         adapter._attempt(lambda: model.ClearSelection2(True), default=None)
         if not _select_component(adapter, name, 0, False):
             raise Exception(f"Failed to select component: {name!r}")
-        _flag_feature_methods(model, "IAssemblyDoc")
+        model = _flag_feature_methods(model, "IAssemblyDoc")
         config_choice = (
             _REPLACE_CONFIG_MANUALLY_SELECT
             if params.configuration
@@ -1211,7 +1211,7 @@ def _set_component_fixed_impl(
         adapter._attempt(lambda: model.ClearSelection2(True), default=None)
         if not _select_component(adapter, name, 0, False):
             raise Exception(f"Failed to select component: {name!r}")
-        _flag_feature_methods(model, "IAssemblyDoc")
+        model = _flag_feature_methods(model, "IAssemblyDoc")
         if fixed:
             adapter._attempt(lambda: model.FixComponent(), default=None)
         else:
@@ -1298,7 +1298,7 @@ def _pattern_components_linear_impl(
                 )
 
         feature_manager = adapter.currentModel.FeatureManager
-        _flag_feature_methods(feature_manager, "IFeatureManager")
+        feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
         names_before = _feature_names(adapter)
         feature = feature_manager.FeatureLinearPattern5(
             int(params.count),  # Num1 (incl. seed)
@@ -1404,7 +1404,7 @@ def _pattern_components_circular_impl(
 
         spacing_rad = _math.radians(float(params.angle))
         feature_manager = adapter.currentModel.FeatureManager
-        _flag_feature_methods(feature_manager, "IFeatureManager")
+        feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
         names_before = _feature_names(adapter)
         feature = feature_manager.FeatureCircularPattern5(
             int(params.count),  # Number (incl. seed)
@@ -1537,7 +1537,7 @@ def _pattern_components_chain_impl(
                 sel(_qualify_entity_name(adapter, params.group2_plane), "PLANE", 32768, True)
 
         fm = model.FeatureManager
-        _flag_feature_methods(fm, "IFeatureManager")
+        fm = _flag_feature_methods(fm, "IFeatureManager")
         names_before = _feature_names(adapter)
         # FeatureChainPattern(PitchMethod, FlipDirection, FillPath, Number,
         #   Spacing, GroupOneFlipPlane, GroupTwoChain, GroupTwoFlipPlane,
@@ -1599,24 +1599,31 @@ def _pulley_cylinder_face(adapter: Any, component: Any, axis_index: int) -> Any:
     """
     from .. import sw_type_info
 
-    sw_type_info.flag_methods(component, "IComponent2")
-    body = adapter._attempt(lambda: component.GetBody(), default=None)
+    component = sw_type_info.early_bound_or_flag(
+        component, "IComponent2", "GetBody"
+    )
+    body = adapter._attempt(lambda: _read_member(component, "GetBody"), default=None)
     if body is None:
         return None
-    sw_type_info.flag_methods(body, "IBody2")
-    faces = adapter._attempt(lambda: body.GetFaces(), default=None) or []
+    body = sw_type_info.early_bound_or_flag(body, "IBody2", "GetFaces")
+    faces = adapter._attempt(lambda: _read_member(body, "GetFaces"), default=None) or []
     best_face = None
     best_radius = -1.0
     for face in faces:
+        face = sw_type_info.early_bound_or_flag(face, "IFace2", "GetSurface")
         surf = adapter._attempt(
-            lambda f=face: sw_type_info.flagged(f, "IFace2").GetSurface(), default=None
+            lambda f=face: _read_member(f, "GetSurface"), default=None
         )
         if surf is None:
             continue
-        sw_type_info.flag_methods(surf, "ISurface")
-        if not adapter._attempt(lambda s=surf: s.IsCylinder(), default=False):
+        surf = sw_type_info.early_bound_or_flag(
+            surf, "ISurface", "IsCylinder"
+        )
+        if not adapter._attempt(
+            lambda s=surf: _read_member(s, "IsCylinder"), default=False
+        ):
             continue
-        cyl = adapter._attempt(lambda s=surf: s.CylinderParams, default=None)
+        cyl = adapter._attempt(lambda s=surf: _read_member(s, "CylinderParams"), default=None)
         if not cyl:
             continue
         if abs(cyl[axis_index]) > 0.9 and cyl[6] > best_radius:
@@ -1702,10 +1709,11 @@ def _insert_belt_chain_impl(
                 )
                 if not selected:
                     raise Exception(f"Pulley member axis not found: {qualified!r}")
+                typed_selmgr = sw_type_info.early_bound_or_flag(
+                    selmgr, "ISelectionMgr", "GetSelectedObject6"
+                )
                 entity = adapter._attempt(
-                    lambda: sw_type_info.flagged(
-                        selmgr, "ISelectionMgr"
-                    ).GetSelectedObject6(1, -1),
+                    lambda sm=typed_selmgr: sm.GetSelectedObject6(1, -1),
                     default=None,
                 )
                 if entity is None:
@@ -1731,8 +1739,11 @@ def _insert_belt_chain_impl(
         )
         if plane_feat is None:
             raise Exception(f"Belt-location plane not found: {params.location_plane!r}")
+        plane_feat = sw_type_info.early_bound_or_flag(
+            plane_feat, "IFeature", "GetSpecificFeature2"
+        )
         ref_plane = adapter._attempt(
-            lambda: sw_type_info.flagged(plane_feat, "IFeature").GetSpecificFeature2(),
+            lambda: _read_member(plane_feat, "GetSpecificFeature2"),
             default=None,
         )
         if ref_plane is None:
@@ -1741,7 +1752,7 @@ def _insert_belt_chain_impl(
             )
 
         fm = model.FeatureManager
-        _flag_feature_methods(fm, "IFeatureManager")
+        fm = _flag_feature_methods(fm, "IFeatureManager")
         data = adapter._attempt(
             lambda: fm.CreateDefinition(_SW_FM_BELT_AND_CHAIN), default=None
         )
@@ -1846,10 +1857,8 @@ def _verify_belt_mate_diameters(adapter: Any, diameters_m: list[float]) -> None:
         param = adapter._attempt(lambda f=feat, d=dname: f.Parameter(d), default=None)
         if param is None:
             break
-        value = adapter._attempt(
-            lambda p=param: sw_type_info.flagged(p, "IDimension").SystemValue,
-            default=None,
-        )
+        param = sw_type_info.early_bound_or_flag(param, "IDimension")
+        value = adapter._attempt(lambda p=param: p.SystemValue, default=None)
         if value is not None:
             dims.append(float(value))
     expected = sorted(diameters_m)
@@ -1882,13 +1891,19 @@ def _blank_feature_sketches(adapter: Any, feature: Any) -> None:
     """
     from .. import sw_type_info
 
+    feature = sw_type_info.early_bound_or_flag(
+        feature, "IFeature", "GetFirstSubFeature"
+    )
     model = adapter.currentModel
     ext = model.Extension
     sub = adapter._attempt(
-        lambda: sw_type_info.flagged(feature, "IFeature").GetFirstSubFeature(),
+        lambda: _read_member(feature, "GetFirstSubFeature"),
         default=None,
     )
     while sub is not None:
+        sub = sw_type_info.early_bound_or_flag(
+            sub, "IFeature", "GetTypeName2", "GetNextSubFeature"
+        )
         type_name = _read_member(sub, "GetTypeName2")
         if type_name in ("ProfileFeature", "3DProfileFeature"):
             sk_name = str(_read_member(sub, "Name"))
@@ -1902,7 +1917,7 @@ def _blank_feature_sketches(adapter: Any, feature: Any) -> None:
                 adapter._attempt(lambda: model.BlankSketch(), default=None)
                 adapter._attempt(lambda: model.ClearSelection2(True), default=None)
         sub = adapter._attempt(
-            lambda s=sub: sw_type_info.flagged(s, "IFeature").GetNextSubFeature(),
+            lambda s=sub: _read_member(s, "GetNextSubFeature"),
             default=None,
         )
 
@@ -1997,18 +2012,18 @@ def _mate_group_subfeatures(adapter: Any, model: Any = None) -> list[Any]:
     """
     mates: list[Any] = []
     model = model or adapter.currentModel
-    _flag_feature_methods(model, "IModelDoc2")
+    model = _flag_feature_methods(model, "IModelDoc2")
     feature = _read_member(model, "FirstFeature")
     for _ in range(5000):
         if not feature:
             break
-        _flag_feature_methods(feature, "IFeature")
+        feature = _flag_feature_methods(feature, "IFeature")
         if _read_member(feature, "GetTypeName2") == "MateGroup":
             sub = _read_member(feature, "GetFirstSubFeature")
             for _ in range(5000):
                 if not sub:
                     break
-                _flag_feature_methods(sub, "IFeature")
+                sub = _flag_feature_methods(sub, "IFeature")
                 mates.append(sub)
                 sub = _read_member(sub, "GetNextSubFeature")
         feature = _read_member(feature, "GetNextFeature")
@@ -2034,8 +2049,7 @@ def _mate_feature_by_name(adapter: Any, name: str, model: Any = None) -> Any:
     model = model or adapter.currentModel
     feature = adapter._attempt(lambda: model.FeatureByName(name), default=None)
     if feature:
-        _flag_feature_methods(feature, "IFeature")
-        return feature
+        return _flag_feature_methods(feature, "IFeature")
     for mate in _mate_group_subfeatures(adapter, model):
         if str(_read_member(mate, "Name")) == name:
             return mate
@@ -2069,7 +2083,7 @@ def _mate_feature_name(adapter: Any, mate: Any) -> str:
         str: The mate feature name, or ``""`` when it cannot be resolved.
     """
     if mate is not None:
-        _flag_feature_methods(mate, "IFeature")
+        mate = _flag_feature_methods(mate, "IFeature")
         name = adapter._attempt(lambda: mate.Name, default=None)
         if name:
             return str(name)
@@ -2143,7 +2157,7 @@ def _harvest_selected(adapter: Any, model: Any, count: int) -> list[Any]:
     sel_mgr = adapter._attempt(lambda: model.SelectionManager, default=None)
     if sel_mgr is None:
         raise Exception("SelectionManager unavailable for mate-entity harvest")
-    _flag_feature_methods(sel_mgr, "ISelectionMgr")
+    sel_mgr = _flag_feature_methods(sel_mgr, "ISelectionMgr")
     entities: list[Any] = []
     for index in range(1, count + 1):
         entity = adapter._attempt(
@@ -2185,7 +2199,7 @@ def _create_standard_mate(
         raise Exception(f"CreateMateData({mate_type}) returned None for {kind} mate")
     interface = _MATE_DATA_INTERFACE.get(kind)
     if interface:
-        _flag_feature_methods(data, interface)
+        data = _flag_feature_methods(data, interface)
 
     entities = _harvest_selected(adapter, model, len(params.entities))
     if kind == "width":
@@ -2271,7 +2285,7 @@ def _create_mechanical_mate(
     data = adapter._attempt(lambda: model.CreateMateData(mate_type), default=None)
     if data is None:
         raise Exception(f"CreateMateData({mate_type}) returned None")
-    _flag_feature_methods(data, "IRackPinionMateFeatureData")
+    data = _flag_feature_methods(data, "IRackPinionMateFeatureData")
     if params.pinion_pitch_diameter:
         data.DiameterType = _RACK_PINION_PITCH_DIAMETER
         data.DiameterVal = float(params.pinion_pitch_diameter) / 1000.0
@@ -2385,7 +2399,7 @@ def _add_mate_impl(
                 )
             return payload
 
-        _flag_feature_methods(model, "IAssemblyDoc")
+        model = _flag_feature_methods(model, "IAssemblyDoc")
         mate = _create_standard_mate(adapter, model, params, mate_type)
         adapter._attempt(lambda: model.ClearSelection2(True), default=None)
         name = _mate_feature_name(adapter, mate)
@@ -2766,7 +2780,7 @@ def _component_named_feature(adapter: Any, name: str, feature_name: str) -> Any:
         return None
     mapped = adapter._attempt(lambda: comp.GetCorresponding(feat), default=None)
     if mapped is not None:
-        _flag_feature_methods(mapped, "IFeature")
+        mapped = _flag_feature_methods(mapped, "IFeature")
     return mapped
 
 
@@ -2811,15 +2825,15 @@ def _component_cylindrical_face(
     for body in bodies:
         if body is None:
             continue
-        _flag_feature_methods(body, "IBody2")
+        body = _flag_feature_methods(body, "IBody2")
         face = adapter._attempt(lambda b=body: b.GetFirstFace(), default=None)
         for _ in range(100000):
             if not face:
                 break
-            _flag_feature_methods(face, "IFace2")
+            face = _flag_feature_methods(face, "IFace2")
             surface = adapter._attempt(lambda f=face: f.GetSurface(), default=None)
             if surface is not None:
-                _flag_feature_methods(surface, "ISurface")
+                surface = _flag_feature_methods(surface, "ISurface")
                 if bool(adapter._attempt(lambda s=surface: s.IsCylinder(), default=False)):
                     cyl = adapter._attempt(
                         lambda s=surface: s.CylinderParams, default=None

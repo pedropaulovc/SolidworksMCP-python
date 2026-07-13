@@ -10,18 +10,7 @@ from solidworks_mcp.adapters.base import (
     ImportDxfDwgParameters,
 )
 from solidworks_mcp.adapters.mock_adapter import MockSolidWorksAdapter
-from solidworks_mcp.adapters.solidworks import io as io_mod
 from solidworks_mcp.adapters.solidworks.io import SolidWorksIOMixin
-
-
-@pytest.fixture(autouse=True)
-def _dispatch_propertyput(monkeypatch):
-    """Off-Windows ``pythoncom`` is a stub; give it the one constant the
-    indexed-property put needs so the closure runs the real put path."""
-    if not hasattr(io_mod.pythoncom, "DISPATCH_PROPERTYPUT"):
-        monkeypatch.setattr(
-            io_mod.pythoncom, "DISPATCH_PROPERTYPUT", 4, raising=False
-        )
 
 
 @pytest.fixture
@@ -71,25 +60,25 @@ class _FakePlane:
         return True
 
 
-class _FakeOleObj:
-    """Records DISPATCH_PROPERTYPUT Invoke calls the way pywin32 would route them."""
-
-    def __init__(self, sink):
-        self._sink = sink
-
-    def GetIDsOfNames(self, _lcid, name):
-        return {"ImportMethod": 1, "LengthUnit": 2, "ImportHatch": 3,
-                "ImportDimensions": 4, "AddSketchConstraints": 5}[name]
-
-    def Invoke(self, dispid, _lcid, _flags, _want, sheet, value):
-        self._sink[dispid] = (sheet, value)
-
-
 class _FakeImportData:
     def __init__(self):
-        self.puts: dict = {}
+        self.puts: dict[str, tuple[str, object]] = {}
         self.methods: list = []
-        self._oleobj_ = _FakeOleObj(self.puts)
+
+    def SetImportMethod(self, sheet, value):
+        self.puts["ImportMethod"] = (sheet, value)
+
+    def SetLengthUnit(self, sheet, value):
+        self.puts["LengthUnit"] = (sheet, value)
+
+    def SetImportHatch(self, sheet, value):
+        self.puts["ImportHatch"] = (sheet, value)
+
+    def SetImportDimensions(self, sheet, value):
+        self.puts["ImportDimensions"] = (sheet, value)
+
+    def SetAddSketchConstraints(self, sheet, value):
+        self.puts["AddSketchConstraints"] = (sheet, value)
 
     def SetPosition(self, sheet, positioning, x, y):
         self.methods.append(("SetPosition", sheet, positioning, x, y))
@@ -184,8 +173,8 @@ async def test_live_closure_configures_and_inserts(dxf_file):
     assert adapter.currentModel.cleared is True
     # ImportMethod=4 (existing part) and LengthUnit=0 (mm) put on the import data.
     data = adapter.import_data
-    assert data.puts[1] == ("", 4)  # ImportMethod
-    assert data.puts[2] == ("", 0)  # LengthUnit
+    assert data.puts["ImportMethod"] == ("", 4)
+    assert data.puts["LengthUnit"] == ("", 0)
     # Position (metres) + scale set through the method calls.
     assert ("SetPosition", "", 2, 0.05, 0.0275) in data.methods
     assert ("SetSheetScale", "", 0.3, 1.0) in data.methods

@@ -293,7 +293,7 @@ def _create_plane_impl(
             constraints = (_PLANE_PARALLEL, 0.0, _PLANE_COINCIDENT, 0.0, 0, 0.0)
 
         feature_manager = adapter.currentModel.FeatureManager
-        _flag_feature_methods(feature_manager, "IFeatureManager")
+        feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
         names_before = _feature_names(adapter)
         returned = feature_manager.InsertRefPlane(*constraints)
         adapter._attempt(
@@ -391,7 +391,7 @@ def _create_axis_impl(
                 )
 
         model = adapter.currentModel
-        _flag_feature_methods(model, "IModelDoc2")
+        model = _flag_feature_methods(model, "IModelDoc2")
         names_before = _feature_names(adapter)
         returned = model.InsertAxis2(True)  # AutoSize
         adapter._attempt(lambda: model.ClearSelection2(True), default=None)
@@ -555,7 +555,7 @@ def _create_reference_point_impl(
             args = (_POINT_ALONG_CURVE, along, value, count)
 
         feature_manager = adapter.currentModel.FeatureManager
-        _flag_feature_methods(feature_manager, "IFeatureManager")
+        feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
         names_before = _feature_names(adapter)
         returned = feature_manager.InsertReferencePoint(*args)
         adapter._attempt(
@@ -620,7 +620,7 @@ def _create_coordinate_system_impl(
         use_rotation = any(value != 0.0 for value in rotation_rad)
 
         feature_manager = adapter.currentModel.FeatureManager
-        _flag_feature_methods(feature_manager, "IFeatureManager")
+        feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
         names_before = _feature_names(adapter)
         returned = feature_manager.CreateCoordinateSystemUsingNumericalValues(
             True,  # UseLocation

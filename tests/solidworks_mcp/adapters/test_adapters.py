@@ -591,7 +591,7 @@ class TestPyWin32AdapterBranches:
             "solidworks_mcp.adapters.pywin32_adapter.os.path.exists",
             lambda p: True,
         )
-        model.Save3 = Mock(return_value=True)
+        model.Save3 = Mock(return_value=(True, 0, 1))
         model.SaveAs3 = Mock(return_value=True)
         model.ForceRebuild3 = Mock(return_value=True)
         model.Parameter = Mock(
@@ -874,17 +874,15 @@ class TestPyWin32AdapterBranches:
             SimpleNamespace(
                 client=SimpleNamespace(
                     GetActiveObject=Mock(side_effect=RuntimeError("no running app")),
+                    # Cold start now dispatches the ProgID and wraps it in the
+                    # generated ISldWorks class; early_bound() is a no-op on a
+                    # plain SimpleNamespace (no ``_oleobj_``), so swApp stays fake_app.
                     Dispatch=Mock(return_value=fake_app),
                     VARIANT=lambda _kind, val: val,
                 )
             ),
             raising=False,
         )
-
-        import win32com.client.dynamic as _win32_dynamic
-
-        monkeypatch.setattr(_win32_dynamic, "Dispatch", Mock(return_value=fake_app))
-
         # Standard (non-3DEXPERIENCE) install, nothing running: cold-start via COM.
         monkeypatch.setattr(
             "solidworks_mcp.adapters.pywin32_adapter.sw_install.is_solidworks_process_running",
@@ -2771,14 +2769,6 @@ class TestPyWin32AdapterBranches:
             SimpleNamespace(client=fake_client),
             raising=False,
         )
-        # Late binding goes through win32com.client.dynamic.Dispatch — must
-        # also stub it or the call will hit the real COM (which connects on
-        # any box with SolidWorks installed).
-        monkeypatch.setattr(
-            "solidworks_mcp.adapters.pywin32_adapter._dynamic_module",
-            SimpleNamespace(Dispatch=Mock(return_value=None)),
-            raising=False,
-        )
         # Standard (non-3DEXPERIENCE) install, nothing running: cold-start via COM.
         monkeypatch.setattr(
             "solidworks_mcp.adapters.pywin32_adapter.sw_install.is_solidworks_process_running",
@@ -3261,13 +3251,6 @@ class TestPyWin32AdapterBranches:
             ),
             raising=False,
         )
-        # Acquire path now routes through win32com.client.dynamic.Dispatch —
-        # stub it so the retry loop sees the same RuntimeError surface.
-        monkeypatch.setattr(
-            "solidworks_mcp.adapters.pywin32_adapter._dynamic_module",
-            SimpleNamespace(Dispatch=Mock(side_effect=RuntimeError("dispatch fail"))),
-            raising=False,
-        )
         # Standard (non-3DEXPERIENCE) install, nothing running: cold-start via COM.
         monkeypatch.setattr(
             "solidworks_mcp.adapters.pywin32_adapter.sw_install.is_solidworks_process_running",
@@ -3297,9 +3280,11 @@ class TestPyWin32AdapterBranches:
             ),
             raising=False,
         )
+        # The attach path wraps the ROT dispatch in the generated ISldWorks class.
+        early_bound = Mock(return_value=fake_app)
         monkeypatch.setattr(
-            "solidworks_mcp.adapters.pywin32_adapter._dynamic_dispatch",
-            lambda value: fake_app if value is raw_app else None,
+            "solidworks_mcp.adapters.pywin32_adapter.sw_type_info.early_bound",
+            early_bound,
         )
         # If a running instance is found, no launch strategy should be consulted.
         monkeypatch.setattr(
@@ -3310,6 +3295,7 @@ class TestPyWin32AdapterBranches:
         app = await adapter._acquire_solidworks_application()
         assert app is fake_app
         assert adapter.swApp is fake_app
+        early_bound.assert_called_once_with(raw_app, "ISldWorks")
 
     @pytest.mark.asyncio
     async def test_acquire_polls_running_process_without_relaunching(

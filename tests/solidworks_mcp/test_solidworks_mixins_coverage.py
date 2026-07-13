@@ -134,10 +134,8 @@ class TestSolidWorksIOMixinNotConnected:
         assert "not connected" in (result.error or "").lower()
 
     @pytest.mark.asyncio
-    async def test_open_model_uses_int_errors_when_variant_ctor_missing(
-        self, monkeypatch
-    ) -> None:
-        """open_model should pass integer error/warning refs when VARIANT is unavailable."""
+    async def test_open_model_unpacks_early_bound_result(self, monkeypatch) -> None:
+        """open_model should unpack makepy's retval/errors/warnings tuple."""
         adapter = _build_adapter(monkeypatch)
         monkeypatch.setattr(adapter, "is_connected", lambda: True)
 
@@ -149,7 +147,7 @@ class TestSolidWorksIOMixinNotConnected:
         model = MagicMock()
         model.GetActiveConfiguration.return_value = _Cfg()
         app = MagicMock()
-        app.OpenDoc6.return_value = model
+        app.OpenDoc6.return_value = (model, 0, 2)
 
         adapter.swApp = app
         adapter.constants = {
@@ -160,23 +158,30 @@ class TestSolidWorksIOMixinNotConnected:
         adapter._attempt = lambda operation, default=None: operation()
         adapter._read_model_title = lambda _m: "Part1"
 
-        monkeypatch.setattr(
-            "solidworks_mcp.adapters.solidworks.io.win32com",
-            SimpleNamespace(client=SimpleNamespace(VARIANT=None)),
-            raising=False,
-        )
-        monkeypatch.setattr(
-            "solidworks_mcp.adapters.solidworks.io.pythoncom",
-            SimpleNamespace(VT_BYREF=0x4000, VT_I4=3),
-            raising=False,
-        )
-
         result = await adapter.open_model("model.sldprt")
 
         assert result.is_success
         args = app.OpenDoc6.call_args.args
         assert args[4] == 0
         assert args[5] == 0
+
+    @pytest.mark.asyncio
+    async def test_open_model_reports_early_bound_out_values(self, monkeypatch) -> None:
+        adapter = _build_adapter(monkeypatch)
+        monkeypatch.setattr(adapter, "is_connected", lambda: True)
+        app = MagicMock()
+        app.OpenDoc6.return_value = (None, 2, 8)
+        adapter.swApp = app
+        adapter.constants = {
+            "swDocPART": 1,
+            "swDocASSEMBLY": 2,
+            "swDocDRAWING": 3,
+        }
+
+        result = await adapter.open_model("model.sldprt")
+
+        assert result.is_error
+        assert "errors=2, warnings=8" in (result.error or "")
 
 
 # ---------------------------------------------------------------------------
