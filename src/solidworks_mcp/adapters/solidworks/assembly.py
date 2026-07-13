@@ -378,16 +378,6 @@ def _transform_array(
 # ---------------------------------------------------------------------------
 
 
-def _byref_i4() -> Any:
-    """Build a by-reference VT_I4 VARIANT for out-parameters (0 fallback)."""
-    variant_ctor = getattr(getattr(win32com, "client", None), "VARIANT", None)
-    if not callable(variant_ctor):
-        return 0
-    vt_byref = int(getattr(pythoncom, "VT_BYREF", 0))
-    vt_i4 = int(getattr(pythoncom, "VT_I4", 0))
-    return variant_ctor(vt_byref | vt_i4, 0)
-
-
 def _assembly_title(adapter: Any) -> str:
     """Read the active document's title without its file extension.
 
@@ -835,12 +825,15 @@ def _preload_component_file(adapter: Any, resolved_path: str) -> None:
     app = adapter.swApp
     adapter._attempt(lambda: app.DocumentVisible(False, doc_type), default=None)
     try:
-        loaded = adapter._attempt(
-            lambda: app.OpenDoc6(
-                resolved_path, doc_type, 1, "", _byref_i4(), _byref_i4()
-            ),
+        # Early-bound OpenDoc6 invokes by DISPID: pass literal 0 for the two
+        # [out] errors/warnings slots and read the model back from the result
+        # tuple (retval, errors, warnings). Passing a byref VARIANT here is a
+        # late-binding idiom that InvokeTypes rejects.
+        result = adapter._attempt(
+            lambda: app.OpenDoc6(resolved_path, doc_type, 1, "", 0, 0),
             default=None,
         )
+        loaded = result[0] if isinstance(result, tuple) else result
     finally:
         adapter._attempt(lambda: app.DocumentVisible(True, doc_type), default=None)
     if not loaded:
@@ -863,8 +856,10 @@ def _activate_assembly(adapter: Any) -> None:
     title = adapter._attempt(lambda: adapter.currentModel.GetTitle(), default=None)
     if not title:
         return
+    # Early-bound ActivateDoc3 takes a literal 0 for its trailing [out] errors
+    # slot; the (model, errors) result tuple is discarded (best-effort activate).
     adapter._attempt(
-        lambda: adapter.swApp.ActivateDoc3(title, False, 2, _byref_i4()),
+        lambda: adapter.swApp.ActivateDoc3(title, False, 2, 0),
         default=None,
     )
 

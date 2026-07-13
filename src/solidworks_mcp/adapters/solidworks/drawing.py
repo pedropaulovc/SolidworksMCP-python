@@ -179,7 +179,12 @@ def new_drawing(
     )
     if not model:
         raise RuntimeError(f"NewDocument failed for drawing template {template!r}")
-    adapter._attempt(lambda: _sw_type_info.flag_doc(model, _SW_DOC_DRAWING), default=0)
+    # Early-bind the new drawing exactly like the open path (_bind_document):
+    # NewDocument hands back a raw dispatch, and without this currentModel stays
+    # late-bound, so drawing COM calls (SelectByID2's None Callout, …) take the
+    # dynamic path where a bare None mismatches. IModelDoc2's fallback resolves
+    # the IDrawingDoc members, so no flag_doc is needed.
+    model = _sw_type_info.early_bound(model, "IModelDoc2")
     adapter.currentModel = model
     return model
 
