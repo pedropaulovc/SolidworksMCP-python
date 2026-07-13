@@ -10,12 +10,16 @@ on a writable temp dir or typelib discovery through a ROT proxy. Call sites use
 ``early_bound_or_flag(obj, iface, *fallback_names)`` and **reassign** the result
 (``x = early_bound_or_flag(x, ...)``) — the wrapper is a new object.
 
-Off-interface members stay safe: SW dispatches are polymorphic (a face is an
+Off-interface members FAIL LOUD: SW dispatches are polymorphic (a face is an
 ``IFace2`` and an ``IEntity``; a part model answers ``IModelDoc2`` and
-``IPartDoc``), so ``early_bound`` returns a ``_fallback_subclass`` that forwards
-any member the named interface class does not declare to a lazily-built
-late-bound dispatch on the same object. No per-call-site interface-completeness
-proof is needed.
+``IPartDoc``), so a call site that reaches for a member the named interface does
+not declare must bind the OWNING interface explicitly (``early_bound(obj,
+"IEntity").Select2(...)``). ``early_bound`` returns a ``_strict_subclass`` that
+raises ``AttributeError`` for any undeclared member instead of silently
+degrading it to late binding — task #7 rebound every build/verify call site and
+a full cold ``doit`` build proved zero off-interface accesses remain, so a NEW
+one is a bug that should crash in development, not quietly pay the late-binding
+tax again.
 
 Fallback path — **method flagging**: for interfaces absent from ``sldworks.tlb``
 (the undocumented motion methods) or when the wrapper can't load, pywin32's
@@ -60,11 +64,6 @@ SW_TLB_IID = "{83A33D31-27C5-11CE-BFD4-00400513BB57}"
 # Module state: populated by _load_wrapper() the first time it's needed.
 _wrapper_module: Any | None = None
 _interface_methods: dict[str, frozenset[str]] = {}
-# Union of every interface's method names. The fallback path consults it to
-# decide whether an OFF-interface name is a method (and must be flagged before
-# late-bound resolution, so a zero-arg method isn't silently taken as a property
-# get). Built once by _load_wrapper.
-_all_method_names: frozenset[str] = frozenset()
 # Per-object record of which interfaces have already been flagged. Keyed by
 # id(obj) so ``flag_methods(doc, 'IModelDoc2')`` followed by
 # ``flag_methods(doc, 'IAssemblyDoc')`` does incremental work, not a no-op.
@@ -112,7 +111,7 @@ def _load_wrapper() -> None:
     ``gencache`` remains only as a compatibility fallback for an installation
     where the vendored artifact cannot be imported.
     """
-    global _wrapper_module, _interface_methods, _all_method_names
+    global _wrapper_module, _interface_methods
 
     if not PYWIN32_AVAILABLE:
         return
@@ -173,14 +172,8 @@ def _load_wrapper() -> None:
         if method_names:
             _interface_methods[name] = frozenset(method_names)
 
-    _all_method_names = (
-        frozenset().union(*_interface_methods.values())
-        if _interface_methods
-        else frozenset()
-    )
-
-    # Make TYPED returns carry the fallback too (see _register_fallback_classes).
-    _register_fallback_classes()
+    # Make TYPED returns strict too (see _register_strict_classes).
+    _register_strict_classes()
 
     logger.info(
         f"SolidWorks type info loaded: {len(_interface_methods)} interfaces, "
@@ -321,69 +314,51 @@ def flagged(obj: Any, *interfaces: str) -> Any:
     return obj
 
 
-# Cache of fallback subclasses keyed by their makepy base class, so every
+# Cache of strict subclasses keyed by their makepy base class, so every
 # ``early_bound(obj, "IFace2")`` reuses one generated subclass rather than
 # minting a new type per call.
-_fallback_classes: dict[type, type] = {}
-
-# (base_class_name, attr) pairs already logged as resolved via the late-bound
-# fallback, so each off-interface member is reported once, not per call. The set
-# is the empirical list of which members are off-interface / slow-path after a
-# live run — useful for deciding where an explicit cross-cast is worth it.
-_fallback_warned: set[tuple[str, str]] = set()
+_strict_classes: dict[type, type] = {}
 
 
-def _warn_fallback_once(base: type, attr: str) -> None:
-    key = (base.__name__, attr)
-    if key in _fallback_warned:
-        return
-    _fallback_warned.add(key)
-    logger.debug(f"early-bound fallback: {base.__name__}.{attr} via late binding")
+def _strict_subclass(base: type) -> type:
+    """Return a subclass of the makepy interface ``base`` that FAILS LOUD for any
+    member ``base`` does not declare.
 
+    Why this exists: a makepy interface class exposes ONLY the members the type
+    library lists for that one interface, and its ``__getattr__`` /
+    ``__setattr__`` raise ``AttributeError`` for anything else. Real SW dispatches
+    are polymorphic — a face is an ``IFace2`` AND an ``IEntity`` (``Select2``
+    lives on the latter); a part model answers both ``IModelDoc2`` and
+    ``IPartDoc`` (``GetBodies2`` lives on the latter). An earlier design degraded
+    such off-interface members to a lazily-built late-bound dispatch so call sites
+    could mix interfaces freely on one object.
 
-def _fallback_subclass(base: type) -> type:
-    """Return a subclass of the makepy interface ``base`` that degrades to
-    late binding for any member ``base`` does not declare.
-
-    Why this exists: a makepy interface class exposes ONLY the members the
-    type library lists for that one interface, and its ``__getattr__`` /
-    ``__setattr__`` raise ``AttributeError`` for anything else. Real SW
-    dispatches are polymorphic — a face is an ``IFace2`` AND an ``IEntity``
-    (``Select2`` lives on the latter); a part model answers both ``IModelDoc2``
-    and ``IPartDoc`` (``GetBodies2`` lives on the latter). Late binding never
-    cared (it resolves by name against the live object), so call sites freely
-    mix interfaces on one dispatch. A bare makepy wrapper would break those
-    off-interface calls.
+    Task #7 removed that fallback: every build/verify call site was rebound to the
+    interface that DECLARES the member it calls, and a full cold ``doit`` build
+    proved zero off-interface accesses remain. So this subclass now RAISES
+    ``AttributeError`` (naming the interface and member) for an undeclared member
+    instead of silently reintroducing late binding — a new off-interface access is
+    a bug (a missed rebind, or a regression) that should crash in development
+    rather than quietly pay the per-name ``GetIDsOfNames`` tax again. The fix is
+    always to bind the OWNING interface at the call site:
+    ``early_bound(obj, "IEntity").Select2(...)``.
 
     The subclass keeps DISPID-fast ``InvokeTypes`` for every DECLARED member
     (normal attribute lookup finds real methods; declared properties go through
-    the base ``__getattr__``), and only for an UNDECLARED member does it build
-    one lazy ``dynamic.Dispatch`` over the same ``_oleobj_`` and forward. So the
-    fast path stays fast and the wrapper is safe to apply to any dispatch,
-    regardless of which interfaces a call site later exercises on it.
+    the base ``__getattr__``); only an UNDECLARED member is rejected.
     """
-    cached = _fallback_classes.get(base)
+    cached = _strict_classes.get(base)
     if cached is not None:
         return cached
 
-    class _EarlyBoundWithFallback(base):  # type: ignore[valid-type, misc]
-        def _late_bound(self) -> Any:
-            dyn = self.__dict__.get("_late_bound_dispatch")
-            if dyn is None:
-                from win32com.client import dynamic
-
-                dyn = dynamic.Dispatch(self._oleobj_)
-                self.__dict__["_late_bound_dispatch"] = dyn
-            return dyn
-
+    class _EarlyBoundStrict(base):  # type: ignore[valid-type, misc]
         def __getattr__(self, attr: str) -> Any:
             # Reached only when normal lookup misses (declared methods and the
-            # __dict__ entries _oleobj_/_late_bound_dispatch never get here).
+            # __dict__ entry _oleobj_ never get here).
             # Reject every underscore/dunder name WITHOUT a COM round-trip: these
             # are Python probes (pickle, copy, IPython canaries) and, critically,
-            # ``getattr(obj, "_FlagAsMethod", None)`` — routing that to the
-            # late-bound dispatch would let flag_method_names silently flag the
-            # WRONG object and report success.
+            # ``getattr(obj, "_FlagAsMethod", None)`` — a strict wrapper must miss
+            # that probe so a caller never mistakes it for a raw late-bound object.
             if attr.startswith("_"):
                 raise AttributeError(attr)
             # Declared property on THIS interface: let makepy resolve it fast.
@@ -391,64 +366,67 @@ def _fallback_subclass(base: type) -> type:
                 return base.__getattr__(self, attr)
             except AttributeError:
                 pass
-            # Off-interface member: forward to a late-bound dispatch. The dynamic
-            # dispatch is UNFLAGGED, so a zero-arg off-interface METHOD would
-            # resolve as a property get (and CDispatch.__call__ would then invoke
-            # the returned object's default member — a silent wrong call). Flag it
-            # first when the type library declares it as a method on ANY interface.
-            dyn = self._late_bound()
-            if attr in _all_method_names:
-                try:
-                    dyn._FlagAsMethod(attr)
-                except Exception:
-                    pass
-            _warn_fallback_once(base, attr)
-            return getattr(dyn, attr)
+            # Off-interface member: FAIL LOUD. The live dispatch may well answer
+            # ``attr`` through a different interface, but binding it here would
+            # silently reintroduce late binding. Rebind the CALL SITE to the
+            # interface that declares ``attr`` instead.
+            raise AttributeError(
+                f"{base.__name__} does not declare {attr!r}. The dispatch may "
+                f"expose it through another interface — bind that interface at the "
+                f"call site (e.g. early_bound(obj, '<IOwningInterface>').{attr}"
+                f"(...)); the late-binding fallback was removed in task #7."
+            )
 
         def __setattr__(self, attr: str, value: Any) -> None:
-            # Internal attrs (only _late_bound_dispatch, set via __dict__ in
-            # _late_bound) never reach here; guard anyway so an underscore set
-            # can't be forwarded onto the COM object.
+            # Internal dunder/underscore attrs go straight to __dict__ so they are
+            # never forwarded onto the COM object.
             if attr.startswith("_"):
                 self.__dict__[attr] = value
                 return
             try:
                 base.__setattr__(self, attr, value)
             except AttributeError:
-                setattr(self._late_bound(), attr, value)
+                raise AttributeError(
+                    f"{base.__name__} does not declare a settable {attr!r}. Rebind "
+                    f"the call site to the owning interface; the late-binding "
+                    f"fallback was removed in task #7."
+                ) from None
 
-    _EarlyBoundWithFallback.__name__ = f"{base.__name__}_EarlyBound"
-    _EarlyBoundWithFallback.__qualname__ = _EarlyBoundWithFallback.__name__
-    _fallback_classes[base] = _EarlyBoundWithFallback
-    return _EarlyBoundWithFallback
+    _EarlyBoundStrict.__name__ = f"{base.__name__}_EarlyBound"
+    _EarlyBoundStrict.__qualname__ = _EarlyBoundStrict.__name__
+    _strict_classes[base] = _EarlyBoundStrict
+    return _EarlyBoundStrict
 
 
-def _register_fallback_classes() -> None:
-    """Make TYPED COM returns construct the fallback subclass, not the plain
+def _register_strict_classes() -> None:
+    """Make TYPED COM returns construct the strict subclass, not the plain
     makepy class.
 
     Importing the wrapper runs ``RegisterCLSIDsFromDict(CLSIDToClassMap)``, a
     process-global map pywin32 consults whenever it wraps a dispatch that has a
     declared return interface (a ``returnCLSID`` on a method, or an element of a
     dispatch array). So the canonical multi-interface objects arrive as PLAIN
-    wrappers with NO off-interface fallback: ``OpenDoc6``/``NewDocument`` →
-    ``IModelDoc2`` (which is the *only* interface on ``adapter.currentModel``,
-    yet the code calls ``IPartDoc.GetBodies2`` / ``IDrawingDoc.GetCurrentSheet``
-    on it), ``Extension`` → ``IModelDocExtension``, ``GetCurrentSheet`` →
-    ``ISheet`` … On those, an off-interface member raises ``AttributeError``
-    (or, swallowed by an ``_attempt`` wrapper, silently returns a default).
+    wrappers: ``OpenDoc6``/``NewDocument`` → ``IModelDoc2`` (which is the *only*
+    interface on ``adapter.currentModel``, yet the code calls
+    ``IPartDoc.GetBodies2`` / ``IDrawingDoc.GetCurrentSheet`` on it),
+    ``Extension`` → ``IModelDocExtension``, ``GetCurrentSheet`` → ``ISheet`` … On
+    a plain wrapper an off-interface member raises ``AttributeError`` (or, when
+    swallowed by an ``_attempt`` wrapper, silently returns a default) — the exact
+    hazard task #7's rebinds eliminated.
 
-    Re-registering every CLSID to a :func:`_fallback_subclass` closes that hole:
-    typed returns now build hybrids, so an off-interface member transparently
-    falls through to late binding — the same guarantee :func:`early_bound`
-    already gives objects it wraps from a raw ``CDispatch``. It also makes the
-    ``isinstance(obj, cls)`` short-circuit in :func:`early_bound` correct: a
-    typed return is now already a hybrid, so re-binding it to its own interface
-    is a genuine no-op rather than a missed upgrade.
+    Re-registering every CLSID to a :func:`_strict_subclass` makes those typed
+    returns behave identically to objects :func:`early_bound` wraps from a raw
+    ``CDispatch``: a declared member is DISPID-fast, an undeclared member raises a
+    LOUD ``AttributeError`` naming the interface — so a stray off-interface access
+    on a typed return crashes in development instead of quietly late-binding (or
+    silently defaulting through ``_attempt``). It also makes the
+    ``isinstance(obj, cls)`` short-circuit in :func:`early_bound` correct: a typed
+    return is already a strict subclass, so re-binding it to its own interface is
+    a genuine no-op rather than a missed upgrade.
 
     NOTE (documented side effect): this is process-global — after the wrapper
     loads, ANY ``win32com.client.Dispatch`` of a SolidWorks object in this
-    process may return a hybrid. That is the intent (universal safe early
+    process returns a strict subclass. That is the intent (uniform fail-loud early
     binding), not an accident.
     """
     try:
@@ -461,7 +439,7 @@ def _register_fallback_classes() -> None:
     for clsid, cls in list(mapping.items()):
         if inspect.isclass(cls) and issubclass(cls, DispatchBaseClass):
             try:
-                CLSIDToClass.RegisterCLSID(clsid, _fallback_subclass(cls))
+                CLSIDToClass.RegisterCLSID(clsid, _strict_subclass(cls))
             except Exception:
                 # Best-effort: a class that won't re-register just keeps its
                 # plain wrapper; early_bound() still upgrades it on a cross-cast.
@@ -488,12 +466,13 @@ def early_bound(obj: Any, interface: str) -> Any:
     the ``CDispatch`` itself drops the underlying IDispatch and breaks
     ``InvokeTypes``).
 
-    The returned wrapper is a :func:`_fallback_subclass` of the makepy class,
-    so a member from a DIFFERENT interface on the same dispatch (``IFace2``'s
-    ``Select2`` from ``IEntity``; a part model's ``GetBodies2`` from
-    ``IPartDoc``) still resolves — via a lazily-built late-bound dispatch —
-    instead of raising ``AttributeError``. That makes early binding safe to
-    apply without proving each call site touches only one interface.
+    The returned wrapper is a :func:`_strict_subclass` of the makepy class, so a
+    member from a DIFFERENT interface on the same dispatch (``IFace2``'s
+    ``Select2`` from ``IEntity``; a part model's ``GetBodies2`` from ``IPartDoc``)
+    raises a LOUD ``AttributeError`` rather than silently late-binding. Task #7
+    rebound every call site to the interface that declares the member it calls, so
+    a surviving off-interface access is a bug — bind the owning interface at that
+    call site (``early_bound(obj, "IEntity").Select2(...)``).
 
     Args:
         obj: A pywin32 ``CDispatch`` wrapping a SolidWorks COM object.
@@ -526,7 +505,7 @@ def early_bound(obj: Any, interface: str) -> Any:
     if isinstance(obj, cls):
         return obj
     try:
-        return _fallback_subclass(cls)(oleobj)
+        return _strict_subclass(cls)(oleobj)
     except Exception:
         return obj
 
