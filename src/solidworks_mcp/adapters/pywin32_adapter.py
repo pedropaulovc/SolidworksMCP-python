@@ -40,7 +40,6 @@ try:
     import pythoncom
     import pywintypes
     import win32com.client
-    from win32com.client import dynamic as _dynamic_module
 
     PYWIN32_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -48,27 +47,31 @@ except ImportError:  # pragma: no cover
     pythoncom = SimpleNamespace()
     pywintypes = SimpleNamespace(com_error=Exception)
     win32com = SimpleNamespace(client=SimpleNamespace())
-    _dynamic_module = SimpleNamespace(Dispatch=lambda *_a, **_kw: None)
     PYWIN32_AVAILABLE = False
 
 
-def _dynamic_dispatch(arg: Any) -> Any:
-    """Forward to ``win32com.client.dynamic.Dispatch`` via the imported
-    module reference. Forces late binding so VARIANT pass-by-ref params
-    used by ``OpenDoc6`` keep working even when the makepy ``gen_py``
-    wrapper is loaded.
+def _early_bound_application(arg: Any) -> Any:
+    """Return the makepy-generated SolidWorks application wrapper.
 
-    Tests that need to stub dispatch should monkeypatch
-    ``win32com.client.dynamic.Dispatch`` directly — the monkeypatch
-    propagates through this module reference because Python modules
-    are singletons.
+    Wrap an existing ROT dispatch through its raw ``_oleobj_``; ``EnsureDispatch``
+    cannot automate makepy for SolidWorks's ROT proxy (live error
+    ``-2147319765 Element not found``).  A ProgID is dispatched first, then the
+    same generated ``ISldWorks`` class is applied.  This uses known DISPIDs and
+    typed return contracts without depending on ROT type-info discovery.
     """
-    return _dynamic_module.Dispatch(arg)
+    raw = win32com.client.Dispatch(arg) if isinstance(arg, str) else arg
+    return sw_type_info.early_bound(raw, "ISldWorks")
 
 
 from loguru import logger  # noqa: E402
 
 T = TypeVar("T")
+
+# Registry prefixes whose entity is a single sketch segment (not a group/list or
+# a dimension/relation), eligible for derived-interface re-binding on register.
+_SEGMENT_PREFIXES = frozenset(
+    {"Line", "Arc", "Circle", "Spline", "Centerline", "Ellipse"}
+)
 
 
 def _load_pillow_image() -> Any:
@@ -179,7 +182,7 @@ class _ComSessionCoordinator:
         the installed edition (see :mod:`solidworks_mcp.adapters.sw_install`):
 
         * **Standard install** — cold-start the ``SldWorks.Application`` COM
-          class via late-bound ``Dispatch``.
+          class through its generated makepy wrapper.
         * **3DEXPERIENCE / "for Makers" edition** — start through the Platform
           desktop shortcut (a bare COM/exe cold-start only pops the modal
           "must be launched from the 3DEXPERIENCE Platform" dialog and exits),
@@ -233,20 +236,18 @@ class _ComSessionCoordinator:
     def _attach_to_running_application(self) -> Any | None:
         """Bind to an already-running SolidWorks instance, if there is one.
 
-        Uses ``GetActiveObject`` and forces late binding via
-        ``dynamic.Dispatch`` — the gen_py wrapper provides method-name lookup
-        for ``flag_methods`` but early-bound dispatches reject the VARIANT
-        pass-by-ref params used by ``OpenDoc6`` and friends.
+        Uses ``GetActiveObject`` and wraps the returned ROT dispatch in the
+        generated ``ISldWorks`` wrapper.
 
         Returns:
-            Any | None: The late-bound COM object, or ``None`` when no instance
+            Any | None: The early-bound COM object, or ``None`` when no instance
             is running (or the bind fails for any reason).
         """
         try:
             raw = win32com.client.GetActiveObject("SldWorks.Application")
         except Exception:
             return None
-        return _dynamic_dispatch(raw) if raw is not None else None
+        return _early_bound_application(raw) if raw is not None else None
 
     async def _cold_start_application(self) -> Any:
         """Cold-start a standard SolidWorks install via the COM class.
@@ -263,7 +264,7 @@ class _ComSessionCoordinator:
         last_error: Exception | None = None
         for _ in range(8):
             try:
-                app = _dynamic_dispatch("SldWorks.Application")
+                app = _early_bound_application("SldWorks.Application")
                 if app is not None:
                     self._adapter.swApp = app
                     return app
@@ -438,9 +439,6 @@ class _ComSessionCoordinator:
         try:
             self.initialize_com_apartment()
             app = await self.acquire_solidworks_application()
-            self._adapter._attempt(
-                lambda: sw_type_info.flag_methods(app, "ISldWorks"), default=0
-            )
             await self.wait_for_server_ready(app)
             app.Visible = True
             self.set_automation_preferences(app, interactive=False)
@@ -543,6 +541,14 @@ class _SketchGeometryService:
         """
         self._adapter._sketch_entity_counter += 1
         entity_id = f"{prefix}_{self._adapter._sketch_entity_counter}"
+        # Re-bind single segments to their derived interface up front, so every
+        # downstream reader (point/dimension/constraint resolution) sees an
+        # ISketchLine/ISketchArc/… with its point accessors as declared methods
+        # rather than the base ISketchSegment makepy wraps the create-call return
+        # in. Groups (rectangle/polygon -> list) and non-segments (dimension/
+        # relation) are stored untouched.
+        if prefix in _SEGMENT_PREFIXES and not isinstance(entity, (list, tuple)):
+            entity = sw_type_info.concrete_sketch_segment(entity)
         self._adapter._sketch_entities[entity_id] = entity
         return entity_id
 
@@ -1394,13 +1400,17 @@ class _FeatureSelectionService:
         seen: set[tuple[str, str]] = set()
 
         feature = self._adapter._attempt(
-            lambda: self._adapter.currentModel.FirstFeature()
-        )
-        # Flag the feature dispatch so methods like GetNextFeature work
-        if feature is not None:
-            self._adapter._attempt(
-                lambda f=feature: sw_type_info.flag_methods(f, "IFeature"), default=0
+            lambda: self._adapter._get_attr_or_call(
+                self._adapter.currentModel, "FirstFeature"
             )
+        )
+        feature = sw_type_info.early_bound_or_flag(
+            feature,
+            "IFeature",
+            "GetTypeName2",
+            "IsSuppressed",
+            "GetNextFeature",
+        )
         pos = 0
         guard = 0
         while feature and guard < 10000:
@@ -1408,17 +1418,19 @@ class _FeatureSelectionService:
             pos += 1
             guard += 1
             next_feature = self._adapter._attempt(
-                lambda current_feature=feature: current_feature.GetNextFeature()
+                lambda current_feature=feature: self._adapter._get_attr_or_call(
+                    current_feature, "GetNextFeature"
+                )
             )
             if next_feature is None:
                 break
-            feature = next_feature
-            # Flag each new feature dispatch
-            if feature is not None:
-                self._adapter._attempt(
-                    lambda f=feature: sw_type_info.flag_methods(f, "IFeature"),
-                    default=0,
-                )
+            feature = sw_type_info.early_bound_or_flag(
+                next_feature,
+                "IFeature",
+                "GetTypeName2",
+                "IsSuppressed",
+                "GetNextFeature",
+            )
 
         if features:
             return features
@@ -1435,6 +1447,9 @@ class _FeatureSelectionService:
             )
             if feature is None:
                 continue
+            feature = sw_type_info.early_bound_or_flag(
+                feature, "IFeature", "GetTypeName2", "IsSuppressed"
+            )
             self._append_feature_to(
                 features,
                 seen,
@@ -1464,7 +1479,10 @@ class _FeatureSelectionService:
         """
         name = str(getattr(feature, "Name", ""))
         feature_type = str(
-            self._adapter._attempt(lambda: feature.GetTypeName2(), default="Unknown")
+            self._adapter._attempt(
+                lambda: self._adapter._get_attr_or_call(feature, "GetTypeName2"),
+                default="Unknown",
+            )
         )
         dedupe_key = (name, feature_type)
         if dedupe_key in seen:
@@ -1494,7 +1512,8 @@ class _FeatureSelectionService:
             bool: ``True`` when feature is suppressed.
         """
         suppressed_direct = self._adapter._attempt(
-            lambda: feature.IsSuppressed(), default=None
+            lambda: self._adapter._get_attr_or_call(feature, "IsSuppressed"),
+            default=None,
         )
         if suppressed_direct is not None:
             return bool(suppressed_direct)
@@ -1989,20 +2008,28 @@ class PyWin32Adapter(
         """
         import ntpath
 
-        from .com_variant import byref_long
-
         path, title = self._document_identity(target_doc)
         # SolidWorks paths are always Windows-style; ntpath keeps the
         # basename split correct when the mock suite runs on Linux CI.
         name = ntpath.basename(path) if path else title
         if not name:
             return target_doc
-        activated = self._attempt(
+        # Early-bound ISldWorks::ActivateDoc3 returns (model, errors): pass literal
+        # 0 for the [out] Errors and consume the tuple. The retval is a DYNAMIC
+        # dispatch (no resultCLSID), so rebind it to IModelDoc2 before handing it to
+        # SaveBMP/SaveAs3 -- a raw tuple here silently defeated the activation this
+        # method exists for.
+        result = self._attempt(
             # swRebuildOnActivation_e.swDontRebuildActiveDoc = 1
-            lambda: self.swApp.ActivateDoc3(name, False, 1, byref_long()),
+            lambda: self.swApp.ActivateDoc3(name, False, 1, 0),
             default=None,
         )
-        return activated if activated is not None else target_doc
+        if not result:
+            return target_doc
+        activated, _errors = result
+        if activated is None:
+            return target_doc
+        return sw_type_info.early_bound(activated, "IModelDoc2")
 
     def _save_screenshot_with_savebmp(
         self, target_doc: Any, resolved_path: str, width: int, height: int
@@ -2264,22 +2291,25 @@ class PyWin32Adapter(
         Returns:
             True if file was created, False otherwise.
         """
-        from .com_variant import byref_long, null_dispatch
+        from .com_variant import null_dispatch
 
         def _save(export_data: Any) -> Any:
-            errors = byref_long()
-            warnings = byref_long()
             # swSaveAsVersion_e.swSaveAsCurrentVersion = 0
             # swSaveAsOptions_e.swSaveAsOptions_Silent = 2
-            ok = ext.SaveAs2(
-                resolved_path, 0, 2, export_data, "", False, errors, warnings
+            # Early-bound IModelDocExtension::SaveAs2 returns its two [out] codes in
+            # the tuple (ok, errors, warnings): pass literal 0 for those slots and
+            # consume the tuple (the byref-VARIANT idiom left `ok` a truthy tuple, so
+            # the failure warning could never fire).
+            result = ext.SaveAs2(resolved_path, 0, 2, export_data, "", False, 0, 0)
+            ok, errors, warnings = (
+                result if isinstance(result, tuple) else (result, None, None)
             )
             if not ok:
                 logger.warning(
                     "[pywin32.export_file] Extension.SaveAs2 returned False "
                     "(errors={}, warnings={})",
-                    getattr(errors, "value", None),
-                    getattr(warnings, "value", None),
+                    errors,
+                    warnings,
                 )
             return ok
 

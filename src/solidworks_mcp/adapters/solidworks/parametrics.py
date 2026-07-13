@@ -19,7 +19,7 @@ from ..base import (
     CreateEquationParameters,
     SetGlobalVariableParameters,
 )
-from ..com_variant import bstr_array, null_dispatch
+from ..com_variant import bstr_array, null_variant
 from .features import _flag_feature_methods, _read_member
 
 # swInConfigurationOpts_e
@@ -112,8 +112,7 @@ def _equation_manager(adapter: Any) -> Any:
     )
     if manager is None:
         raise Exception("Equation manager unavailable on the active model")
-    _flag_feature_methods(manager, "IEquationMgr")
-    return manager
+    return _flag_feature_methods(manager, "IEquationMgr")
 
 
 def _configuration_scope(configuration: str) -> tuple[int, Any]:
@@ -129,7 +128,7 @@ def _configuration_scope(configuration: str) -> tuple[int, Any]:
     """
     if configuration:
         return _SPECIFY_CONFIGURATION, bstr_array([configuration])
-    return _ALL_CONFIGURATIONS, null_dispatch()
+    return _ALL_CONFIGURATIONS, null_variant()
 
 
 def _equation_index_by_lhs(manager: Any, lhs: str) -> int:
@@ -206,7 +205,10 @@ def _upsert_equation(adapter: Any, equation: str, configuration: str) -> dict[st
         return _equation_payload(adapter, manager, index, equation, True)
 
     if existing >= 0:
-        manager.Equation(existing, equation)
+        # Equation is an indexed property: early binding exposes Equation(i) as
+        # the getter only; the PUT is the separate SetEquation(i, value) method.
+        # Equation(i, value) as a put worked only under late binding.
+        manager.SetEquation(existing, equation)
         written = str(manager.Equation(existing) or "")
         if "".join(written.split()) != "".join(equation.split()):
             raise Exception(f"Failed to update equation: {equation}")
@@ -377,7 +379,7 @@ def _create_configuration_impl(
         )
         if manager is None:
             raise Exception("Configuration manager unavailable on the active model")
-        _flag_feature_methods(manager, "IConfigurationManager")
+        manager = _flag_feature_methods(manager, "IConfigurationManager")
 
         configuration = manager.AddConfiguration2(
             params.name,

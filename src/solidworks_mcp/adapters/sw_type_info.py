@@ -1,34 +1,40 @@
 """
-SolidWorks type-library introspection for robust COM method resolution.
+SolidWorks early-bound COM interface resolution (with a flagging fallback).
 
-Background: pywin32's late-binding (``CDispatch``) sometimes resolves SW
-zero-argument methods (``GetType``, ``GetTitle``, ``GetPathName``,
-``RevisionNumber`` …) as *properties* instead of methods. Calling them raises
-``TypeError: 'int'/'str' object is not callable`` because the property getter
-returns the value, and Python tries to call the value.
+Primary path — **early binding**: ``early_bound(obj, "IFace2")`` wraps a
+pywin32 dispatch in the makepy interface class from a *checked-in* wrapper for
+``sldworks.tlb`` (``._generated.sldworks_2026``), so members invoke by DISPID
+via ``InvokeTypes`` — no per-name ``GetIDsOfNames`` round-trip. The wrapper is
+vendored (not built in each user's ``gen_py`` cache), so startup never depends
+on a writable temp dir or typelib discovery through a ROT proxy. Call sites use
+``early_bound_or_flag(obj, iface, *fallback_names)`` and **reassign** the result
+(``x = early_bound_or_flag(x, ...)``) — the wrapper is a new object.
 
-Fix: call ``CDispatch._FlagAsMethod(name)`` for each method name **that actually
-belongs to the object's COM interface**. The calls tell pywin32 to resolve
-``name`` via method invocation (IDispatch ``Invoke``), not property access.
+Off-interface members stay safe: SW dispatches are polymorphic (a face is an
+``IFace2`` and an ``IEntity``; a part model answers ``IModelDoc2`` and
+``IPartDoc``), so ``early_bound`` returns a ``_fallback_subclass`` that forwards
+any member the named interface class does not declare to a lazily-built
+late-bound dispatch on the same object. No per-call-site interface-completeness
+proof is needed.
+
+Fallback path — **method flagging**: for interfaces absent from ``sldworks.tlb``
+(the undocumented motion methods) or when the wrapper can't load, pywin32's
+late-binding sometimes resolves SW zero-argument methods (``GetTitle``,
+``GetPathName`` …) as *properties*, so calling them raises ``TypeError:
+'str' object is not callable``. ``flag_methods(obj, *interfaces)`` /
+``flag_method_names(obj, *names)`` call ``CDispatch._FlagAsMethod(name)`` to
+force method (``Invoke``) resolution for names that belong to the object's real
+interface. Per-interface (not flag-everything) because each unknown name is a
+~5 ms ``GetIDsOfNames`` round-trip and the full TLB has ~6 000 names across 482
+interfaces; per-interface flagging is ~1-3 s, whole-object early binding is ~0.
 
 This module:
 
-1. Loads the makepy-generated wrapper for ``sldworks.tlb`` (``gen_py``).
-2. Builds per-interface sets of method names (``ISldWorks``, ``IModelDoc2``,
-   ``IAssemblyDoc``, ``IPartDoc``, ``IDrawingDoc`` …).
-3. Exposes ``flag_methods(obj, *interfaces)`` to flag a dispatch in one shot.
-
-Why per-interface rather than flagging everything: flagging an unknown name
-triggers a COM ``GetIDsOfNames`` round-trip that fails with ``Unknown name.``.
-Those round-trips are ~5 ms each; the full SW TLB has ~6 000 method names
-across 482 interfaces, so a naive flag-everything approach costs ~30 s per
-object. Per-interface flagging is ~1-3 s.
-
-Fallback: if the gen_py wrapper is missing (e.g. fresh install on a new box),
-we attempt lazy generation via ``gencache.EnsureModule``. If that also fails,
-``flag_methods`` silently becomes a no-op; callers will fall back to the
-original ``TypeError`` symptom on affected methods, but everything else still
-works.
+1. Loads the checked-in makepy wrapper for ``sldworks.tlb`` (``gen_py`` and
+   lazy generation remain only as compatibility fallbacks).
+2. Builds per-interface sets of method names for the flagging fallback.
+3. Exposes ``early_bound`` / ``early_bound_or_flag`` (primary) and
+   ``flag_methods`` / ``flag_method_names`` / ``flag_doc`` (fallback).
 """
 
 from __future__ import annotations
@@ -54,6 +60,11 @@ SW_TLB_IID = "{83A33D31-27C5-11CE-BFD4-00400513BB57}"
 # Module state: populated by _load_wrapper() the first time it's needed.
 _wrapper_module: Any | None = None
 _interface_methods: dict[str, frozenset[str]] = {}
+# Union of every interface's method names. The fallback path consults it to
+# decide whether an OFF-interface name is a method (and must be flagged before
+# late-bound resolution, so a zero-arg method isn't silently taken as a property
+# get). Built once by _load_wrapper.
+_all_method_names: frozenset[str] = frozenset()
 # Per-object record of which interfaces have already been flagged. Keyed by
 # id(obj) so ``flag_methods(doc, 'IModelDoc2')`` followed by
 # ``flag_methods(doc, 'IAssemblyDoc')`` does incremental work, not a no-op.
@@ -93,21 +104,32 @@ def _cache_entry_for(obj: Any) -> set[str]:
 
 
 def _load_wrapper() -> None:
-    """Load the gen_py wrapper and extract per-interface method names.
+    """Load the generated wrapper and extract per-interface method names.
 
-    Tries ``GetModuleForTypelib`` first (fast path, no COM work), falls back
-    to ``EnsureModule`` (may trigger makepy generation), then gives up and
-    logs a warning. Probes common SW major versions (33..30) because the
-    minor/major numbers change per SW year.
+    The checked-in SOLIDWORKS 2026 wrapper is the normal path.  SOLIDWORKS keeps
+    existing automation interface IIDs and DISPIDs binary compatible between
+    releases, so it can bind those interfaces on older supported seats as well.
+    ``gencache`` remains only as a compatibility fallback for an installation
+    where the vendored artifact cannot be imported.
     """
-    global _wrapper_module, _interface_methods
+    global _wrapper_module, _interface_methods, _all_method_names
 
     if not PYWIN32_AVAILABLE:
         return
 
-    # Try version numbers from newest to oldest. SW 3DEXPERIENCE R2026x = 34,
-    # SW 2025 = 33, SW 2024 = 32, SW 2023 = 31, SW 2022 = 30.
-    for major in (35, 34, 33, 32, 31, 30):
+    try:
+        from ._generated import sldworks_2026
+
+        _wrapper_module = sldworks_2026
+    except Exception as exc:
+        logger.warning(
+            "Checked-in SolidWorks wrapper could not be imported; "
+            f"falling back to pywin32 gen_py: {exc}"
+        )
+
+    # Compatibility only: reuse an existing per-user wrapper.  Probe common
+    # versions because the type-library major changes with each SW release.
+    for major in (35, 34, 33, 32, 31, 30) if _wrapper_module is None else ():
         try:
             mod = gencache.GetModuleForTypelib(SW_TLB_IID, 0, major, 0)
         except Exception:
@@ -117,7 +139,7 @@ def _load_wrapper() -> None:
             break
 
     if _wrapper_module is None:
-        # Gen_py wrapper not generated yet — try to generate now.
+        # Last resort for unusual installations or damaged package artifacts.
         for major in (35, 34, 33, 32, 31, 30):
             try:
                 gencache.EnsureModule(SW_TLB_IID, 0, major, 0)
@@ -129,7 +151,7 @@ def _load_wrapper() -> None:
 
     if _wrapper_module is None:
         logger.warning(
-            "SolidWorks gen_py wrapper not available; method flagging "
+            "SolidWorks generated wrapper not available; method flagging "
             "disabled. Zero-arg SW methods may raise TypeError. To fix, "
             "run: python -m win32com.client.makepy "
             '"C:\\Program Files\\SOLIDWORKS Corp\\SOLIDWORKS\\sldworks.tlb"'
@@ -150,6 +172,15 @@ def _load_wrapper() -> None:
                 method_names.add(attr_name)
         if method_names:
             _interface_methods[name] = frozenset(method_names)
+
+    _all_method_names = (
+        frozenset().union(*_interface_methods.values())
+        if _interface_methods
+        else frozenset()
+    )
+
+    # Make TYPED returns carry the fallback too (see _register_fallback_classes).
+    _register_fallback_classes()
 
     logger.info(
         f"SolidWorks type info loaded: {len(_interface_methods)} interfaces, "
@@ -236,6 +267,42 @@ def flag_methods(obj: Any, *interfaces: str) -> int:
     return flagged
 
 
+def flag_method_names(obj: Any, *names: str) -> int:
+    """Flag only the named ambiguous zero-argument methods on ``obj``.
+
+    Whole-interface flagging is appropriate for long-lived root objects, but
+    prohibitively expensive for transient wrappers returned by drawing and
+    feature-tree walks.  This helper performs one ``GetIDsOfNames`` round trip
+    per requested name and caches successful or failed attempts per object.
+
+    Args:
+        obj: A pywin32 ``CDispatch`` wrapping a SolidWorks COM object.
+        *names: Exact method names to pass to ``_FlagAsMethod``.
+
+    Returns:
+        Number of names successfully flagged.
+    """
+    if obj is None:
+        return 0
+    flag = getattr(obj, "_FlagAsMethod", None)
+    if not callable(flag):
+        return 0
+
+    already = _cache_entry_for(obj)
+    flagged_count = 0
+    for name in names:
+        cache_key = f"@method:{name}"
+        if cache_key in already:
+            continue
+        try:
+            flag(name)
+            flagged_count += 1
+        except Exception:
+            pass
+        already.add(cache_key)
+    return flagged_count
+
+
 def flagged(obj: Any, *interfaces: str) -> Any:
     """Flag ``obj``'s methods then return ``obj`` — call-chain friendly.
 
@@ -254,6 +321,153 @@ def flagged(obj: Any, *interfaces: str) -> Any:
     return obj
 
 
+# Cache of fallback subclasses keyed by their makepy base class, so every
+# ``early_bound(obj, "IFace2")`` reuses one generated subclass rather than
+# minting a new type per call.
+_fallback_classes: dict[type, type] = {}
+
+# (base_class_name, attr) pairs already logged as resolved via the late-bound
+# fallback, so each off-interface member is reported once, not per call. The set
+# is the empirical list of which members are off-interface / slow-path after a
+# live run — useful for deciding where an explicit cross-cast is worth it.
+_fallback_warned: set[tuple[str, str]] = set()
+
+
+def _warn_fallback_once(base: type, attr: str) -> None:
+    key = (base.__name__, attr)
+    if key in _fallback_warned:
+        return
+    _fallback_warned.add(key)
+    logger.debug(f"early-bound fallback: {base.__name__}.{attr} via late binding")
+
+
+def _fallback_subclass(base: type) -> type:
+    """Return a subclass of the makepy interface ``base`` that degrades to
+    late binding for any member ``base`` does not declare.
+
+    Why this exists: a makepy interface class exposes ONLY the members the
+    type library lists for that one interface, and its ``__getattr__`` /
+    ``__setattr__`` raise ``AttributeError`` for anything else. Real SW
+    dispatches are polymorphic — a face is an ``IFace2`` AND an ``IEntity``
+    (``Select2`` lives on the latter); a part model answers both ``IModelDoc2``
+    and ``IPartDoc`` (``GetBodies2`` lives on the latter). Late binding never
+    cared (it resolves by name against the live object), so call sites freely
+    mix interfaces on one dispatch. A bare makepy wrapper would break those
+    off-interface calls.
+
+    The subclass keeps DISPID-fast ``InvokeTypes`` for every DECLARED member
+    (normal attribute lookup finds real methods; declared properties go through
+    the base ``__getattr__``), and only for an UNDECLARED member does it build
+    one lazy ``dynamic.Dispatch`` over the same ``_oleobj_`` and forward. So the
+    fast path stays fast and the wrapper is safe to apply to any dispatch,
+    regardless of which interfaces a call site later exercises on it.
+    """
+    cached = _fallback_classes.get(base)
+    if cached is not None:
+        return cached
+
+    class _EarlyBoundWithFallback(base):  # type: ignore[valid-type, misc]
+        def _late_bound(self) -> Any:
+            dyn = self.__dict__.get("_late_bound_dispatch")
+            if dyn is None:
+                from win32com.client import dynamic
+
+                dyn = dynamic.Dispatch(self._oleobj_)
+                self.__dict__["_late_bound_dispatch"] = dyn
+            return dyn
+
+        def __getattr__(self, attr: str) -> Any:
+            # Reached only when normal lookup misses (declared methods and the
+            # __dict__ entries _oleobj_/_late_bound_dispatch never get here).
+            # Reject every underscore/dunder name WITHOUT a COM round-trip: these
+            # are Python probes (pickle, copy, IPython canaries) and, critically,
+            # ``getattr(obj, "_FlagAsMethod", None)`` — routing that to the
+            # late-bound dispatch would let flag_method_names silently flag the
+            # WRONG object and report success.
+            if attr.startswith("_"):
+                raise AttributeError(attr)
+            # Declared property on THIS interface: let makepy resolve it fast.
+            try:
+                return base.__getattr__(self, attr)
+            except AttributeError:
+                pass
+            # Off-interface member: forward to a late-bound dispatch. The dynamic
+            # dispatch is UNFLAGGED, so a zero-arg off-interface METHOD would
+            # resolve as a property get (and CDispatch.__call__ would then invoke
+            # the returned object's default member — a silent wrong call). Flag it
+            # first when the type library declares it as a method on ANY interface.
+            dyn = self._late_bound()
+            if attr in _all_method_names:
+                try:
+                    dyn._FlagAsMethod(attr)
+                except Exception:
+                    pass
+            _warn_fallback_once(base, attr)
+            return getattr(dyn, attr)
+
+        def __setattr__(self, attr: str, value: Any) -> None:
+            # Internal attrs (only _late_bound_dispatch, set via __dict__ in
+            # _late_bound) never reach here; guard anyway so an underscore set
+            # can't be forwarded onto the COM object.
+            if attr.startswith("_"):
+                self.__dict__[attr] = value
+                return
+            try:
+                base.__setattr__(self, attr, value)
+            except AttributeError:
+                setattr(self._late_bound(), attr, value)
+
+    _EarlyBoundWithFallback.__name__ = f"{base.__name__}_EarlyBound"
+    _EarlyBoundWithFallback.__qualname__ = _EarlyBoundWithFallback.__name__
+    _fallback_classes[base] = _EarlyBoundWithFallback
+    return _EarlyBoundWithFallback
+
+
+def _register_fallback_classes() -> None:
+    """Make TYPED COM returns construct the fallback subclass, not the plain
+    makepy class.
+
+    Importing the wrapper runs ``RegisterCLSIDsFromDict(CLSIDToClassMap)``, a
+    process-global map pywin32 consults whenever it wraps a dispatch that has a
+    declared return interface (a ``returnCLSID`` on a method, or an element of a
+    dispatch array). So the canonical multi-interface objects arrive as PLAIN
+    wrappers with NO off-interface fallback: ``OpenDoc6``/``NewDocument`` →
+    ``IModelDoc2`` (which is the *only* interface on ``adapter.currentModel``,
+    yet the code calls ``IPartDoc.GetBodies2`` / ``IDrawingDoc.GetCurrentSheet``
+    on it), ``Extension`` → ``IModelDocExtension``, ``GetCurrentSheet`` →
+    ``ISheet`` … On those, an off-interface member raises ``AttributeError``
+    (or, swallowed by an ``_attempt`` wrapper, silently returns a default).
+
+    Re-registering every CLSID to a :func:`_fallback_subclass` closes that hole:
+    typed returns now build hybrids, so an off-interface member transparently
+    falls through to late binding — the same guarantee :func:`early_bound`
+    already gives objects it wraps from a raw ``CDispatch``. It also makes the
+    ``isinstance(obj, cls)`` short-circuit in :func:`early_bound` correct: a
+    typed return is now already a hybrid, so re-binding it to its own interface
+    is a genuine no-op rather than a missed upgrade.
+
+    NOTE (documented side effect): this is process-global — after the wrapper
+    loads, ANY ``win32com.client.Dispatch`` of a SolidWorks object in this
+    process may return a hybrid. That is the intent (universal safe early
+    binding), not an accident.
+    """
+    try:
+        from win32com.client import CLSIDToClass
+    except Exception:
+        return
+    mapping = getattr(_wrapper_module, "CLSIDToClassMap", None)
+    if not mapping:
+        return
+    for clsid, cls in list(mapping.items()):
+        if inspect.isclass(cls) and issubclass(cls, DispatchBaseClass):
+            try:
+                CLSIDToClass.RegisterCLSID(clsid, _fallback_subclass(cls))
+            except Exception:
+                # Best-effort: a class that won't re-register just keeps its
+                # plain wrapper; early_bound() still upgrades it on a cross-cast.
+                pass
+
+
 def early_bound(obj: Any, interface: str) -> Any:
     """Wrap a late-bound dispatch in its early-bound interface class.
 
@@ -264,7 +478,9 @@ def early_bound(obj: Any, interface: str) -> Any:
     though the method exists — ``IModelDocExtension::GetMotionStudyManager``
     is the known case. The early-bound wrapper class generated by makepy
     invokes by **dispid** (``InvokeTypes``), which bypasses the name lookup
-    and works.
+    and works. It also drops the per-name ``GetIDsOfNames``/``_FlagAsMethod``
+    round-trips that ``flag_methods`` needs (~155 ms/object) — the whole
+    point of the migration.
 
     This reuses the already-loaded gen_py wrapper module, so the dispid comes
     from the type library for the connected SW version — nothing is
@@ -272,26 +488,108 @@ def early_bound(obj: Any, interface: str) -> Any:
     the ``CDispatch`` itself drops the underlying IDispatch and breaks
     ``InvokeTypes``).
 
+    The returned wrapper is a :func:`_fallback_subclass` of the makepy class,
+    so a member from a DIFFERENT interface on the same dispatch (``IFace2``'s
+    ``Select2`` from ``IEntity``; a part model's ``GetBodies2`` from
+    ``IPartDoc``) still resolves — via a lazily-built late-bound dispatch —
+    instead of raising ``AttributeError``. That makes early binding safe to
+    apply without proving each call site touches only one interface.
+
     Args:
         obj: A pywin32 ``CDispatch`` wrapping a SolidWorks COM object.
         interface: Interface name as it appears in the type library
             (e.g. ``"IModelDocExtension"``).
 
     Returns:
-        The early-bound wrapper exposing dispid-only members, or ``obj``
-        unchanged when the wrapper module or interface class is unavailable.
+        The early-bound wrapper exposing dispid-fast declared members (and
+        late-bound off-interface members), or ``obj`` unchanged when the
+        wrapper module or interface class is unavailable.
     """
     _ensure_loaded()
     if obj is None or _wrapper_module is None:
         return obj
     cls = getattr(_wrapper_module, interface, None)
+    if cls is None or not inspect.isclass(cls):
+        # The wrapper IS loaded but the requested interface is absent — a wrong
+        # name or an incomplete wrapper. Fail loud rather than silently return an
+        # unwrapped dispatch that breaks with a confusing error much later.
+        raise ValueError(
+            f"early_bound: interface {interface!r} is not defined in the loaded "
+            f"SolidWorks wrapper ({getattr(_wrapper_module, '__name__', '?')}). "
+            "Check the interface name against the type library, or regenerate the "
+            "checked-in wrapper after a SolidWorks version upgrade."
+        )
     oleobj = getattr(obj, "_oleobj_", None)
-    if cls is None or oleobj is None:
+    if oleobj is None:
+        # Not a real COM dispatch (a mock/test double) — nothing to wrap.
+        return obj
+    if isinstance(obj, cls):
         return obj
     try:
-        return cls(oleobj)
+        return _fallback_subclass(cls)(oleobj)
     except Exception:
         return obj
+
+
+def is_early_bound(obj: Any, interface: str) -> bool:
+    """Return whether ``obj`` already uses the generated interface wrapper."""
+    _ensure_loaded()
+    if obj is None or _wrapper_module is None:
+        return False
+    cls = getattr(_wrapper_module, interface, None)
+    return bool(inspect.isclass(cls) and isinstance(obj, cls))
+
+
+# swSketchSegments_e value -> the derived ``ISketch*`` interface that DECLARES
+# the segment's point accessors (``GetStartPoint2``/``GetEndPoint2``/
+# ``GetCenterPoint2``/``GetStartPoint``/``GetEndPoint`` …). swSketchTEXT (4) and
+# swSketchPARABOLA (5) carry no such accessors and are left as ISketchSegment.
+_SKETCH_SEGMENT_INTERFACE: dict[int, str] = {
+    0: "ISketchLine",  # swSketchLINE
+    1: "ISketchArc",  # swSketchARC (also full circles)
+    2: "ISketchEllipse",  # swSketchELLIPSE
+    3: "ISketchSpline",  # swSketchSPLINE
+}
+
+
+def concrete_sketch_segment(obj: Any) -> Any:
+    """Re-bind a sketch segment from base ``ISketchSegment`` to its derived class.
+
+    makepy wraps ``CreateLine``/``CreateArc``/… results as the *base*
+    ``ISketchSegment``, whose generated class does NOT expose the derived point
+    accessors (``GetStartPoint2``, ``GetCenterPoint2``, …) — those live on
+    ``ISketchLine`` / ``ISketchArc`` / …. ``ISketchSegment.GetType()`` names the
+    concrete type (``swSketchSegments_e``), so this re-binds ``obj`` to the
+    matching generated interface, where the accessors are declared DISPID
+    methods — the pattern the ``swSketchSegments_e`` Remarks prescribe ("obtain
+    the appropriate derived class … and call the appropriate derived class
+    functions"). Non-segment dispatches (or a session without the wrapper) pass
+    through unchanged.
+
+    Args:
+        obj: A pywin32 dispatch for a sketch segment (line/arc/circle/spline/
+            ellipse), typically the base ``ISketchSegment`` makepy wrapper.
+
+    Returns:
+        The segment re-bound to its derived interface, or the base
+        ``ISketchSegment`` for the point-less types (``swSketchTEXT`` /
+        ``swSketchPARABOLA``). Raises rather than silently returning an
+        unusable base wrapper when the segment type cannot be read.
+    """
+    segment = early_bound(obj, "ISketchSegment")
+    if not is_early_bound(segment, "ISketchSegment"):
+        return obj  # wrapper module not loaded (mock/degraded) — leave untouched
+    seg_type = int(segment.GetType())
+    interface = _SKETCH_SEGMENT_INTERFACE.get(seg_type)
+    return early_bound(obj, interface) if interface else segment
+
+
+def early_bound_or_flag(obj: Any, interface: str, *method_names: str) -> Any:
+    """Use the generated interface, or selectively flag exact fallback methods."""
+    typed = early_bound(obj, interface)
+    if typed is obj and not is_early_bound(obj, interface):
+        flag_method_names(obj, *method_names)
+    return typed
 
 
 def flag_doc(obj: Any, doc_type: int) -> int:

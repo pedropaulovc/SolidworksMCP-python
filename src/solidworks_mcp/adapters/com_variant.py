@@ -16,18 +16,45 @@ from typing import Any
 
 
 def null_dispatch() -> Any:
-    """Return a typed-null object pointer for optional ``IDispatch`` params.
+    """Return the null value for an optional ``IDispatch`` object-pointer param.
 
-    Under pywin32 late binding a bare Python ``None`` marshals as ``VT_NULL``,
-    which SolidWorks rejects with ``com_error (-2147352571, 'Type mismatch')``.
-    A ``VT_DISPATCH`` null VARIANT supplies the null-object-pointer type the
-    API expects. Used for ``SelectByID2``'s ``Callout`` (see
+    These calls now go through **early binding** (the makepy ``InvokeTypes``
+    path), where a bare Python ``None`` is exactly what a typed ``VT_DISPATCH``
+    slot expects: makepy marshals it to a null ``IDispatch`` and SolidWorks
+    accepts it (probed live on SW 2026 — ``SelectByID2(…, None, 0)`` returns
+    ``True``). The former ``VARIANT(VT_DISPATCH, None)`` was a *late*-binding
+    requirement (dynamic ``Invoke`` rejected bare ``None`` as ``VT_NULL`` with
+    ``Type mismatch``); under early-bound ``InvokeTypes`` that same VARIANT
+    instead fails with ``TypeError: The Python instance can not be converted to
+    a COM object``. Used for ``SelectByID2``'s ``Callout`` (see
     :func:`null_callout`) and ``IModelDocExtension::SaveAs2``'s ``ExportData``.
 
     Returns:
+        Any: ``None`` — the null object pointer for a ``VT_DISPATCH`` param under
+        makepy early binding (also inert for mock adapters, which never reach a
+        real COM boundary).
+    """
+    return None
+
+
+def null_variant() -> Any:
+    """Return the null value for an optional ``System.object`` (VT_VARIANT) param.
+
+    Unlike :func:`null_dispatch` (for a typed ``(9,x)`` ``VT_DISPATCH``
+    object-pointer, where early-bound ``InvokeTypes`` wants a bare ``None``),
+    this is for a param the type library declares as ``(12,x)`` **VT_VARIANT** —
+    ``IEquationMgr::Add3``'s ``ConfigNames``, ``IFeature::SetSuppression2``'s
+    ``Config_names``, ``IMeasure::Calculate``'s ``Entities`` (all "unused /
+    use-selection" when null). For a VT_VARIANT slot pywin32 honors an explicit
+    ``VARIANT`` wrapper, whereas a bare ``None`` marshals as ``VT_NULL`` and the
+    call misbehaves (a silently-unset equation / suppression) — so the
+    ``VARIANT(VT_DISPATCH, None)`` form is REQUIRED here under BOTH binding
+    modes, the opposite of :func:`null_dispatch`.
+
+    Returns:
         Any: ``VARIANT(VT_DISPATCH, None)`` on Windows with pywin32 available;
-        plain ``None`` as a fallback otherwise (mock adapters and CI never
-        reach a real COM boundary, so the value is inert there).
+        plain ``None`` as a fallback otherwise (CI never reaches a real COM
+        boundary).
     """
     try:
         import pythoncom

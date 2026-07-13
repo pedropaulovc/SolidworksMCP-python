@@ -282,54 +282,83 @@ Consequences:
 - Do NOT cache IDispatch references outside instance attributes that are
   only read from executor jobs.
 
-### 2. Late binding is forced, always
+### 2. Early binding is the default, via a checked-in makepy wrapper
 
-``_do_connect`` uses ``win32com.client.dynamic.Dispatch`` instead of
-``win32com.client.Dispatch``. Rationale: when the makepy-generated
-``gen_py`` wrapper is loaded (it is, as soon as ``sw_type_info`` is
-imported), plain ``Dispatch`` would auto-upgrade to an early-bound wrapper.
-Early-bound wrappers reject the VARIANT-based pass-by-ref out-parameters
-used by ``OpenDoc6`` and many other SW calls; migrating to ``pythoncom.Missing``
-for every such call is a much larger change than we want.
+``_do_connect`` acquires the app and wraps it in the generated ``ISldWorks``
+class (``_early_bound_application`` → ``sw_type_info.early_bound(raw,
+"ISldWorks")``). The interface classes come from a **checked-in** makepy
+wrapper — ``adapters/_generated/sldworks_2026.py`` — imported by
+``sw_type_info`` at load time, so startup never depends on a writable
+``%TEMP%\gen_py\`` or on typelib discovery through a ROT proxy. Regenerate it
+with ``scripts/generate_solidworks_stubs.py`` / plain
+``python -m win32com.client.makepy`` only after a SW version bump; SW keeps
+automation-interface IIDs and DISPIDs binary-compatible across releases, so the
+2026 wrapper binds older seats too.
 
-If you add a new COM-touching function: call ``dynamic.Dispatch`` if you
-need to acquire a fresh IDispatch, **not** ``EnsureDispatch``.
+**Why early binding — the old "late binding is forced, always" rationale was
+wrong.** The claim was that early-bound wrappers reject the VARIANT pass-by-ref
+out-parameters used by ``OpenDoc6``. They do not: makepy invokes by DISPID
+through ``InvokeTypes``, which describes each ``[out]`` param from the typelib
+and returns it in the result tuple — ``OpenDoc6`` works early-bound with
+``pythoncom.Missing`` for the trailing ``errors``/``warnings`` exactly as it did
+late-bound. Early binding also **skips** the per-name ``GetIDsOfNames`` /
+``_FlagAsMethod`` round-trips that ``flag_methods`` pays (~155 ms per object) —
+that overhead was ~90% of the drawing-layout audit (issue #277) and a steady tax
+on every part build, which is the whole reason for the migration.
 
-### 3. Method flagging via sw_type_info
+If you add a new COM-touching function, wrap acquired dispatches through
+``sw_type_info.early_bound`` / ``early_bound_or_flag`` (below), **not**
+``dynamic.Dispatch`` and **not** bare ``EnsureDispatch`` (the latter fails on
+SolidWorks's ROT proxy with ``-2147319765 Element not found`` — dispatch a
+ProgID/ROT object first, then apply the generated class via its ``_oleobj_``).
 
-``sw_type_info.flag_methods(obj, *interfaces)`` tells pywin32's late
-binding to resolve specific names as methods (``Invoke`` with method
-flags) rather than properties. Without flagging, zero-arg SW methods like
-``GetTitle()`` raise ``TypeError: 'str' object is not callable`` because
-the dispatch returns the string *value*, which Python then tries to call.
+### 3. Early binding via sw_type_info
 
-Apply flagging:
+``sw_type_info.early_bound(obj, "IFace2")`` returns ``obj`` wrapped in the
+makepy interface class, invoking declared members by DISPID. Use
+``early_bound_or_flag(obj, "IFace2", *fallback_zero_arg_names)`` at call sites:
+it early-binds when the wrapper is present (the normal case) and, only if that
+interface class is unavailable, falls back to flagging the named methods.
+Because ``obj`` is wrapped into a **new** object, the result must be
+**reassigned** — ``x = early_bound_or_flag(x, ...)`` — a discarded result is a
+silent no-op. (In this repo's build scripts use the ``_common._early_bound``
+shim.)
 
-- On ``swApp`` after acquiring it → ``flag_methods(app, "ISldWorks")``
-- On a newly-opened document → ``flag_doc(model, doc_type)`` (infers from
-  doc type: Part=1, Assembly=2, Drawing=3)
-- On any intermediate dispatch returned from a SW call →
-  ``sw_type_info.flagged(x, "IInterfaceName")`` inline-style
+**Off-interface members are safe.** A makepy class exposes only ITS interface's
+members, but SW dispatches are polymorphic: a face is an ``IFace2`` *and* an
+``IEntity`` (``Select2``); a part model answers ``IModelDoc2`` *and*
+``IPartDoc`` (``GetBodies2``). ``early_bound`` returns a
+``_fallback_subclass`` whose ``__getattr__``/``__setattr__`` forward any member
+the named class does not declare to a lazily-built late-bound dispatch on the
+same ``_oleobj_``. So you do **not** have to prove each call site touches only
+one interface, and you never need to flag "just in case". (The manual
+alternative is ``win32com.client.CastTo(obj, "IEntity")`` per off-interface
+call; the fallback automates it.)
 
-Interface names come from the gen_py wrapper (run
-``python -m win32com.client.makepy "C:\\Program Files\\SOLIDWORKS Corp\\SOLIDWORKS\\sldworks.tlb"``
-to regenerate after a SW version upgrade).
+``flag_methods`` / ``flagged`` / ``flag_doc`` remain only where early binding
+can't apply: interfaces **absent from ``sldworks.tlb``** (the undocumented
+motion methods — see ``adapters/solidworks/motion.py``, which uses
+``flag_method_names``), and a few sketch-entity property/method "drift" cases.
+Prefer early binding everywhere else.
 
 ### 4. Properties are still properties
 
 Not every zero-arg accessor is a method. ``IConfiguration.Name``,
 ``ModelDoc2.Visible``, etc. are genuine properties — read them without
-``()``. If you flag them as methods you'll get the opposite TypeError.
-When in doubt, check the gen_py wrapper: methods live in the class body
-as regular defs; properties use ``_prop_map_get_`` / ``_prop_map_put_``.
+``()``. The early-bound wrapper resolves them correctly (makepy properties go
+through ``_prop_map_get_`` / ``_prop_map_put_``, methods are real ``def``\\ s in
+the class body), so you no longer have to reason about method-vs-property
+flagging for declared members. The distinction still matters when you pass
+``*fallback_zero_arg_names`` to ``early_bound_or_flag`` (pass only zero-arg
+methods, never a property name) and in the rare ``flag_*`` fallbacks above.
 
 ### 5. Regression tests
 
 See ``tests/test_live_sw_regression.py`` for the safety net:
 
 - ComExecutor start/stop/exception semantics
-- flag_methods incrementality + per-interface correctness
-- Late-bound ``swApp`` acquisition
+- flag_methods incrementality + per-interface correctness (the fallback path)
+- early-bound ``swApp`` acquisition (``ISldWorks`` wrapper via ``early_bound``)
 - ``get_model_info`` fields populate correctly
 - ``get_model_info`` works from a worker thread (the cross-thread bug
   reproducer)

@@ -149,7 +149,7 @@ def _apply_material_impl(
     def _material_operation() -> dict[str, Any]:
         model = adapter.currentModel
         configuration = params.configuration or _active_configuration_name(adapter)
-        _flag_feature_methods(model, "IPartDoc")
+        model = _flag_feature_methods(model, "IPartDoc")
         model.SetMaterialPropertyName2(configuration, params.database, params.material)
 
         applied = str(_read_member(model, "MaterialIdName") or "")
@@ -206,7 +206,7 @@ def _add_thread_impl(
             raise Exception(f"Failed to select a circular EDGE at {params.edge_point}")
 
         feature_manager = adapter.currentModel.FeatureManager
-        _flag_feature_methods(feature_manager, "IFeatureManager")
+        feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
         feature = feature_manager.InsertCosmeticThread3(
             standard,
             params.standard_type,
@@ -292,7 +292,7 @@ def _insert_tapped_hole_impl(
     def _hole_operation() -> dict[str, Any]:
         adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True))
         feature_manager = adapter.currentModel.FeatureManager
-        _flag_feature_methods(feature_manager, "IFeatureManager")
+        feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
 
         data = feature_manager.CreateDefinition(_SW_FM_HOLE_WZD)
         if data is None:
@@ -311,7 +311,7 @@ def _insert_tapped_hole_impl(
                 f"CreateFeature failed -- size {params.size!r} may be invalid for "
                 f"standard {params.standard!r}/{params.fastener_type!r}"
             )
-        _flag_feature_methods(feature, "IFeature")
+        feature = _flag_feature_methods(feature, "IFeature")
         name = str(_read_member(feature, "Name") or "")
         type_name = str(_read_member(feature, "GetTypeName2") or "")
         if type_name != "HoleWzd":
@@ -364,13 +364,21 @@ def _edit_hole_position_impl(
         feat = adapter._attempt(lambda: model.FirstFeature(), default=None)
         wizard = None
         while feat is not None:
-            feat = _sw_type_info.flagged(feat, "IFeature")
+            feat = _sw_type_info.early_bound_or_flag(
+                feat,
+                "IFeature",
+                "GetTypeName2",
+                "GetNextFeature",
+                "GetFirstSubFeature",
+            )
             if str(_read_member(feat, "Name") or "") == hole_name and (
                 str(_read_member(feat, "GetTypeName2") or "") == "HoleWzd"
             ):
                 wizard = feat
                 break
-            feat = adapter._attempt(lambda f=feat: f.GetNextFeature(), default=None)
+            feat = adapter._attempt(
+                lambda f=feat: _read_member(f, "GetNextFeature"), default=None
+            )
         if wizard is None:
             raise Exception(f"HoleWzd feature {hole_name!r} not found")
 
@@ -379,15 +387,32 @@ def _edit_hole_position_impl(
         sub = adapter._attempt(lambda: wizard.GetFirstSubFeature(), default=None)
         pos_feat = pos_sketch = None
         while sub is not None:
-            sub = _sw_type_info.flagged(sub, "IFeature")
+            sub = _sw_type_info.early_bound_or_flag(
+                sub,
+                "IFeature",
+                "GetTypeName2",
+                "GetSpecificFeature2",
+                "GetNextSubFeature",
+            )
             if str(_read_member(sub, "GetTypeName2") or "") == "ProfileFeature":
-                spec = adapter._attempt(lambda s=sub: s.GetSpecificFeature2(), default=None)
-                spec = _sw_type_info.flagged(spec, "ISketch")
-                pts = adapter._attempt(lambda s=spec: s.GetSketchPoints2(), default=None) or []
+                spec = adapter._attempt(
+                    lambda s=sub: _read_member(s, "GetSpecificFeature2"), default=None
+                )
+                spec = _sw_type_info.early_bound_or_flag(
+                    spec, "ISketch", "GetSketchPoints2"
+                )
+                pts = (
+                    adapter._attempt(
+                        lambda s=spec: _read_member(s, "GetSketchPoints2"), default=None
+                    )
+                    or []
+                )
                 if len(pts) == 1:
                     pos_feat, pos_sketch = sub, spec
                     break
-            sub = adapter._attempt(lambda s=sub: s.GetNextSubFeature(), default=None)
+            sub = adapter._attempt(
+                lambda s=sub: _read_member(s, "GetNextSubFeature"), default=None
+            )
         if pos_sketch is None:
             raise Exception(
                 f"no single-point positioning sketch under HoleWzd {hole_name!r}"
@@ -459,7 +484,7 @@ def _read_bom_table(adapter: Any, table: Any) -> dict[str, Any]:
         dict[str, Any]: ``rows``/``columns`` counts, ``header`` row and
         ``data`` rows (header excluded) as displayed text.
     """
-    _flag_feature_methods(table, "ITableAnnotation")
+    table = _flag_feature_methods(table, "ITableAnnotation")
     row_count = int(_read_member(table, "RowCount") or 0)
     column_count = int(_read_member(table, "ColumnCount") or 0)
 
@@ -503,7 +528,7 @@ def _insert_bom(adapter: Any, params: CreateBomParameters) -> dict[str, Any]:
     configuration = params.configuration or _active_configuration_name(adapter)
 
     extension = adapter.currentModel.Extension
-    _flag_feature_methods(extension, "IModelDocExtension")
+    extension = _flag_feature_methods(extension, "IModelDocExtension")
     table = extension.InsertBomTable4(
         template,
         0,  # X placement

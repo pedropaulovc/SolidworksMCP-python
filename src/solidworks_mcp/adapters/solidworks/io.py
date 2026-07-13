@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from datetime import datetime
-from types import SimpleNamespace
 from typing import Any, cast
 
 from .. import sw_type_info as _sw_type_info
@@ -17,16 +15,7 @@ from ..base import (
     SolidWorksFeature,
     SolidWorksModel,
 )
-from ..com_variant import byref_long, null_callout
-
-try:
-    import pythoncom
-    import win32com.client
-except ImportError:  # pragma: no cover
-    pythoncom = SimpleNamespace()
-    win32com = SimpleNamespace(client=SimpleNamespace())
-
-logger = logging.getLogger(__name__)
+from ..com_variant import null_callout
 
 
 class SolidWorksIOMixin:
@@ -36,6 +25,21 @@ class SolidWorksIOMixin:
     def _adapter(obj: Any) -> Any:
         """Return the runtime adapter object for dynamic attribute access."""
         return cast(Any, obj)
+
+    @staticmethod
+    def _bind_document(model: Any) -> Any:
+        """Early-bind a freshly acquired document to ``IModelDoc2``.
+
+        The base interface carries the members call sites invoke directly
+        (``GetEquationMgr``, ``GetActiveConfiguration``, ``ClearSelection2``,
+        ``Extension`` …); doc-type members (``IPartDoc.GetBodies2``,
+        ``IAssemblyDoc.GetComponents``, ``IDrawingDoc`` …) resolve through the
+        wrapper's late-bound fallback. Without this, ``currentModel`` is a raw
+        dispatch on which a zero-arg method like ``GetEquationMgr()`` resolves
+        as a *property* and the direct call raises — the old code masked this by
+        flagging the whole document interface on open.
+        """
+        return _sw_type_info.early_bound(model, "IModelDoc2")
 
     @staticmethod
     def _is_success(value: Any) -> bool:
@@ -52,6 +56,20 @@ class SolidWorksIOMixin:
         if isinstance(value, (int, float)):
             return value == 0
         return bool(value)
+
+    @staticmethod
+    def _unpack_out_result(value: Any) -> tuple[Any, tuple[Any, ...]]:
+        """Split a makepy retval/[out] tuple into its two parts.
+
+        Generated pywin32 wrappers return ``(retval, out1, ...)`` for methods
+        such as ``OpenDoc6`` and ``Save3``. Scalar compatibility keeps unit
+        doubles and wrappers for methods without outputs straightforward.
+        """
+        if isinstance(value, tuple):
+            if not value:
+                return None, ()
+            return value[0], value[1:]
+        return value, ()
 
     def _resolve_template_path(
         self, preferred_indices: list[int], extension: str
@@ -141,23 +159,21 @@ class SolidWorksIOMixin:
                 raise ValueError(f"Unsupported file type: {resolved_path}")
 
             app = adapter.swApp
-            variant_ctor = getattr(getattr(win32com, "client", None), "VARIANT", None)
-            vt_byref = int(getattr(pythoncom, "VT_BYREF", 0))
-            vt_i4 = int(getattr(pythoncom, "VT_I4", 0))
-            if callable(variant_ctor):
-                errors = variant_ctor(vt_byref | vt_i4, 0)
-                warnings = variant_ctor(vt_byref | vt_i4, 0)
-            else:
-                errors = 0
-                warnings = 0
-            model = app.OpenDoc6(resolved_path, doc_type, 1, "", errors, warnings)
+            open_result = app.OpenDoc6(resolved_path, doc_type, 1, "", 0, 0)
+            # makepy returns the retval followed by OpenDoc6's two [out]
+            # integers.  Retain the scalar form for compatible test doubles and
+            # old wrappers while every real session now acquires ISldWorks via
+            # EnsureDispatch.
+            model, open_outs = self._unpack_out_result(open_result)
+            open_errors = int(open_outs[0]) if len(open_outs) > 0 else 0
+            open_warnings = int(open_outs[1]) if len(open_outs) > 1 else 0
             if not model:
-                raise Exception(f"Failed to open model: {resolved_path}")
+                raise Exception(
+                    f"Failed to open model: {resolved_path} "
+                    f"(errors={open_errors}, warnings={open_warnings})"
+                )
 
-            adapter._attempt(
-                lambda: _sw_type_info.flag_doc(model, int(doc_type)), default=0
-            )
-
+            model = self._bind_document(model)
             adapter.currentModel = model
             title = self._read_model_title(model)
             active_config = adapter._attempt(lambda: model.GetActiveConfiguration())
@@ -260,7 +276,7 @@ class SolidWorksIOMixin:
             if not model:
                 raise Exception("Failed to create new part")
 
-            adapter._attempt(lambda: _sw_type_info.flag_doc(model, 1), default=0)
+            model = self._bind_document(model)
             adapter.currentModel = model
             title = self._read_model_title(model)
             return SolidWorksModel(
@@ -315,7 +331,7 @@ class SolidWorksIOMixin:
             if not model:
                 raise Exception("Failed to create new assembly")
 
-            adapter._attempt(lambda: _sw_type_info.flag_doc(model, 2), default=0)
+            model = self._bind_document(model)
             adapter.currentModel = model
             title = self._read_model_title(model)
             return SolidWorksModel(
@@ -366,7 +382,7 @@ class SolidWorksIOMixin:
             if not model:
                 raise Exception("Failed to create new drawing")
 
-            adapter._attempt(lambda: _sw_type_info.flag_doc(model, 3), default=0)
+            model = self._bind_document(model)
             adapter.currentModel = model
             title = self._read_model_title(model)
             return SolidWorksModel(
@@ -401,11 +417,8 @@ class SolidWorksIOMixin:
           * ``SetSheetScale("", num, den)`` scales by ``num/den``; ``params.scale``
             is passed as ``(scale, 1.0)``.
           * ``LengthUnit``/``ImportMethod``/``ImportHatch``/``ImportDimensions``/
-            ``AddSketchConstraints`` are indexed *properties* (a ``Sheet`` arg),
-            not methods — under pywin32 late binding they are written via a
-            ``DISPATCH_PROPERTYPUT`` ``Invoke`` (see ``_put_indexed``). Each put is
-            best-effort: on failure SolidWorks falls back to the value it computes
-            from the file, which is logged, not fatal.
+            ``AddSketchConstraints`` are indexed properties. The generated
+            ``IImportDxfDwgData`` wrapper exposes their typed ``Set*`` accessors.
 
         Args:
             params: DXF/DWG import parameter bag.
@@ -424,36 +437,6 @@ class SolidWorksIOMixin:
                 status=AdapterResultStatus.ERROR,
                 error=f"DXF/DWG file not found: {params.file_path}",
             )
-
-        def _put_indexed(obj: Any, name: str, value: Any, sheet: str = "") -> bool:
-            """Write an indexed COM property (``prop(Sheet) = value``) via Invoke.
-
-            SolidWorks' ``IImportDxfDwgData`` exposes ``LengthUnit`` /
-            ``ImportMethod`` / ``ImportHatch`` etc. as parameterised properties;
-            pywin32 late binding cannot assign them with ``obj.name(sheet) =
-            value`` syntax, so drive ``IDispatch::Invoke`` directly with
-            ``DISPATCH_PROPERTYPUT``. Best-effort — returns ``False`` (logged) if
-            the put raises, letting the SolidWorks-computed default stand.
-            """
-            try:
-                dispid = obj._oleobj_.GetIDsOfNames(0, name)
-                obj._oleobj_.Invoke(
-                    dispid,
-                    0,
-                    pythoncom.DISPATCH_PROPERTYPUT,
-                    False,
-                    sheet,
-                    value,
-                )
-                return True
-            except Exception as exc:  # pragma: no cover - live COM only
-                logger.debug(
-                    "import_dxf_dwg: could not set %s=%r (%s); using default",
-                    name,
-                    value,
-                    exc,
-                )
-                return False
 
         def _import() -> SolidWorksFeature:
             app = adapter.swApp
@@ -500,12 +483,16 @@ class SolidWorksIOMixin:
                     f"GetImportFileData returned None for {params.file_path}"
                 )
 
+            import_data = _sw_type_info.early_bound(
+                import_data, "IImportDxfDwgData"
+            )
+
             # swImportDxfDwg_ImportToExistingPart = 4; swMM = 0 (swLengthUnit_e).
-            _put_indexed(import_data, "ImportMethod", 4)
-            _put_indexed(import_data, "LengthUnit", 0)
-            _put_indexed(import_data, "ImportHatch", bool(params.import_hatch))
-            _put_indexed(import_data, "ImportDimensions", bool(params.import_dimensions))
-            _put_indexed(import_data, "AddSketchConstraints", bool(params.add_constraints))
+            import_data.SetImportMethod("", 4)
+            import_data.SetLengthUnit("", 0)
+            import_data.SetImportHatch("", bool(params.import_hatch))
+            import_data.SetImportDimensions("", bool(params.import_dimensions))
+            import_data.SetAddSketchConstraints("", bool(params.add_constraints))
 
             # Position/scale are METHODS (no indexed-property marshalling needed).
             # swDwgImportEntitiesPositioning_e.swDwgEntitiesSpecifyPosition = 2:
@@ -672,23 +659,21 @@ class SolidWorksIOMixin:
         def _silent_save_in_place() -> bool:
             """Save the active doc to its own path with a silent ``Save3``.
 
-            ``swSaveAsOptions_Silent (1) | swSaveAsOptions_AvoidRebuildOnSave (8)``
-            with **real** ``VT_BYREF | VT_I4`` out params: a bare ``None`` for
-            the ``Errors``/``Warnings`` params fails the COM call, which forces
-            the blocking parameterless ``Save()`` and its "Component documents
-            must be saved" modal. The real byref params let ``Save3`` write
-            without a dialog. (``8`` is ``AvoidRebuildOnSave`` per the canonical
+            ``swSaveAsOptions_Silent (1) | swSaveAsOptions_AvoidRebuildOnSave (8)``.
+            The generated wrapper marshals the ``Errors``/``Warnings`` outputs
+            and returns ``(success, errors, warnings)``; passing bare ``None``
+            would fail the COM call and risk a blocking fallback save dialog.
+            (``8`` is ``AvoidRebuildOnSave`` per the canonical
             ``swSaveAsOptions_e`` bitmask -- ``SaveReferenced`` is ``4`` -- so this
             saves only the active doc and skips a redundant save-time rebuild; it
             was historically mislabeled "SaveReferenced (8)".)
             """
-            errors, warnings = byref_long(), byref_long()
-            return self._is_success(
-                adapter._attempt(
-                    lambda: adapter.currentModel.Save3(1 | 8, errors, warnings),
-                    default=False,
-                )
+            save_result = adapter._attempt(
+                lambda: adapter.currentModel.Save3(1 | 8, 0, 0),
+                default=False,
             )
+            retval, _outs = self._unpack_out_result(save_result)
+            return self._is_success(retval)
 
         def _save() -> None:
             """Save the model in place, or Save-As to a different path."""

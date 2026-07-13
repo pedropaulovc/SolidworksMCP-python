@@ -546,23 +546,31 @@ def _select_by_point(
     )
 
 
-def _flag_feature_methods(obj: Any, interface: str) -> None:
-    """Best-effort method flagging for a COM object via ``sw_type_info``.
+def _flag_feature_methods(obj: Any, interface: str, *fallback_methods: str) -> Any:
+    """Prefer a generated COM wrapper, selectively flagging as fallback.
 
-    Flagging tells pywin32 late binding to resolve names like ``GetTypeName2``
-    / ``GetNextFeature`` / ``FirstFeature`` as methods.  No-ops on plain test
-    doubles (and any environment without the gen_py wrapper).
+    Generated wrappers invoke known DISPIDs directly.  If makepy data is not
+    available, only ``fallback_methods`` are flagged; callers that omit them
+    retain the legacy whole-interface fallback.  Plain test doubles pass
+    through unchanged.
 
     Args:
         obj: The COM object (or test double) to flag.
         interface: SolidWorks interface name (e.g. ``"IFeature"``).
+        *fallback_methods: Exact names to flag when early binding is unavailable.
+
+    Returns:
+        The generated wrapper, or the original object on fallback.
     """
     try:
         from solidworks_mcp.adapters import sw_type_info
 
-        sw_type_info.flag_methods(obj, interface)
+        methods = fallback_methods or tuple(
+            sw_type_info.interface_method_names(interface)
+        )
+        return sw_type_info.early_bound_or_flag(obj, interface, *methods)
     except Exception:
-        pass
+        return obj
 
 
 def _read_member(obj: Any, name: str) -> Any:
@@ -612,8 +620,10 @@ def _profile_feature_names(adapter: Any) -> list[str]:
     """
     names: list[str] = []
     try:
-        _flag_feature_methods(adapter.currentModel, "IModelDoc2")
-        feat = _read_member(adapter.currentModel, "FirstFeature")
+        model = _flag_feature_methods(
+            adapter.currentModel, "IModelDoc2", "FirstFeature"
+        )
+        feat = _read_member(model, "FirstFeature")
         # Bound the walk so a misbehaving GetNextFeature can't spin forever.
         for _ in range(5000):
             if not feat:
@@ -628,10 +638,9 @@ def _profile_feature_names(adapter: Any) -> list[str]:
             # below goes False, and profile selection silently falls back to
             # the stale ``_last_sketch_name``. ``Name`` is a property and
             # needs no flag (``_read_member`` tolerates either resolution).
-            try:
-                feat._FlagAsMethod("GetTypeName2", "GetNextFeature")
-            except Exception:
-                pass
+            feat = _flag_feature_methods(
+                feat, "IFeature", "GetTypeName2", "GetNextFeature"
+            )
             try:
                 if _read_member(feat, "GetTypeName2") == "ProfileFeature":
                     names.append(str(_read_member(feat, "Name")))
@@ -1293,8 +1302,10 @@ def _feature_objects(adapter: Any) -> list[tuple[str, Any]]:
     """
     out: list[tuple[str, Any]] = []
     try:
-        _flag_feature_methods(adapter.currentModel, "IModelDoc2")
-        feat = _read_member(adapter.currentModel, "FirstFeature")
+        model = _flag_feature_methods(
+            adapter.currentModel, "IModelDoc2", "FirstFeature"
+        )
+        feat = _read_member(model, "FirstFeature")
         for _ in range(5000):
             if not feat:
                 break
@@ -1305,10 +1316,7 @@ def _feature_objects(adapter: Any) -> list[tuple[str, Any]]:
             # diffs quadratic in feature count (~13 s per feature creation on
             # a 30-feature tree). ``Name`` is a property and needs no flag;
             # ``_read_member`` tolerates either resolution anyway.
-            try:
-                feat._FlagAsMethod("GetNextFeature")
-            except Exception:
-                pass
+            feat = _flag_feature_methods(feat, "IFeature", "GetNextFeature")
             try:
                 name = _read_member(feat, "Name")
             except Exception:
@@ -1366,10 +1374,7 @@ def _resolve_feature(adapter: Any, returned: Any, names_before: set[str]) -> Any
     ]
     if not new:
         return None
-    # The walk flags only GetNextFeature (perf); fully flag the one feature
-    # handed to callers so its members dispatch correctly downstream.
-    _flag_feature_methods(new[-1], "IFeature")
-    return new[-1]
+    return _flag_feature_methods(new[-1], "IFeature")
 
 
 def _all_body_edges(adapter: Any) -> list[Any]:
@@ -1378,10 +1383,11 @@ def _all_body_edges(adapter: Any) -> list[Any]:
     bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
     edges: list[Any] = []
     for body in bodies:
-        _flag_feature_methods(body, "IBody2")
+        body = _flag_feature_methods(body, "IBody2", "GetEdges")
         for edge in adapter._attempt(lambda b=body: b.GetEdges(), default=None) or []:
-            _flag_feature_methods(edge, "IEdge")
-            edges.append(edge)
+            edges.append(
+                _flag_feature_methods(edge, "IEdge", "GetClosestPointOn", "Select2")
+            )
     return edges
 
 
@@ -1430,7 +1436,7 @@ def _select_edges_geometric(
                 best, best_d = edge, d
         if best is None:
             return False
-        _flag_feature_methods(best, "IEntity")
+        best = _flag_feature_methods(best, "IEntity", "Select2")
         if not adapter._attempt(lambda e=best: e.Select2(True, 0), default=False):
             return False
     return True
@@ -1442,10 +1448,11 @@ def _all_body_faces(adapter: Any) -> list[Any]:
     bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
     faces: list[Any] = []
     for body in bodies:
-        _flag_feature_methods(body, "IBody2")
+        body = _flag_feature_methods(body, "IBody2", "GetFaces")
         for face in adapter._attempt(lambda b=body: b.GetFaces(), default=None) or []:
-            _flag_feature_methods(face, "IFace2")
-            faces.append(face)
+            faces.append(
+                _flag_feature_methods(face, "IFace2", "GetClosestPointOn", "Select2")
+            )
     return faces
 
 
@@ -1495,7 +1502,7 @@ def _select_faces_geometric(
                 best, best_d = face, d
         if best is None:
             return False
-        _flag_feature_methods(best, "IEntity")
+        best = _flag_feature_methods(best, "IEntity", "Select2")
         keep = append or i > 0
         if not adapter._attempt(lambda f=best, k=keep: f.Select2(k, 0), default=False):
             return False
@@ -1769,7 +1776,9 @@ def _mirror_feature_impl(
             raise Exception(f"Failed to select mirror plane: {params.plane}")
 
         feature_manager = adapter.currentModel.FeatureManager
-        _flag_feature_methods(feature_manager, "IFeatureManager")
+        feature_manager = _flag_feature_methods(
+            feature_manager, "IFeatureManager", "InsertMirrorFeature2"
+        )
         names_before = _feature_names(adapter)
         feature = feature_manager.InsertMirrorFeature2(
             False,  # BMirrorBody (mirror features, not bodies)
@@ -1868,7 +1877,9 @@ def _circular_pattern_impl(
 
         spacing_rad = math.radians(float(params.angle))
         feature_manager = adapter.currentModel.FeatureManager
-        _flag_feature_methods(feature_manager, "IFeatureManager")
+        feature_manager = _flag_feature_methods(
+            feature_manager, "IFeatureManager", "FeatureCircularPattern5"
+        )
         names_before = _feature_names(adapter)
         feature = feature_manager.FeatureCircularPattern5(
             int(params.count),  # Number (incl. seed)
@@ -1962,7 +1973,9 @@ def _linear_pattern_impl(
                 raise Exception(f"Failed to select feature to pattern: {name}")
 
         feature_manager = adapter.currentModel.FeatureManager
-        _flag_feature_methods(feature_manager, "IFeatureManager")
+        feature_manager = _flag_feature_methods(
+            feature_manager, "IFeatureManager", "FeatureLinearPattern5"
+        )
         names_before = _feature_names(adapter)
         feature = feature_manager.FeatureLinearPattern5(
             int(params.count),  # Num1 (incl. seed)
@@ -2119,7 +2132,9 @@ def _draft_impl(
                 raise Exception(f"Failed to select face at point {point} (mm)")
 
         feature_manager = adapter.currentModel.FeatureManager
-        _flag_feature_methods(feature_manager, "IFeatureManager")
+        feature_manager = _flag_feature_methods(
+            feature_manager, "IFeatureManager", "InsertMultiFaceDraft"
+        )
         names_before = _feature_names(adapter)
         feature = feature_manager.InsertMultiFaceDraft(
             math.radians(float(params.angle)),  # Angle (radians)

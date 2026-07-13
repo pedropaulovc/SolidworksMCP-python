@@ -56,10 +56,12 @@ class _FakeEquationMgr:
     def GetCount(self):  # noqa: N802 — COM casing
         return len(self.equations)
 
-    def Equation(self, index, equation=None):  # noqa: N802
-        if equation is None:
-            return self.equations[index]
-        # Property put form (late-bound call with two arguments).
+    def Equation(self, index):  # noqa: N802 — early-bound getter only
+        return self.equations[index]
+
+    def SetEquation(self, index, equation):  # noqa: N802
+        # Early binding splits the indexed Equation property into a getter and
+        # this separate setter method (the late-bound 2-arg put is gone).
         self.put_calls.append((index, equation))
         if not self.fail_put:
             self.equations[index] = equation

@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 # create_part/create_assembly probes in io.py).
 _SW_PREF_TEMPLATE_PART = 8
 _SW_PREF_TEMPLATE_DRAWING = 10
-_SW_DOC_DRAWING = 3  # swDocumentTypes_e.swDocDRAWING
 
 # --- swconst values used below (documented inline; this module stays free of a
 # hard dependency on the generated swconst wrapper so it imports on any seat). --
@@ -179,7 +178,12 @@ def new_drawing(
     )
     if not model:
         raise RuntimeError(f"NewDocument failed for drawing template {template!r}")
-    adapter._attempt(lambda: _sw_type_info.flag_doc(model, _SW_DOC_DRAWING), default=0)
+    # Early-bind the new drawing exactly like the open path (_bind_document):
+    # NewDocument hands back a raw dispatch, and without this currentModel stays
+    # late-bound, so drawing COM calls (SelectByID2's None Callout, …) take the
+    # dynamic path where a bare None mismatches. IModelDoc2's fallback resolves
+    # the IDrawingDoc members, so no flag_doc is needed.
+    model = _sw_type_info.early_bound(model, "IModelDoc2")
     adapter.currentModel = model
     return model
 
@@ -220,7 +224,9 @@ def apply_sheet_format(adapter: Any, format_path: str, *, keep_notes: bool = Tru
     sheet = adapter._attempt(lambda: draw.GetCurrentSheet())
     if not sheet:
         return -1
-    sheet = _sw_type_info.flagged(sheet, "ISheet")
+    sheet = _sw_type_info.early_bound_or_flag(
+        sheet, "ISheet", "SetTemplateName", "ReloadTemplate"
+    )
     adapter._attempt(lambda: sheet.SetTemplateName(format_path))
     result = adapter._attempt(lambda: sheet.ReloadTemplate(bool(keep_notes)), default=None)
     adapter._attempt(lambda: setattr(sheet, "SheetFormatVisible", True))
@@ -362,7 +368,7 @@ def place_view(
             f"CreateDrawViewFromModelView3 failed for {view_name!r} "
             f"(model={model_path!r})"
         )
-    view = _sw_type_info.flagged(view, "IView")
+    view = _sw_type_info.early_bound_or_flag(view, "IView")
     if scale is not None:
         adapter._attempt(
             lambda: setattr(view, "ScaleRatio", double_array([float(scale[0]), float(scale[1])]))
@@ -395,10 +401,10 @@ def iter_views(adapter: Any):
     node = adapter._attempt(lambda: draw.GetFirstView())  # the sheet
     if not node:
         return
-    node = _sw_type_info.flagged(node, "IView")
+    node = _sw_type_info.early_bound_or_flag(node, "IView", "GetNextView")
     node = adapter._get_attr_or_call(node, "GetNextView")  # first real view
     while node:
-        node = _sw_type_info.flagged(node, "IView")
+        node = _sw_type_info.early_bound_or_flag(node, "IView", "GetNextView")
         yield node
         node = adapter._get_attr_or_call(node, "GetNextView")
 
@@ -536,7 +542,7 @@ def _note_text(adapter: Any, annotation: Any) -> str:
     spec = adapter._attempt(lambda a=annotation: a.GetSpecificAnnotation(), default=None)
     if spec is None:
         return ""
-    spec = _sw_type_info.flagged(spec, "INote")
+    spec = _sw_type_info.early_bound_or_flag(spec, "INote", "GetText")
     txt = adapter._attempt(lambda s=spec: s.GetText(), default=None)
     return txt if isinstance(txt, str) else ""
 
@@ -552,10 +558,12 @@ def remove_notes_matching(adapter: Any, substring: str) -> int:
     target = substring.lower()
     hits: list[Any] = []
     for view in list(iter_views(adapter)):
-        vf = _sw_type_info.flagged(view, "IView")
+        vf = _sw_type_info.early_bound_or_flag(view, "IView", "GetFirstAnnotation3")
         an = adapter._attempt(lambda x=vf: x.GetFirstAnnotation3(), default=None)
         while an is not None:
-            anf = _sw_type_info.flagged(an, "IAnnotation")
+            anf = _sw_type_info.early_bound_or_flag(
+                an, "IAnnotation", "GetNext3", "GetSpecificAnnotation", "Select2"
+            )
             nxt = adapter._attempt(lambda x=anf: x.GetNext3(), default=None)
             if target in _note_text(adapter, anf).lower():
                 hits.append(anf)
@@ -598,11 +606,15 @@ def annotate_holes_thru(
     # Gather every diameter display-dimension with its diameter in meters.
     diam: list[tuple[Any, Any, float | None]] = []  # (annotation, disp, dia_m)
     for ann in annotations or []:
-        ann = _sw_type_info.flagged(ann, "IAnnotation")
+        ann = _sw_type_info.early_bound_or_flag(
+            ann, "IAnnotation", "GetSpecificAnnotation", "Select2"
+        )
         disp = adapter._attempt(lambda a=ann: a.GetSpecificAnnotation())
         if not disp:
             continue
-        disp = _sw_type_info.flagged(disp, "IDisplayDimension")
+        disp = _sw_type_info.early_bound_or_flag(
+            disp, "IDisplayDimension", "GetDimension", "SetText"
+        )
         # Diameter-ness is a DISPLAY-dimension property (Type2 -> swDimensionType_e),
         # not IDimension.GetType (which reports the parameter type). Using Type2
         # also distinguishes a real Ø8 callout from an incidental 8 mm linear dim.
@@ -611,7 +623,7 @@ def annotate_holes_thru(
         dim = adapter._attempt(lambda d=disp: d.GetDimension())
         dia_m: float | None = None
         if dim:
-            dim = _sw_type_info.flagged(dim, "IDimension")
+            dim = _sw_type_info.early_bound_or_flag(dim, "IDimension")
             # SystemValue is meters regardless of document units (unlike Value,
             # which reports the model's display units — inches here).
             raw = adapter._get_attr_or_call(dim, "SystemValue")
@@ -666,11 +678,11 @@ def dimension_name(adapter: Any, annotation: Any) -> str:
     disp = adapter._attempt(lambda a=annotation: a.GetSpecificAnnotation())
     if not disp:
         return ""
-    disp = _sw_type_info.flagged(disp, "IDisplayDimension")
+    disp = _sw_type_info.early_bound_or_flag(disp, "IDisplayDimension", "GetDimension")
     dim = adapter._attempt(lambda d=disp: d.GetDimension())
     if not dim:
         return ""
-    dim = _sw_type_info.flagged(dim, "IDimension")
+    dim = _sw_type_info.early_bound_or_flag(dim, "IDimension")
     name = adapter._get_attr_or_call(dim, "Name")
     return name if isinstance(name, str) else ""
 
@@ -704,7 +716,9 @@ def curate_dimensions(
     draw = _draw(adapter)
     survivors: list[Any] = []
     for ann in annotations or []:
-        ann = _sw_type_info.flagged(ann, "IAnnotation")
+        ann = _sw_type_info.early_bound_or_flag(
+            ann, "IAnnotation", "GetSpecificAnnotation", "Select2", "SetPosition"
+        )
         nm = dimension_name(adapter, ann)
         if nm and nm in delete_set:
             _delete_annotation(adapter, ann)
@@ -801,7 +815,9 @@ def add_third_angle_symbol(
     scale = 1.0
     sheet = adapter._attempt(lambda: draw.GetCurrentSheet())
     if sheet:
-        sheet = _sw_type_info.flagged(sheet, "ISheet")
+        sheet = _sw_type_info.early_bound_or_flag(
+            sheet, "ISheet", "GetName", "GetProperties"
+        )
         sheet_name = adapter._get_attr_or_call(sheet, "GetName")
         if isinstance(sheet_name, str) and sheet_name:
             adapter._attempt(lambda: draw.ActivateSheet(sheet_name))
@@ -901,10 +917,10 @@ def add_note(
     if not note:
         logger.warning("InsertNote failed for %r", text[:40])
         return None
-    note = _sw_type_info.flagged(note, "INote")
+    note = _sw_type_info.early_bound_or_flag(note, "INote", "GetAnnotation")
     ann = adapter._attempt(lambda: note.GetAnnotation())
     if ann:
-        ann = _sw_type_info.flagged(ann, "IAnnotation")
+        ann = _sw_type_info.early_bound_or_flag(ann, "IAnnotation", "SetPosition")
         ok = adapter._attempt(lambda: ann.SetPosition(float(x), float(y), 0.0), default=False)
         if not ok:
             logger.warning("note SetPosition failed for %r", text[:40])
@@ -1014,7 +1030,11 @@ def delete_all_tables(adapter: Any) -> int:
     nodes: list[Any] = []
     sheet_view = adapter._attempt(lambda: draw.GetFirstView())  # the sheet node
     if sheet_view:
-        nodes.append(_sw_type_info.flagged(sheet_view, "IView"))
+        nodes.append(
+            _sw_type_info.early_bound_or_flag(
+                sheet_view, "IView", "GetTableAnnotations"
+            )
+        )
     nodes.extend(iter_views(adapter))
     removed = 0
     for view in nodes:
@@ -1024,9 +1044,14 @@ def delete_all_tables(adapter: Any) -> int:
         for tbl in list(tables):
             if not tbl:
                 continue
-            tbl = _sw_type_info.flagged(tbl, "ITableAnnotation")
+            tbl = _sw_type_info.early_bound_or_flag(
+                tbl, "ITableAnnotation", "GetAnnotation"
+            )
             ann = adapter._attempt(lambda t=tbl: t.GetAnnotation())
-            if ann and _delete_annotation(adapter, _sw_type_info.flagged(ann, "IAnnotation")):
+            if ann and _delete_annotation(
+                adapter,
+                _sw_type_info.early_bound_or_flag(ann, "IAnnotation", "Select2"),
+            ):
                 removed += 1
     adapter._attempt(lambda: draw.EditRebuild3())
     return removed
