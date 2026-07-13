@@ -205,7 +205,10 @@ def _upsert_equation(adapter: Any, equation: str, configuration: str) -> dict[st
         return _equation_payload(adapter, manager, index, equation, True)
 
     if existing >= 0:
-        manager.Equation(existing, equation)
+        # Equation is an indexed property: early binding exposes Equation(i) as
+        # the getter only; the PUT is the separate SetEquation(i, value) method.
+        # Equation(i, value) as a put worked only under late binding.
+        manager.SetEquation(existing, equation)
         written = str(manager.Equation(existing) or "")
         if "".join(written.split()) != "".join(equation.split()):
             raise Exception(f"Failed to update equation: {equation}")
