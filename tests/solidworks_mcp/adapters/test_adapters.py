@@ -1856,7 +1856,11 @@ class TestPyWin32AdapterBranches:
         """_activate_target_doc should activate by basename and return the doc."""
         adapter = self._build_adapter(monkeypatch)
         activated_doc = SimpleNamespace(GetTitle=lambda: "wheel.SLDPRT")
-        adapter.swApp = SimpleNamespace(ActivateDoc3=Mock(return_value=activated_doc))
+        # Early-bound ISldWorks::ActivateDoc3 returns (model, errors); the code
+        # passes literal 0 for the [out] Errors and unpacks the tuple.
+        adapter.swApp = SimpleNamespace(
+            ActivateDoc3=Mock(return_value=(activated_doc, 0))
+        )
         target_doc = SimpleNamespace(
             GetPathName=r"C:\parts\wheel.SLDPRT",
             GetTitle=lambda: "wheel.SLDPRT",
@@ -1867,6 +1871,7 @@ class TestPyWin32AdapterBranches:
         assert args[0] == "wheel.SLDPRT"
         assert args[1] is False
         assert args[2] == 1  # swDontRebuildActiveDoc
+        assert args[3] == 0  # literal 0 for the [out] Errors param
 
     def test_activate_target_doc_keeps_doc_when_identity_unknown(
         self, monkeypatch
