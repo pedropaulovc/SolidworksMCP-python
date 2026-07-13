@@ -13,6 +13,7 @@ import math
 from datetime import datetime
 from typing import Any, cast
 
+from .. import sw_type_info as _sw_type_info
 from ..base import (
     AdapterResult,
     AdapterResultStatus,
@@ -451,7 +452,10 @@ def _rename_feature_impl(
     def _rename_operation() -> SolidWorksFeature:
         bare = params.old_name.split("@", 1)[0]
         feature = adapter._attempt(
-            lambda: adapter.currentModel.FeatureByName(bare), default=None
+            lambda: _sw_type_info.early_bound_doc(adapter.currentModel).FeatureByName(
+                bare
+            ),
+            default=None,
         )
         if not feature:
             raise Exception(f"Feature not found: {params.old_name}")

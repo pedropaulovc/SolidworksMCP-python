@@ -158,7 +158,10 @@ def _apply_material_impl(
                 f"Material {params.material!r} was not applied (model reports "
                 f"{applied!r}) — check the material exists in the database"
             )
-        adapter._attempt(lambda: model.EditRebuild3())
+        # ``EditRebuild3`` is an ``IModelDoc2`` member; ``model`` is rebound to
+        # ``IPartDoc`` above for ``SetMaterialPropertyName2``, so drive the rebuild
+        # off the still-``IModelDoc2`` ``currentModel`` handle (same document).
+        adapter._attempt(lambda: adapter.currentModel.EditRebuild3())
         return {"material": params.material, "configuration": configuration}
 
     return cast(

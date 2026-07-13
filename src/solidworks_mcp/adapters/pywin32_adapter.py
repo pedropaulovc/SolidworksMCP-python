@@ -570,15 +570,21 @@ class _SketchGeometryService:
             bool: ``True`` if any of the three select methods succeeded;
             ``False`` if all failed or raised.
         """
+        # A registered sketch segment is rebound to a DERIVED
+        # ``ISketchArc``/``ISketchLine`` (which declares no ``Select*``); bind to
+        # ``ISketchSegment`` — which owns ``Select``/``Select2``/``Select4`` — for
+        # the DISPID-fast select. (NOT ``IEntity``: its ``Select4`` DISPID 65556
+        # collides with ``ISketchSegment.Select2``.)
+        seg = sw_type_info.early_bound(entity, "ISketchSegment")
         selected = self._adapter._attempt(
-            lambda: bool(entity.Select4(append, None)),
+            lambda: bool(seg.Select4(append, None)),
             default=False,
         )
         if selected:
             return True
 
         selected = self._adapter._attempt(
-            lambda: bool(entity.Select2(append, 0)),
+            lambda: bool(seg.Select2(append, 0)),
             default=False,
         )
         if selected:
@@ -586,7 +592,7 @@ class _SketchGeometryService:
 
         return bool(
             self._adapter._attempt(
-                lambda: bool(entity.Select(append)),
+                lambda: bool(seg.Select(append)),
                 default=False,
             )
         )
@@ -1233,7 +1239,12 @@ class _FeatureSelectionService:
             :meth:`try_select_by_extension`) or ``None`` when not applicable
             or all attempts fail.
         """
-        get_component_by_name = getattr(target_doc, "GetComponentByName", None)
+        # ``GetComponentByName`` is an ``IAssemblyDoc`` member; ``target_doc`` may
+        # be an ``IModelDoc2`` handle. Rebind to the concrete doc interface — an
+        # assembly resolves to ``IAssemblyDoc`` (has it), a part to ``IPartDoc``
+        # (does not), so the ``getattr(..., None)`` guard short-circuits for parts.
+        typed_doc = sw_type_info.early_bound_doc(target_doc)
+        get_component_by_name = getattr(typed_doc, "GetComponentByName", None)
         if not callable(get_component_by_name):
             return None
 
@@ -1977,7 +1988,10 @@ class PyWin32Adapter(
             None (operation always succeeds or fails silently)
         """
         try:
-            target_doc.ViewZoomToFit2()
+            # makepy spells it ``ViewZoomtofit2`` (lowercase ``f``); the mixed-case
+            # ``ViewZoomToFit2`` misses the declared DISPID method and would resolve
+            # through the late-bound fallback.
+            target_doc.ViewZoomtofit2()
         except Exception:
             try:
                 active_view = target_doc.ActiveView

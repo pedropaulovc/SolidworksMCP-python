@@ -100,6 +100,19 @@ def _draw(adapter: Any) -> Any:
     return model
 
 
+def _ddoc(adapter: Any) -> Any:
+    """The active drawing rebound to ``IDrawingDoc`` for its doc-type members.
+
+    ``currentModel`` is always ``IModelDoc2`` (``io._bind_document``), which does
+    NOT declare the drawing verbs (``ActivateView``/``ActivateSheet``/
+    ``GetCurrentSheet``/``SetupSheet6``/``InsertModelAnnotations3``/
+    ``GetFirstView``/``CreateDrawViewFromModelView3`` …); those live on
+    ``IDrawingDoc``. Use this for those members and plain :func:`_draw` for the
+    ``IModelDoc2`` members (``EditRebuild3``/``ClearSelection2``).
+    """
+    return _sw_type_info.early_bound(_draw(adapter), "IDrawingDoc")
+
+
 def _resolve_drawing_template(adapter: Any) -> str:
     """Return a usable ``.drwdot`` path, or '' if none can be found.
 
@@ -221,7 +234,7 @@ def apply_sheet_format(adapter: Any, format_path: str, *, keep_notes: bool = Tru
     if not format_path or not os.path.isfile(format_path):
         logger.warning("sheet format not found: %r", format_path)
         return -1
-    sheet = adapter._attempt(lambda: draw.GetCurrentSheet())
+    sheet = adapter._attempt(lambda: _ddoc(adapter).GetCurrentSheet())
     if not sheet:
         return -1
     sheet = _sw_type_info.early_bound_or_flag(
@@ -253,12 +266,12 @@ def setup_sheet(
     ``ForceRebuild3`` afterward so the projection change takes effect.
     """
     draw = _draw(adapter)
-    name = adapter._get_attr_or_call(draw, "GetCurrentSheet")
+    name = adapter._get_attr_or_call(_ddoc(adapter), "GetCurrentSheet")
     sheet_name = adapter._attempt(lambda: adapter._get_attr_or_call(name, "GetName"))
     sheet_name = sheet_name if isinstance(sheet_name, str) else ""
     paper = _SW_PAPER_USER_DEFINED if template == _SW_DWG_TEMPLATE_NONE else 0
     ok = adapter._attempt(
-        lambda: draw.SetupSheet6(
+        lambda: _ddoc(adapter).SetupSheet6(
             sheet_name,
             paper,
             template,
@@ -359,7 +372,7 @@ def place_view(
     """
     draw = _draw(adapter)
     view = adapter._attempt(
-        lambda: draw.CreateDrawViewFromModelView3(
+        lambda: _ddoc(adapter).CreateDrawViewFromModelView3(
             model_path, view_name, float(x), float(y), 0.0
         )
     )
@@ -398,7 +411,7 @@ def iter_views(adapter: Any):
     first actual drawing view, so we skip the sheet and iterate from there.
     """
     draw = _draw(adapter)
-    node = adapter._attempt(lambda: draw.GetFirstView())  # the sheet
+    node = adapter._attempt(lambda: _ddoc(adapter).GetFirstView())  # the sheet
     if not node:
         return
     node = _sw_type_info.early_bound_or_flag(node, "IView", "GetNextView")
@@ -479,7 +492,7 @@ def insert_model_dims(
     name = view_name(adapter, view)
     # Both activate AND select the view: InsertModelAnnotations3 targets the
     # currently *selected* drawing view, and activation alone does not select it.
-    adapter._attempt(lambda: draw.ActivateView(name))
+    adapter._attempt(lambda: _ddoc(adapter).ActivateView(name))
     adapter._attempt(lambda: draw.ClearSelection2(True))
     ext = adapter._attempt(lambda: draw.Extension)  # property, not a method
     selected = False
@@ -500,7 +513,7 @@ def insert_model_dims(
     if hole_callouts:
         types |= _SW_INSERT_HOLE_CALLOUT
     result = adapter._attempt(
-        lambda: draw.InsertModelAnnotations3(
+        lambda: _ddoc(adapter).InsertModelAnnotations3(
             _SW_IMPORT_FROM_ENTIRE_MODEL,
             types,
             bool(all_views),
@@ -760,7 +773,7 @@ def add_overall_dimension(
     ext = adapter._attempt(lambda: draw.Extension)
     if ext is None:
         return None
-    adapter._attempt(lambda: draw.ActivateView(view_name(adapter, view)))
+    adapter._attempt(lambda: _ddoc(adapter).ActivateView(view_name(adapter, view)))
     adapter._attempt(lambda: draw.ClearSelection2(True))
     if vertical:
         (p0, p1), textpos = ((midx, ymin), (midx, ymax)), (xmin - offset, midy)
@@ -813,14 +826,14 @@ def add_third_angle_symbol(
     # leaves a drawing view active, so activate the sheet first or the glyph is
     # drawn into (and clipped by) that view instead of onto the sheet.
     scale = 1.0
-    sheet = adapter._attempt(lambda: draw.GetCurrentSheet())
+    sheet = adapter._attempt(lambda: _ddoc(adapter).GetCurrentSheet())
     if sheet:
         sheet = _sw_type_info.early_bound_or_flag(
             sheet, "ISheet", "GetName", "GetProperties"
         )
         sheet_name = adapter._get_attr_or_call(sheet, "GetName")
         if isinstance(sheet_name, str) and sheet_name:
-            adapter._attempt(lambda: draw.ActivateSheet(sheet_name))
+            adapter._attempt(lambda: _ddoc(adapter).ActivateSheet(sheet_name))
         props = adapter._attempt(lambda: sheet.GetProperties())
         if props and not isinstance(props, str):
             vals = list(props)  # [paperSize, template, scale1, scale2, ...]
@@ -1028,7 +1041,7 @@ def delete_all_tables(adapter: Any) -> int:
     """
     draw = _draw(adapter)
     nodes: list[Any] = []
-    sheet_view = adapter._attempt(lambda: draw.GetFirstView())  # the sheet node
+    sheet_view = adapter._attempt(lambda: _ddoc(adapter).GetFirstView())  # the sheet node
     if sheet_view:
         nodes.append(
             _sw_type_info.early_bound_or_flag(

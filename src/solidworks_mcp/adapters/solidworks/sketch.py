@@ -7,6 +7,7 @@ import sys
 import time
 from typing import Any, cast
 
+from .. import sw_type_info as _sw_type_info
 from ..base import AdapterResult, AdapterResultStatus
 from ..com_variant import null_callout
 
@@ -474,7 +475,9 @@ def _create_sketch_impl(adapter: Any, plane: str) -> AdapterResult[str]:
             if not candidate:
                 continue
             plane_feature, selection_error_candidate = adapter._attempt_with_error(
-                lambda c=candidate: adapter.currentModel.FeatureByName(c)
+                lambda c=candidate: _sw_type_info.early_bound_doc(
+                    adapter.currentModel
+                ).FeatureByName(c)
             )
             if selection_error_candidate:
                 selection_error = selection_error_candidate
@@ -1702,13 +1705,24 @@ def _select_sketch_entities(adapter: Any, entity_ids: list[str], mark: int) -> N
         # original Select4 path.
         if isinstance(entity, (list, tuple)):
             for segment in entity:
-                ok = segment.Select4(True, select_data)
+                # ``Select2``/``Select4`` live on ``ISketchSegment`` (and
+                # ``IEntity``); a registered single segment is rebound to a
+                # DERIVED ``ISketchArc``/``ISketchLine`` (which declares neither),
+                # and a polygon-group element is an un-rebound raw dispatch — so
+                # bind to ``ISketchSegment`` for the DISPID-fast select. (NOT
+                # ``IEntity``: its ``Select4`` DISPID 65556 collides with
+                # ``ISketchSegment.Select2``.)
+                ok = _sw_type_info.early_bound(segment, "ISketchSegment").Select4(
+                    True, select_data
+                )
                 if not ok:
                     raise Exception(
                         f"Failed to select segment of sketch entity '{ent_id}'"
                     )
         else:
-            ok = entity.Select4(True, select_data)
+            ok = _sw_type_info.early_bound(entity, "ISketchSegment").Select4(
+                True, select_data
+            )
             if not ok:
                 raise Exception(f"Failed to select sketch entity '{ent_id}'")
 
@@ -2610,7 +2624,10 @@ def _check_sketch_fully_defined_impl(
 
         if sketch_name:
             sketch_feature = adapter._attempt(
-                lambda: adapter.currentModel.FeatureByName(sketch_name), default=None
+                lambda: _sw_type_info.early_bound_doc(
+                    adapter.currentModel
+                ).FeatureByName(sketch_name),
+                default=None,
             )
             if not sketch_feature:
                 raise Exception(f"Sketch not found: {sketch_name}")
@@ -2629,9 +2646,9 @@ def _check_sketch_fully_defined_impl(
             )
             if sketch_obj is None and adapter._last_sketch_name:
                 sketch_feature = adapter._attempt(
-                    lambda: adapter.currentModel.FeatureByName(
-                        adapter._last_sketch_name
-                    ),
+                    lambda: _sw_type_info.early_bound_doc(
+                        adapter.currentModel
+                    ).FeatureByName(adapter._last_sketch_name),
                     default=None,
                 )
                 sketch_obj = adapter._attempt(
