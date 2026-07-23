@@ -324,8 +324,8 @@ def test_early_bound_or_flag_selectively_flags_when_wrapper_is_unavailable(
     assert obj.flagged == ["GetNextView", "GetOutline"]
 
 
-def test_early_bound_swallows_wrapper_construction_failure(monkeypatch) -> None:
-    """If the wrapper class raises, the original object is returned unchanged."""
+def test_early_bound_raises_on_wrapper_construction_failure(monkeypatch) -> None:
+    """A broken generated cast fails where requested instead of late-binding."""
     from solidworks_mcp.adapters import sw_type_info
 
     class _Boom:
@@ -337,7 +337,8 @@ def test_early_bound_swallows_wrapper_construction_failure(monkeypatch) -> None:
         sw_type_info, "_wrapper_module", SimpleNamespace(IModelDocExtension=_Boom)
     )
     obj = SimpleNamespace(_oleobj_=object())
-    assert sw_type_info.early_bound(obj, "IModelDocExtension") is obj
+    with pytest.raises(RuntimeError, match="failed to construct 'IModelDocExtension'"):
+        sw_type_info.early_bound(obj, "IModelDocExtension")
 
 
 def test_strict_subclass_fails_loud_on_off_interface_members() -> None:

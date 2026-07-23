@@ -480,9 +480,15 @@ def early_bound(obj: Any, interface: str) -> Any:
             (e.g. ``"IModelDocExtension"``).
 
     Returns:
-        The early-bound wrapper exposing dispid-fast declared members (and
-        late-bound off-interface members), or ``obj`` unchanged when the
-        wrapper module or interface class is unavailable.
+        The early-bound wrapper exposing dispid-fast declared members, or
+        ``obj`` unchanged when the wrapper module is unavailable or ``obj``
+        is a mock/test double without a raw ``_oleobj_``.
+
+    Raises:
+        RuntimeError: The generated interface class exists but cannot wrap the
+            object's raw dispatch. This is a real binding failure; returning
+            the late-bound object would hide the regression and restore the
+            per-member COM name-lookup cost this helper exists to remove.
     """
     _ensure_loaded()
     if obj is None or _wrapper_module is None:
@@ -506,8 +512,12 @@ def early_bound(obj: Any, interface: str) -> Any:
         return obj
     try:
         return _strict_subclass(cls)(oleobj)
-    except Exception:
-        return obj
+    except Exception as exc:
+        raise RuntimeError(
+            f"early_bound: failed to construct {interface!r} from "
+            f"{type(obj).__name__} using the loaded SolidWorks wrapper "
+            f"({getattr(_wrapper_module, '__name__', '?')})"
+        ) from exc
 
 
 def is_early_bound(obj: Any, interface: str) -> bool:
