@@ -1,9 +1,16 @@
 """COM VARIANT marshalling helpers for pywin32 late binding.
 
-Late-bound SolidWorks calls take their arguments as VARIANTs. A few argument
-types do not round-trip from plain Python values and need an explicit VARIANT
-wrapper, or the call fails at the COM boundary. This module centralises those
-conversions so every call site marshals them the same way.
+SolidWorks calls take their arguments as VARIANTs. A few argument types do not
+round-trip from plain Python values and need an explicit VARIANT wrapper, or the
+call fails at the COM boundary. This module centralises those conversions so
+every call site marshals them the same way.
+
+It deliberately provides NO by-reference helper for ``[out]`` params. Under the
+generated (makepy) wrapper this adapter uses, every ``[out]`` rides the RETURN
+TUPLE -- ``ret, errors, warnings = doc.Save3(opts, 0, 0)`` -- and a byref VARIANT
+passed there stays UNWRITTEN, which reads as "no data" rather than failing. The
+former ``byref_long`` encoded the opposite, late-bound convention; it had no
+callers left and was removed rather than left as a trap to reach for.
 
 All helpers import ``pywin32`` lazily and degrade to a benign value when it is
 unavailable (e.g. Linux CI running the mock suite), so importing this module is
@@ -77,29 +84,6 @@ def null_callout() -> Any:
         Any: See :func:`null_dispatch`.
     """
     return null_dispatch()
-
-
-def byref_long() -> Any:
-    """Return an in/out ``long`` VARIANT for required by-reference params.
-
-    SolidWorks methods such as ``IModelDocExtension::SaveAs2``/``SaveAs3``
-    take required ``VT_BYREF | VT_I4`` ``Errors``/``Warnings`` parameters.
-    Under late binding these cannot be omitted (``DISP_E_BADPARAMCOUNT``) nor
-    passed as bare ``None`` (``VT_NULL`` type mismatch). After the call the
-    out-value is readable via ``.value``.
-
-    Returns:
-        Any: ``VARIANT(VT_BYREF | VT_I4, 0)`` on Windows with pywin32
-        available; plain ``None`` as a fallback otherwise (CI never reaches a
-        real COM boundary).
-    """
-    try:
-        import pythoncom
-        from win32com.client import VARIANT
-
-        return VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-    except Exception:
-        return None
 
 
 def bstr_array(values: list[str]) -> Any:
