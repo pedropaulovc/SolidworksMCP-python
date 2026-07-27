@@ -82,6 +82,32 @@ def test_is_connector_loaded_requires_live_process(monkeypatch):
     assert r.is_connector_loaded() is True
 
 
+def test_crash_report_pids_scans_the_crash_handler(monkeypatch):
+    # crash_report_pids is just pids_of_image bound to sldexitapp.exe — a NEW pid
+    # is the watchdog's crash signal, so it must scan exactly that image.
+    calls: list[str] = []
+
+    def fake(image: str) -> set[int]:
+        calls.append(image)
+        return {4242}
+
+    monkeypatch.setattr(r, "pids_of_image", fake)
+    assert r.crash_report_pids() == {4242}
+    assert calls == [r.SW_CRASH_HANDLER]
+
+
+def test_is_sldworks_window_hung_false_when_not_running(monkeypatch):
+    # No sldworks.exe => nothing to be hung; the window enumeration is skipped.
+    monkeypatch.setattr(r, "pids_of_image", lambda image: set())
+    assert r.is_sldworks_window_hung() is False
+
+
+def test_pids_of_image_empty_off_windows(monkeypatch):
+    # The Toolhelp scan is Windows-only; everywhere else it is a benign no-op.
+    monkeypatch.setattr(r.os, "name", "posix")
+    assert r.pids_of_image("sldworks.exe") == set()
+
+
 def test_start_refuses_when_already_running(monkeypatch):
     monkeypatch.setattr(r, "_running_images", lambda images: {r.SW_MAIN_PROCESS})
     # Must not attempt a launch (no reset, no Popen) when SW is already up.
