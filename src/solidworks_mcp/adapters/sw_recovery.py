@@ -46,6 +46,7 @@ not automation-friendly. The three observed facts this module reproduces:
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import os
 import subprocess
@@ -70,6 +71,12 @@ from solidworks_mcp.adapters import sw_install
 
 #: The SolidWorks main process.
 SW_MAIN_PROCESS = "sldworks.exe"
+
+#: SolidWorks' own crash-report handler. It only ever runs AFTER ``sldworks.exe``
+#: has crashed (it owns the ``#32770`` "SOLIDWORKS Design" / "…encountered a
+#: problem… Generating crash report" dialog), so a NEW instance appearing is the
+#: earliest reliable "SolidWorks crashed" signal — see :func:`crash_report_pids`.
+SW_CRASH_HANDLER = "sldexitapp.exe"
 
 #: SolidWorks' own session children — die with the main process, swept for safety.
 SW_SESSION_PROCESSES: tuple[str, ...] = (
@@ -390,6 +397,158 @@ def _wait_gone(image: str, timeout: float) -> bool:
             return True
         time.sleep(0.5)
     return not _running_images((image,))
+
+
+# --------------------------------------------------------------------------- #
+# SolidWorks health probes — crash-handler presence + hung top-level window.
+#
+# The "is SolidWorks crashed or wedged?" facts a COM watchdog needs, kept here
+# with the rest of the lifecycle library (harmonic-analyzer's cad/scripts/
+# _watchdog.py consumes them). Pure ctypes (no psutil); each is best-effort and
+# returns the benign answer on any error so a probe glitch never kills a healthy
+# build. These use a PRIVATE ``WinDLL`` with the signatures DECLARED — distinct
+# from the shared ``ctypes.windll`` handles the splash probe above uses —
+# because ctypes defaults an undeclared call's return/args to ``c_int``, which
+# truncates a 64-bit HANDLE (the Toolhelp snapshot) or HWND before the next call
+# and would make the suppressed probe silently return nothing (codex #344).
+# --------------------------------------------------------------------------- #
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+_INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+_kernel32_declared = None
+_user32_declared = None
+
+
+def _toolhelp():
+    """kernel32 with the Toolhelp signatures DECLARED. Private WinDLL (declarations
+    never leak onto the shared ``ctypes.windll`` cache); lazy + cached. Windows-only."""
+    global _kernel32_declared
+    if _kernel32_declared is None:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        k32.Process32FirstW.restype = wintypes.BOOL
+        k32.Process32FirstW.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        k32.Process32NextW.restype = wintypes.BOOL
+        k32.Process32NextW.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        k32.CloseHandle.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        _kernel32_declared = k32
+    return _kernel32_declared
+
+
+def pids_of_image(image_name: str) -> set[int]:
+    """Pids of every running process whose image name matches (case-insensitive).
+
+    Uses a Toolhelp process snapshot (in-process, no ``tasklist`` spawn) — cheap
+    enough for a watchdog to poll on a short interval. ``set()`` off-Windows or on
+    any probe error.
+    """
+    pids: set[int] = set()
+    if os.name != "nt":
+        return pids
+    with contextlib.suppress(Exception):
+        TH32CS_SNAPPROCESS = 0x2
+        kernel32 = _toolhelp()
+        snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == _INVALID_HANDLE_VALUE:
+            return pids
+        try:
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            wanted = image_name.lower()
+            ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+            while ok:
+                if entry.szExeFile.lower() == wanted:
+                    pids.add(int(entry.th32ProcessID))
+                ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snap)
+    return pids
+
+
+def crash_report_pids() -> set[int]:
+    """Pids of SolidWorks' crash-report handler (:data:`SW_CRASH_HANDLER`).
+
+    A NEW pid appearing means ``sldworks.exe`` crashed — sldexitapp owns the
+    ``#32770`` "SOLIDWORKS Design" ("…encountered a problem… Generating crash
+    report") dialog and only ever runs post-crash. A caller decides "crashed" by
+    baselining the pids present when it starts (a stale dialog left over from a
+    previous crash) and treating only a NEW pid as a fresh crash. Do NOT wait on
+    the Windows event log instead: sldexitapp intercepts WER, so the
+    ``AppCrash_sldworks.exe`` entry lands only once the report completes (observed
+    stuck 8.5 h+) — process appearance is the earliest reliable event.
+    """
+    return pids_of_image(SW_CRASH_HANDLER)
+
+
+def _declared_user32():
+    """user32 with the HWND-taking signatures DECLARED (same truncation hazard as
+    :func:`_toolhelp`; private WinDLL, lazy + cached). Windows-only."""
+    global _user32_declared
+    if _user32_declared is None:
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        u32.IsWindowVisible.restype = wintypes.BOOL
+        u32.IsWindowVisible.argtypes = [wintypes.HWND]
+        u32.IsHungAppWindow.restype = wintypes.BOOL
+        u32.IsHungAppWindow.argtypes = [wintypes.HWND]
+        u32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        u32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        _user32_declared = u32
+    return _user32_declared
+
+
+def is_sldworks_window_hung() -> bool:
+    """True when a visible ``sldworks.exe`` top-level window fails ``IsHungAppWindow``.
+
+    A best-effort wedge signal that is NOISY on its own: SolidWorks legitimately
+    stops pumping window messages while resolving complex geometry, so a caller
+    should treat this as advisory (observe/log), not a hard failure. ``False``
+    off-Windows or on any probe error.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        sw_pids = pids_of_image(SW_MAIN_PROCESS)
+        if not sw_pids:
+            return False
+        user32 = _declared_user32()
+        hung = False
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _on_window(hwnd, _lparam):
+            nonlocal hung
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in sw_pids and user32.IsHungAppWindow(hwnd):
+                hung = True
+                return False
+            return True
+
+        user32.EnumWindows(_on_window, 0)
+        return hung
+    except Exception:  # noqa: BLE001 - probe is best-effort, never fatal
+        return False
 
 
 # --------------------------------------------------------------------------- #
