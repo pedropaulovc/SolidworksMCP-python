@@ -47,6 +47,7 @@ This module:
 from __future__ import annotations
 
 import inspect
+import threading
 import weakref
 from pathlib import Path
 from typing import Any
@@ -82,8 +83,11 @@ _AUX_TYPELIBS: dict[str, str] = {
     "swdimxpert.tlb": "{582D0D5B-FF58-42CD-8968-A8A001A52454}",
 }
 
-# Loaded aux wrapper modules; None = not yet attempted (lazy).
+# Loaded aux wrapper modules; None = not yet attempted (lazy). Published only
+# AFTER every registered typelib has been attempted (under _aux_lock), so a
+# concurrent first lookup never observes a half-built list.
 _aux_modules: list[Any] | None = None
+_aux_lock = threading.Lock()
 
 # Module state: populated by _load_wrapper() the first time it's needed.
 _wrapper_module: Any | None = None
@@ -249,37 +253,44 @@ def _load_aux_wrappers() -> list[Any]:
     global _aux_modules
     if _aux_modules is not None:
         return _aux_modules
-    _aux_modules = []
-    if not PYWIN32_AVAILABLE:
-        return _aux_modules
-    import pythoncom
+    with _aux_lock:
+        if _aux_modules is not None:  # lost the race — another thread finished
+            return _aux_modules
+        loaded: list[Any] = []
+        if not PYWIN32_AVAILABLE:
+            _aux_modules = loaded
+            return _aux_modules
+        import pythoncom
 
-    for filename, expected_iid in _AUX_TYPELIBS.items():
-        path = _find_aux_tlb(filename)
-        if path is None:
-            logger.warning(
-                f"auxiliary typelib {filename} not found; its interfaces are "
-                "unavailable to early_bound"
-            )
-            continue
-        try:
-            iid, lcid, _syskind, major, minor, _flags = pythoncom.LoadTypeLib(
-                str(path)
-            ).GetLibAttr()
-            if str(iid) != expected_iid:
+        for filename, expected_iid in _AUX_TYPELIBS.items():
+            path = _find_aux_tlb(filename)
+            if path is None:
                 logger.warning(
-                    f"{filename} reports IID {iid}, expected {expected_iid}; "
-                    "binding it anyway"
+                    f"auxiliary typelib {filename} not found; its interfaces are "
+                    "unavailable to early_bound"
                 )
-            module = gencache.EnsureModule(str(iid), lcid, major, minor)
-            if module is None:
-                raise RuntimeError("gencache.EnsureModule returned None")
-        except Exception as exc:
-            logger.warning(f"auxiliary typelib {filename} failed to load: {exc}")
-            continue
-        _register_strict_classes(module)
-        _aux_modules.append(module)
-        logger.info(f"auxiliary SolidWorks typelib loaded: {filename} ({module.__name__})")
+                continue
+            try:
+                iid, lcid, _syskind, major, minor, _flags = pythoncom.LoadTypeLib(
+                    str(path)
+                ).GetLibAttr()
+                if str(iid) != expected_iid:
+                    logger.warning(
+                        f"{filename} reports IID {iid}, expected {expected_iid}; "
+                        "binding it anyway"
+                    )
+                module = gencache.EnsureModule(str(iid), lcid, major, minor)
+                if module is None:
+                    raise RuntimeError("gencache.EnsureModule returned None")
+            except Exception as exc:
+                logger.warning(f"auxiliary typelib {filename} failed to load: {exc}")
+                continue
+            _register_strict_classes(module)
+            loaded.append(module)
+            logger.info(
+                f"auxiliary SolidWorks typelib loaded: {filename} ({module.__name__})"
+            )
+        _aux_modules = loaded
     return _aux_modules
 
 
