@@ -35,7 +35,10 @@ interfaces; per-interface flagging is ~1-3 s, whole-object early binding is ~0.
 This module:
 
 1. Loads the checked-in makepy wrapper for ``sldworks.tlb`` (``gen_py`` and
-   lazy generation remain only as compatibility fallbacks).
+   lazy generation remain only as compatibility fallbacks), plus lazily
+   generated wrappers for the auxiliary typelibs in ``_AUX_TYPELIBS``
+   (``swdimxpert.tlb`` — whose dispatches expose no type info, making this
+   wrapper the ONLY way to early-bind them).
 2. Builds per-interface sets of method names for the flagging fallback.
 3. Exposes ``early_bound`` / ``early_bound_or_flag`` (primary) and
    ``flag_methods`` / ``flag_method_names`` / ``flag_doc`` (fallback).
@@ -44,7 +47,9 @@ This module:
 from __future__ import annotations
 
 import inspect
+import threading
 import weakref
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -60,6 +65,29 @@ except ImportError:
 
 # SolidWorks type library IID (stable across SW versions).
 SW_TLB_IID = "{83A33D31-27C5-11CE-BFD4-00400513BB57}"
+
+# Auxiliary SolidWorks typelibs whose interfaces ``early_bound`` also serves,
+# keyed by the .tlb filename next to sldworks.exe, valued by the expected IID.
+#
+# The DimXpert library is the motivating case: its dispatches expose NO type
+# info (``GetTypeInfo`` -> "Invalid index"), so ``win32com.client.Dispatch``
+# and ``CastTo`` BOTH silently fall back to a late-bound ``CDispatch`` — and
+# every property PUT is then refused (``Property '<unknown>.X' can not be
+# set``). Constructing the makepy class generated from ``swdimxpert.tlb``
+# around the RAW ``_oleobj_`` is the only binding that works, which is exactly
+# what :func:`early_bound` does. Unlike ``sldworks.tlb`` there is no checked-in
+# wrapper for these: the module is makepy-generated into the user's ``gen_py``
+# cache on first use (~0.1 s), lazily, only when an interface misses the
+# primary wrapper — a mock/SolidWorks-free session never pays it.
+_AUX_TYPELIBS: dict[str, str] = {
+    "swdimxpert.tlb": "{582D0D5B-FF58-42CD-8968-A8A001A52454}",
+}
+
+# Loaded aux wrapper modules; None = not yet attempted (lazy). Published only
+# AFTER every registered typelib has been attempted (under _aux_lock), so a
+# concurrent first lookup never observes a half-built list.
+_aux_modules: list[Any] | None = None
+_aux_lock = threading.Lock()
 
 # Module state: populated by _load_wrapper() the first time it's needed.
 _wrapper_module: Any | None = None
@@ -173,7 +201,7 @@ def _load_wrapper() -> None:
             _interface_methods[name] = frozenset(method_names)
 
     # Make TYPED returns strict too (see _register_strict_classes).
-    _register_strict_classes()
+    _register_strict_classes(_wrapper_module)
 
     logger.info(
         f"SolidWorks type info loaded: {len(_interface_methods)} interfaces, "
@@ -185,6 +213,98 @@ def _ensure_loaded() -> None:
     """Lazy-load the wrapper on first use."""
     if _wrapper_module is None and PYWIN32_AVAILABLE:
         _load_wrapper()
+
+
+def _find_aux_tlb(filename: str) -> Path | None:
+    """Locate an auxiliary .tlb next to the registered SolidWorks server exe,
+    falling back to the conventional install roots."""
+    try:
+        from . import sw_install
+
+        exe = sw_install.resolve_com_server_path()
+    except Exception:
+        exe = None
+    if exe:
+        candidate = Path(exe).parent / filename
+        if candidate.is_file():
+            return candidate
+    hits: list[Path] = []
+    for pattern in (
+        (Path(r"C:\Program Files\Dassault Systemes"), f"SOLIDWORKS*/SOLIDWORKS/{filename}"),
+        (Path(r"C:\Program Files\SOLIDWORKS Corp"), f"SOLIDWORKS/{filename}"),
+    ):
+        root, glob = pattern
+        if root.is_dir():
+            hits.extend(sorted(root.glob(glob)))
+    return hits[-1] if hits else None
+
+
+def _load_aux_wrappers() -> list[Any]:
+    """makepy-generate (and import) the auxiliary typelib wrappers.
+
+    Lazy and memoized: runs on the first :func:`early_bound` miss against the
+    primary wrapper. Best-effort per library — a seat without the .tlb (mock
+    mode, no SolidWorks install) simply yields no aux modules, and
+    ``early_bound`` then raises its normal unknown-interface ``ValueError``.
+    The typelib version is read off the installed file (``LoadTypeLib`` →
+    ``GetLibAttr``), never hard-coded, so a SolidWorks upgrade that bumps the
+    library version keeps binding without a code change.
+    """
+    global _aux_modules
+    if _aux_modules is not None:
+        return _aux_modules
+    with _aux_lock:
+        if _aux_modules is not None:  # lost the race — another thread finished
+            return _aux_modules
+        loaded: list[Any] = []
+        if not PYWIN32_AVAILABLE:
+            _aux_modules = loaded
+            return _aux_modules
+        import pythoncom
+
+        for filename, expected_iid in _AUX_TYPELIBS.items():
+            path = _find_aux_tlb(filename)
+            if path is None:
+                logger.warning(
+                    f"auxiliary typelib {filename} not found; its interfaces are "
+                    "unavailable to early_bound"
+                )
+                continue
+            try:
+                iid, lcid, _syskind, major, minor, _flags = pythoncom.LoadTypeLib(
+                    str(path)
+                ).GetLibAttr()
+                if str(iid) != expected_iid:
+                    logger.warning(
+                        f"{filename} reports IID {iid}, expected {expected_iid}; "
+                        "binding it anyway"
+                    )
+                module = gencache.EnsureModule(str(iid), lcid, major, minor)
+                if module is None:
+                    raise RuntimeError("gencache.EnsureModule returned None")
+            except Exception as exc:
+                logger.warning(f"auxiliary typelib {filename} failed to load: {exc}")
+                continue
+            _register_strict_classes(module)
+            loaded.append(module)
+            logger.info(
+                f"auxiliary SolidWorks typelib loaded: {filename} ({module.__name__})"
+            )
+        _aux_modules = loaded
+    return _aux_modules
+
+
+def _interface_class(interface: str) -> type | None:
+    """Resolve an interface name to its makepy class — primary wrapper first,
+    then the lazily-loaded auxiliary typelibs."""
+    cls = getattr(_wrapper_module, interface, None) if _wrapper_module else None
+    if inspect.isclass(cls):
+        return cls
+    for module in _load_aux_wrappers():
+        cls = getattr(module, interface, None)
+        if inspect.isclass(cls):
+            return cls
+    return None
 
 
 def interface_method_names(interface: str) -> frozenset[str]:
@@ -398,7 +518,7 @@ def _strict_subclass(base: type) -> type:
     return _EarlyBoundStrict
 
 
-def _register_strict_classes() -> None:
+def _register_strict_classes(module: Any) -> None:
     """Make TYPED COM returns construct the strict subclass, not the plain
     makepy class.
 
@@ -433,7 +553,7 @@ def _register_strict_classes() -> None:
         from win32com.client import CLSIDToClass
     except Exception:
         return
-    mapping = getattr(_wrapper_module, "CLSIDToClassMap", None)
+    mapping = getattr(module, "CLSIDToClassMap", None)
     if not mapping:
         return
     for clsid, cls in list(mapping.items()):
@@ -493,14 +613,16 @@ def early_bound(obj: Any, interface: str) -> Any:
     _ensure_loaded()
     if obj is None or _wrapper_module is None:
         return obj
-    cls = getattr(_wrapper_module, interface, None)
-    if cls is None or not inspect.isclass(cls):
-        # The wrapper IS loaded but the requested interface is absent — a wrong
-        # name or an incomplete wrapper. Fail loud rather than silently return an
-        # unwrapped dispatch that breaks with a confusing error much later.
+    cls = _interface_class(interface)
+    if cls is None:
+        # The wrapper IS loaded but the requested interface is absent from it
+        # AND from every auxiliary typelib — a wrong name or an incomplete
+        # wrapper. Fail loud rather than silently return an unwrapped dispatch
+        # that breaks with a confusing error much later.
         raise ValueError(
             f"early_bound: interface {interface!r} is not defined in the loaded "
-            f"SolidWorks wrapper ({getattr(_wrapper_module, '__name__', '?')}). "
+            f"SolidWorks wrapper ({getattr(_wrapper_module, '__name__', '?')}) "
+            f"or any auxiliary typelib ({', '.join(sorted(_AUX_TYPELIBS))}). "
             "Check the interface name against the type library, or regenerate the "
             "checked-in wrapper after a SolidWorks version upgrade."
         )
@@ -525,8 +647,8 @@ def is_early_bound(obj: Any, interface: str) -> bool:
     _ensure_loaded()
     if obj is None or _wrapper_module is None:
         return False
-    cls = getattr(_wrapper_module, interface, None)
-    return bool(inspect.isclass(cls) and isinstance(obj, cls))
+    cls = _interface_class(interface)
+    return bool(cls is not None and isinstance(obj, cls))
 
 
 # swSketchSegments_e value -> the derived ``ISketch*`` interface that DECLARES
