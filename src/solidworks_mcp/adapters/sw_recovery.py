@@ -50,6 +50,7 @@ import contextlib
 import ctypes
 import os
 import subprocess
+import threading
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -355,37 +356,47 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _running_images(candidates: tuple[str, ...]) -> set[str]:
-    """Return the subset of ``candidates`` (image names) currently running."""
-    if os.name != "nt":
-        return set()
-    running: set[str] = set()
-    try:
-        result = subprocess.run(
-            ["tasklist", "/NH", "/FO", "CSV"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            creationflags=_NO_WINDOW,
-        )
-    except (OSError, subprocess.SubprocessError):  # pragma: no cover - defensive
-        return set()
-    low = result.stdout.lower()
-    for image in candidates:
-        if image.lower() in low:
-            running.add(image)
-    return running
+    """Return the subset of ``candidates`` (image names) currently running.
+
+    Uses an in-process Toolhelp snapshot (:func:`_snapshot_image_names`), NOT a
+    ``tasklist`` subprocess. The former ``subprocess.run(["tasklist", ...],
+    capture_output=True, timeout=15)`` could wedge the CALLER indefinitely
+    despite its timeout: on ``TimeoutExpired`` CPython kills the child and then
+    drains the pipes with an UNTIMED ``communicate()``, which never returns when
+    another concurrently-spawned long-lived child inherited the pipe's write
+    handle (classic Windows inheritance pitfall; observed parking a doit parent
+    for 20+ minutes at the ``_communicate -> join`` frame with no tasklist
+    process left alive). The snapshot walk spawns nothing, so there is nothing
+    to drain and no handle to leak.
+    """
+    running = _snapshot_image_names()
+    return {image for image in candidates if image.lower() in running}
 
 
 def _taskkill(image: str, *, tree: bool = False) -> None:
-    """Force-kill every process with ``image`` (optionally its child tree)."""
+    """Force-kill every process with ``image`` (optionally its child tree).
+
+    No pipes: all three stdio handles are ``DEVNULL`` (the output was never
+    used), so the untimed-drain wedge :func:`_running_images` documents cannot
+    occur here — on a timeout there is nothing to ``communicate()`` with.
+    """
     args = ["taskkill", "/F", "/IM", image]
     if tree:
         args.append("/T")
     try:
-        subprocess.run(
-            args, capture_output=True, text=True, timeout=30, creationflags=_NO_WINDOW
+        proc = subprocess.Popen(
+            args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
         )
-    except (OSError, subprocess.SubprocessError):  # pragma: no cover - defensive
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            proc.kill()
+            logger.warning("taskkill {} timed out", image)
+    except OSError:  # pragma: no cover - defensive
         logger.warning("taskkill {} failed", image)
 
 
@@ -454,6 +465,36 @@ def _toolhelp():
     return _kernel32_declared
 
 
+def _snapshot_processes() -> list[tuple[int, str]]:
+    """``(pid, image_name_lowered)`` for every running process, via one Toolhelp
+    snapshot (in-process, no subprocess spawn). ``[]`` off-Windows or on any
+    probe error."""
+    entries: list[tuple[int, str]] = []
+    if os.name != "nt":
+        return entries
+    with contextlib.suppress(Exception):
+        TH32CS_SNAPPROCESS = 0x2
+        kernel32 = _toolhelp()
+        snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == _INVALID_HANDLE_VALUE:
+            return entries
+        try:
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+            while ok:
+                entries.append((int(entry.th32ProcessID), entry.szExeFile.lower()))
+                ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snap)
+    return entries
+
+
+def _snapshot_image_names() -> set[str]:
+    """Lower-cased image names of every running process (one Toolhelp walk)."""
+    return {name for _pid, name in _snapshot_processes()}
+
+
 def pids_of_image(image_name: str) -> set[int]:
     """Pids of every running process whose image name matches (case-insensitive).
 
@@ -461,27 +502,8 @@ def pids_of_image(image_name: str) -> set[int]:
     enough for a watchdog to poll on a short interval. ``set()`` off-Windows or on
     any probe error.
     """
-    pids: set[int] = set()
-    if os.name != "nt":
-        return pids
-    with contextlib.suppress(Exception):
-        TH32CS_SNAPPROCESS = 0x2
-        kernel32 = _toolhelp()
-        snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-        if not snap or snap == _INVALID_HANDLE_VALUE:
-            return pids
-        try:
-            entry = _PROCESSENTRY32W()
-            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
-            wanted = image_name.lower()
-            ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
-            while ok:
-                if entry.szExeFile.lower() == wanted:
-                    pids.add(int(entry.th32ProcessID))
-                ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
-        finally:
-            kernel32.CloseHandle(snap)
-    return pids
+    wanted = image_name.lower()
+    return {pid for pid, name in _snapshot_processes() if name == wanted}
 
 
 def crash_report_pids() -> set[int]:
@@ -729,15 +751,71 @@ def wait_until_connected(timeout: float = 300.0) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def _attach_probe_once() -> bool:
+    """One COM attach + one RPC against the running SolidWorks; ``False`` on any
+    failure (including pywin32 being unavailable off-Windows)."""
+    try:
+        import pythoncom
+        import win32com.client
+
+        pythoncom.CoInitialize()
+        try:
+            app = win32com.client.GetActiveObject("SldWorks.Application")
+            # A real RPC (not just the ROT lookup): proves the server's STA
+            # answers calls, which is exactly what an adapter attach needs.
+            return int(app.GetProcessID()) > 0
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception:
+        return False
+
+
+def com_attach_probe(timeout: float = 5.0) -> bool:
+    """Report whether a live SolidWorks answers a COM attach within ``timeout``.
+
+    ``GetActiveObject`` only ATTACHES to an existing ROT registration — it can
+    never launch a new instance, so probing is always license-safe (COM-starting
+    SolidWorks is what yields an unlicensed session; attaching is not). The
+    probe runs on a daemon thread with its own COM apartment so a non-pumping
+    (hung) server can only burn the probe's deadline, never wedge the caller.
+    """
+    result: list[bool] = []
+
+    def _run() -> None:
+        result.append(_attach_probe_once())
+
+    thread = threading.Thread(target=_run, daemon=True, name="sw-attach-probe")
+    thread.start()
+    thread.join(timeout)
+    return bool(result and result[0])
+
+
 def detect_state() -> SolidWorksState:
-    """Resolve the current SolidWorks lifecycle state from processes + registry."""
+    """Resolve the current SolidWorks lifecycle state from processes + registry.
+
+    Registry flags are consulted first (cheap, no COM), but they are PERSISTENT
+    breadcrumbs, not live truth: an interactive session can drift
+    ``CONNECTED_LOAD_STATUS`` back to 1 while the instance stays perfectly
+    attachable (observed 2026-08-01 — a build attached fine at 13:27, yet the
+    flag read 1 and ``detect_state`` kept reporting ``STARTING``). So when the
+    process is up, unwedged, and merely FLAG-disconnected, a cheap attach probe
+    (:func:`com_attach_probe`) outranks the flags for the ATTACH path. The
+    flags keep gating the LAUNCH path (:func:`wait_until_connected`), where
+    "the connector finished loading THIS session" is the fact that matters.
+    """
     if not _running_images((SW_MAIN_PROCESS,)):
         return SolidWorksState.NOT_RUNNING
     if is_dotnet_splash_wedged():
         return SolidWorksState.DOTNET_SPLASH_WEDGE
     if is_connector_loaded():
         return SolidWorksState.CONNECTED
-    # Running, not wedged, connector not (yet) loaded.
+    if com_attach_probe():
+        logger.info(
+            "Registry flags read disconnected but a COM attach answered; "
+            "treating SolidWorks as CONNECTED (stale persistent flags)"
+        )
+        return SolidWorksState.CONNECTED
+    # Running, not wedged, connector not (yet) loaded, not attachable.
     s = read_last_run_status()
     if str(s.get("CONNECTED_LOAD_STATUS", "")) in ("", "0", "1"):
         return SolidWorksState.STARTING
