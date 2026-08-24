@@ -824,19 +824,24 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
         )
 
     async def add_fillet(
-        self, radius: float, edge_points: list[list[float]]
+        self,
+        radius: float,
+        edge_points: list[list[float]],
+        propagate: bool = True,
     ) -> AdapterResult[SolidWorksFeature]:
         """Mock adding a fillet feature to edges located by coordinate.
 
         Args:
             radius (float): Fillet radius in millimeters.
             edge_points (list[list[float]]): Points on edges to fillet.
+            propagate (bool): Propagate along tangent-continuous edges.
 
         Returns:
             AdapterResult[SolidWorksFeature]: The result produced by the operation.
         """
         return await self._mock_feature(
-            "Fillet", {"radius": radius, "edge_points": edge_points}
+            "Fillet",
+            {"radius": radius, "edge_points": edge_points, "propagate": propagate},
         )
 
     async def add_chamfer(

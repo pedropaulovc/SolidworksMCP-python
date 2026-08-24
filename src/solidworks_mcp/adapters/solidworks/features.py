@@ -53,9 +53,12 @@ class SolidWorksFeaturesMixin:
         return _create_cut_extrude_impl(self, params)
 
     async def add_fillet(
-        self, radius: float, edge_points: list[list[float]]
+        self,
+        radius: float,
+        edge_points: list[list[float]],
+        propagate: bool = True,
     ) -> AdapterResult[SolidWorksFeature]:
-        return _add_fillet_impl(self, radius, edge_points)
+        return _add_fillet_impl(self, radius, edge_points, propagate)
 
     async def add_chamfer(
         self,
@@ -1535,7 +1538,10 @@ def _select_edge_points(adapter: Any, edge_points: list[list[float]]) -> None:
 
 
 def _add_fillet_impl(
-    adapter: Any, radius: float, edge_points: list[list[float]]
+    adapter: Any,
+    radius: float,
+    edge_points: list[list[float]],
+    propagate: bool = True,
 ) -> AdapterResult[SolidWorksFeature]:
     """Create a constant-radius fillet on edges located by coordinate.
 
@@ -1551,6 +1557,12 @@ def _add_fillet_impl(
         radius: Fillet radius in **millimetres**.  Converted to metres before
             the COM call.
         edge_points: Points ``[x, y, z]`` in mm, one per edge to fillet.
+        propagate: Propagate to tangent faces (the UI default). On a CLOSED
+            tangent-continuous edge loop (e.g. a rounded-triangle rim: lines
+            tangent to arcs all the way around) propagation cannot close and
+            ``FeatureFillet3`` returns null for ANY seed on the loop — pass
+            ``False`` and list every loop edge in ``edge_points`` instead
+            (verified on SW 2026, McMaster 91247A720 logo-ring rims).
 
     Returns:
         AdapterResult[SolidWorksFeature]: On success, ``data`` is a
@@ -1579,7 +1591,7 @@ def _add_fillet_impl(
         # the old SelectByID2-by-name path could never select an edge live.)
         feature = adapter.currentModel.FeatureFillet3(
             radius / 1000.0,  # R1 (metres)
-            True,  # Propagate to tangent faces
+            propagate,  # Propagate to tangent faces (False for closed tangent loops)
             0,  # Ftyp (0 = constant-size round)
             False,  # VarRadTyp
             0,  # OverflowType (default)
@@ -1596,7 +1608,11 @@ def _add_fillet_impl(
             name=str(_read_member(feature, "Name")),
             type="Fillet",
             id=adapter._get_feature_id(feature),
-            parameters={"radius": radius, "edge_points": edge_points},
+            parameters={
+                "radius": radius,
+                "edge_points": edge_points,
+                "propagate": propagate,
+            },
             properties={"created": datetime.now().isoformat()},
         )
 

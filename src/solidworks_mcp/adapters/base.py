@@ -2116,7 +2116,10 @@ class SolidWorksAdapter(ABC):
         )
 
     async def add_fillet(
-        self, radius: float, edge_points: list[list[float]]
+        self,
+        radius: float,
+        edge_points: list[list[float]],
+        propagate: bool = True,
     ) -> AdapterResult[Any]:
         """Add a fillet feature to edges located by coordinate.
 
@@ -2128,6 +2131,12 @@ class SolidWorksAdapter(ABC):
             radius (float): Fillet radius in millimeters.
             edge_points (list[list[float]]): Points ``[x, y, z]`` in mm, one per
                 edge to fillet.
+            propagate (bool): Propagate the fillet along tangent-continuous
+                edges (the UI default). Pass ``False`` and select every edge
+                explicitly for a closed tangent-continuous loop — propagation
+                fails to close on such loops (``FeatureFillet3`` returns null
+                for any seed on them), while the same fillet succeeds with all
+                loop edges selected and no propagation.
 
         Returns:
             AdapterResult: Feature result or error.

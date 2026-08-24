@@ -368,6 +368,14 @@ class AddFilletInput(CompatInput):
             "edge (SolidWorks edges have no stable name)."
         ),
     )
+    propagate: bool = Field(
+        default=True,
+        description=(
+            "Propagate along tangent-continuous edges (the UI default). Set "
+            "False and list every edge explicitly for a CLOSED tangent loop — "
+            "propagation fails to close on such loops."
+        ),
+    )
 
     def model_post_init(self, __context: Any) -> None:
         if self.radius <= 0:
@@ -1281,7 +1289,7 @@ async def register_modeling_tools(
         try:
             input_data = _normalize_input(input_data, AddFilletInput)
             result = await adapter.add_fillet(
-                input_data.radius, input_data.edge_points
+                input_data.radius, input_data.edge_points, input_data.propagate
             )
             if result.is_success:
                 feature = result.data
