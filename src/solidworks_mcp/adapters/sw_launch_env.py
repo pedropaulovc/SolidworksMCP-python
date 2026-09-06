@@ -1,8 +1,10 @@
 """Recover four omitted Windows standards in an isolated launch environment.
 
-This repair supports native AMD64 Windows SolidWorks launches. It copies the
-caller's complete environment and preserves every supplied value, matching keys
+This repair requires 64-bit Python on native AMD64 Windows. It copies the caller's
+complete environment and preserves every supplied value, matching keys
 case-insensitively. It never reads a user's environment registry or credentials.
+CommonX64 is unsupported from a 32-bit caller, even on AMD64 Windows. A complete
+supplied environment needs no repair and performs no architecture or folder query.
 
 The CEF startup control (2026-09-06, SW 34.3.0) reproduced the missing-installation
 modal with these four values absent, then reached the licensed main window and
@@ -113,6 +115,8 @@ def solidworks_launch_environment(parent: Mapping[str, str]) -> dict[str, str]:
     missing = tuple(name for name in _STANDARD_NAMES if name.casefold() not in present)
     if not missing:
         return result
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        raise OSError("SolidWorks launch environment repair requires 64-bit Python")
     if _native_architecture() != 9:  # PROCESSOR_ARCHITECTURE_AMD64
         raise OSError(
             "SolidWorks launch environment repair supports native AMD64 Windows only"

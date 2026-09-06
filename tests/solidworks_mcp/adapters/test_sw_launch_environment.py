@@ -154,6 +154,11 @@ def test_populated_case_insensitive_names_preserve_exact_values_without_native_r
         "_known_folder",
         lambda _: pytest.fail("unneeded native folder query"),
     )
+    monkeypatch.setattr(
+        environment_module.ctypes,
+        "sizeof",
+        lambda _: pytest.fail("unneeded interpreter architecture query"),
+    )
     result = environment_module.solidworks_launch_environment(parent)
     assert result == parent
     assert result is not parent
@@ -323,3 +328,44 @@ def test_environment_resolution_failure_prevents_either_launch(monkeypatch, path
             sw_install.launch_via_platform_shortcut(Path("D:/native.lnk"))
     process.assert_not_called()
     shell.assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["connector", "shortcut"])
+def test_32_bit_interpreter_rejects_native_repair_before_lookup_or_either_launch(
+    monkeypatch, path
+):
+    parent = {"HARMONIC_COM_SEAT": "owned"}
+    monkeypatch.setattr(sw_install.os, "environ", parent)
+    native_architecture = Mock(return_value=9)
+    folders = Mock(return_value=STANDARD["CommonProgramFiles"])
+    monkeypatch.setattr(environment_module, "_native_architecture", native_architecture)
+    monkeypatch.setattr(environment_module, "_known_folder", folders)
+    real_sizeof = ctypes.sizeof
+    monkeypatch.setattr(
+        environment_module.ctypes,
+        "sizeof",
+        lambda kind: 4 if kind is ctypes.c_void_p else real_sizeof(kind),
+    )
+    process, shell = Mock(), Mock()
+    monkeypatch.setattr(sw_install.subprocess, "run", shell)
+    monkeypatch.setattr(sw_recovery.subprocess, "Popen", process)
+    monkeypatch.setattr(sw_recovery, "_running_images", lambda _: set())
+    monkeypatch.setattr(sw_recovery, "reset_connector_status", lambda: None)
+    monkeypatch.setattr(
+        sw_recovery,
+        "read_connector_params",
+        lambda: sw_recovery.ConnectorParams("space", "apps", "registry", "tenant"),
+    )
+    monkeypatch.setattr(
+        sw_recovery, "resolve_install_root", lambda: Path("D:/installed")
+    )
+    with pytest.raises(OSError, match="64-bit Python"):
+        if path == "connector":
+            sw_recovery.start_solidworks()
+        if path == "shortcut":
+            sw_install.launch_via_platform_shortcut(Path("D:/native.lnk"))
+    native_architecture.assert_not_called()
+    folders.assert_not_called()
+    process.assert_not_called()
+    shell.assert_not_called()
+    assert parent == {"HARMONIC_COM_SEAT": "owned"}
