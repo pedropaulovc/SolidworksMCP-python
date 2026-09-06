@@ -1148,7 +1148,12 @@ def save_drawing(
     """
     draw = _draw(adapter)
     out: dict[str, str] = {}
-    for key, path in (("drawing", slddrw_path), ("pdf", pdf_path), ("png", png_path)):
+    artifacts: tuple[tuple[Literal["drawing", "pdf", "png"], str | None], ...] = (
+        ("drawing", slddrw_path),
+        ("pdf", pdf_path),
+        ("png", png_path),
+    )
+    for key, path in artifacts:
         if not path:
             continue
         path = os.path.abspath(path)
