@@ -1,5 +1,6 @@
 """Only missing Windows standard variables are recovered for launch children."""
 
+import ctypes
 import json
 import os
 import subprocess
@@ -250,3 +251,75 @@ def test_native_child_receives_only_repaired_standards_and_inherited_task_contex
     assert receipt["private_retained"] is True
     assert all(key.casefold() not in standard_keys for key in parent)
     assert parent["PRIVATE_TEST_SENTINEL"] == "never-print-this"
+
+
+@pytest.mark.parametrize(
+    "case", ["success", "hresult", "null", "relative", "rooted", "missing_directory"]
+)
+def test_known_folder_releases_native_output_on_every_path(monkeypatch, case):
+    values = {"relative": "relative/path", "rooted": "\\rooted-no-drive"}
+    allocation = ctypes.create_unicode_buffer(
+        values.get(case, "D:\\Programs\\Common Files")
+    )
+    pointer = None if case == "null" else ctypes.cast(allocation, ctypes.c_void_p).value
+    release = Mock()
+
+    def query(identifier, flags, token, output):
+        assert flags == 0 and token is None
+        assert (
+            bytes(identifier._obj)
+            == environment_module.UUID(environment_module._COMMON_X64).bytes_le
+        )
+        output._obj.value = pointer
+        return -2147467259 if case == "hresult" else 0
+
+    folder = Mock(side_effect=query)
+    libraries = {
+        "shell32": Mock(SHGetKnownFolderPath=folder),
+        "ole32": Mock(CoTaskMemFree=release),
+    }
+    monkeypatch.setattr(
+        environment_module.ctypes, "WinDLL", libraries.__getitem__, raising=False
+    )
+    monkeypatch.setattr(
+        environment_module.os.path, "isdir", lambda _: case != "missing_directory"
+    )
+    if case == "success":
+        assert (
+            environment_module._known_folder(environment_module._COMMON_X64)
+            == allocation.value
+        )
+    if case != "success":
+        with pytest.raises(OSError, match="lookup"):
+            environment_module._known_folder(environment_module._COMMON_X64)
+    release.assert_called_once()
+    assert release.call_args.args[0].value == pointer
+
+
+@pytest.mark.parametrize("path", ["connector", "shortcut"])
+def test_environment_resolution_failure_prevents_either_launch(monkeypatch, path):
+    monkeypatch.setattr(
+        sw_install,
+        "solidworks_launch_environment",
+        Mock(side_effect=OSError("native environment unavailable")),
+    )
+    process, shell = Mock(), Mock()
+    monkeypatch.setattr(sw_install.subprocess, "run", shell)
+    monkeypatch.setattr(sw_recovery.subprocess, "Popen", process)
+    monkeypatch.setattr(sw_recovery, "_running_images", lambda _: set())
+    monkeypatch.setattr(sw_recovery, "reset_connector_status", lambda: None)
+    monkeypatch.setattr(
+        sw_recovery,
+        "read_connector_params",
+        lambda: sw_recovery.ConnectorParams("space", "apps", "registry", "tenant"),
+    )
+    monkeypatch.setattr(
+        sw_recovery, "resolve_install_root", lambda: Path("D:/installed")
+    )
+    with pytest.raises(OSError, match="native environment unavailable"):
+        if path == "connector":
+            sw_recovery.start_solidworks()
+        if path == "shortcut":
+            sw_install.launch_via_platform_shortcut(Path("D:/native.lnk"))
+    process.assert_not_called()
+    shell.assert_not_called()
