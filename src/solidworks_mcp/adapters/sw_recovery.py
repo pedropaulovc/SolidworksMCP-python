@@ -673,10 +673,12 @@ def start_solidworks() -> bool:
         cmd = build_connector_launch_command(params, root)
         bin_dir = root / "win_b64" / "code" / "bin"
         logger.info("Launching SolidWorks via connector: {}", cmd)
+        launch_environment = sw_install.solidworks_launch_environment(os.environ)
         try:
             subprocess.Popen(
                 cmd,
                 cwd=str(bin_dir),
+                env=launch_environment,
                 creationflags=_NO_WINDOW
                 | getattr(subprocess, "DETACHED_PROCESS", 0)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),

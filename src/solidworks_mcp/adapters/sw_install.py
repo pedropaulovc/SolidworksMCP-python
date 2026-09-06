@@ -21,10 +21,13 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+import sys
 from enum import StrEnum
 from pathlib import Path
 
 from loguru import logger
+
+from solidworks_mcp.adapters.sw_launch_env import solidworks_launch_environment
 
 try:
     import winreg
@@ -124,15 +127,26 @@ def find_platform_shortcut() -> Path | None:
 def launch_via_platform_shortcut(shortcut: Path) -> None:
     """Start SolidWorks through its 3DEXPERIENCE Platform shortcut.
 
-    ``os.startfile`` resolves the ``.lnk`` through the Windows shell, so the
+    A hidden Python child calls ``os.startfile`` to resolve the licensed ``.lnk``
+    through the Windows shell, so the
     Platform licence handoff happens exactly as it would from a desktop
-    double-click — the only path the Makers edition accepts.
+    double-click. The child receives the recovered standard Windows variables;
+    this process's environment is untouched. Its bounded wait covers only shell
+    handoff, not SolidWorks startup. ``os.startfile`` has no environment argument:
+    https://docs.python.org/3/library/os.html#os.startfile
 
     Args:
         shortcut: The Platform launch shortcut from :func:`find_platform_shortcut`.
     """
     logger.info("Launching SolidWorks via 3DEXPERIENCE Platform shortcut: {}", shortcut)
-    os.startfile(str(shortcut))  # noqa: S606 - shell-launch of a known SolidWorks shortcut
+    subprocess.run(
+        [sys.executable, "-I", "-c", "import os, sys; os.startfile(sys.argv[1])", str(shortcut)],
+        env=solidworks_launch_environment(os.environ),
+        check=True,
+        timeout=15,
+        capture_output=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
 
 
 def is_solidworks_process_running() -> bool:

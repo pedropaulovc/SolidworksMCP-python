@@ -255,9 +255,17 @@ def test_is_solidworks_process_running_parses_tasklist(
 def test_launch_via_platform_shortcut_uses_startfile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The shortcut is opened through os.startfile (Windows shell handoff)."""
+    """The original licensed shortcut still reaches os.startfile in the child."""
     calls: list[str] = []
     monkeypatch.setattr(sw_install.os, "startfile", calls.append, raising=False)
+    monkeypatch.setattr(sw_install, "solidworks_launch_environment", lambda _: {})
+
+    def child(command, **_kwargs):
+        with monkeypatch.context() as child_context:
+            child_context.setattr(sw_install.sys, "argv", ["launcher", command[-1]])
+            exec(command[command.index("-c") + 1], {})
+
+    monkeypatch.setattr(sw_install.subprocess, "run", child)
 
     sw_install.launch_via_platform_shortcut(Path(r"C:\sw\SOLIDWORKS Design.lnk"))
 
