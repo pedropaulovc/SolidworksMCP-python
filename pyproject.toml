@@ -195,6 +195,9 @@ timeout = 300
 [tool.coverage.run]
 source = ["src/solidworks_mcp"]
 omit = [
+    # The exact vendored makepy artifact has a separate integrity/version/ABI gate.
+    # All authored adapter, binding-loader and runtime modules remain under 90%.
+    "src/solidworks_mcp/adapters/_generated/sldworks_2026.py",
     "*/tests/*",
     "*/test_*",
     "*/__pycache__/*",

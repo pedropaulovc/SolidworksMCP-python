@@ -29,6 +29,10 @@ jobs:
         shell: bash -el {0}
         run: conda run -n solidworks_mcp pip install -e ".[dev,docs,ui]"
 
+      - name: Verify pinned generated binding integrity and API contract
+        shell: bash -el {0}
+        run: conda run -n solidworks_mcp python -m pytest tests/solidworks_mcp/adapters/test_generated_binding_contract.py --no-cov -q
+
       - name: Run tests
         shell: bash -el {0}
         run: make test

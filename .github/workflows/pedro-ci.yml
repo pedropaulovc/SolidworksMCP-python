@@ -18,12 +18,10 @@ name: pedro-ci
 # gate that blocks unrelated work. Run `ruff check src tests` locally
 # or in a one-shot cleanup branch when ready.
 #
-# Why --no-cov on pytest: pyproject.toml sets --cov-fail-under=90, which
-# is a sensible gate for the FULL upstream suite (run via `make test` /
-# ci.yml). pedro-ci excludes the UI tree, live-SW, and solidworks_only
-# tests, so the partial run can never hit 90% — coverage gating here
-# fails every PR regardless of the change. Coverage is still enforced
-# upstream; we just don't double-gate on a narrower scope.
+# Why --no-cov on pytest: this narrower mock run excludes the UI tree and
+# live-SW tests. ci.yml measures the complete mock suite against the 90%
+# authored-code threshold. Both workflows separately verify the exact generated
+# binding artifact; neither reports static integrity as native COM execution.
 #
 # Why --deselect test_find_index_file_none_when_missing: pre-existing
 # Windows-only test-isolation bug on personal. The test calls
@@ -72,6 +70,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel
           pip install -e ".[dev,test]"
+
+      - name: Verify pinned generated binding integrity and API contract
+        shell: bash
+        run: python -m pytest tests/solidworks_mcp/adapters/test_generated_binding_contract.py --no-cov -q
 
       - name: Tests (mock-only, skip UI and live SolidWorks)
         shell: bash
