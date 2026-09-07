@@ -23,6 +23,12 @@ Authored code alone covered 15,180 of 17,301 statements (87.74%), still below 90
 The separate artifact gate therefore does not itself make CI pass: behavioral
 tests must close the remaining authored-code gap. The threshold stays at 90%.
 
+The added drawing tests check document and view ownership, native argument
+selection, dimension curation, callout grouping, and fresh-file export handling.
+Recovery tests check registry fields, process targeting, deadlines and CLI error
+propagation. Their native/OS boundaries are test doubles: they establish Python
+behavior, not successful CAD creation or a licensed SolidWorks launch.
+
 Run the static contract with:
 
 ```text
