@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
+from typing import Any, Literal
 
 from .. import sw_type_info as _sw_type_info
 from ..com_variant import double_array, null_callout
@@ -1126,25 +1128,42 @@ def save_drawing(
     *,
     pdf_path: str | None = None,
     png_path: str | None = None,
+    artifact_context: (
+        Callable[[Literal["drawing", "pdf", "png"], str], AbstractContextManager[None]]
+        | None
+    ) = None,
 ) -> dict[str, str]:
     """Save the drawing and export sibling PDF/PNG via extension-driven SaveAs3.
 
-    Mirrors ``_common.export_part_stl``: delete any stale target, ``SaveAs3``
-    (format inferred from the extension), then gate on the file existing —
-    SaveAs3's return code is unreliable. Returns a dict of the artifacts that
-    landed on disk.
+    Delete each stale target, call ``SaveAs3`` once (format inferred from the
+    extension), then require a newly created file. COM and filesystem errors
+    propagate; requested artifacts must all exist for this call to succeed.
+    The file check remains authoritative over SaveAs3's integer return code.
+
+    ``artifact_context(kind, absolute_path)`` optionally supplies an observation
+    context for each requested output: ``drawing``, ``pdf``, or ``png``. It wraps
+    preparation, the save, and the file check, so observers see failures as well
+    as elapsed time. Contexts must propagate exceptions. Without a factory,
+    saves use ``nullcontext``. Returns the created artifacts' absolute paths.
     """
     draw = _draw(adapter)
     out: dict[str, str] = {}
-    for key, path in (("drawing", slddrw_path), ("pdf", pdf_path), ("png", png_path)):
+    artifacts: tuple[tuple[Literal["drawing", "pdf", "png"], str | None], ...] = (
+        ("drawing", slddrw_path),
+        ("pdf", pdf_path),
+        ("png", png_path),
+    )
+    for key, path in artifacts:
         if not path:
             continue
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        if os.path.exists(path):
-            adapter._attempt(lambda p=path: os.remove(p))
-        adapter._attempt(lambda p=path: draw.SaveAs3(os.path.abspath(p), 0, 0))
-        if os.path.exists(path):
-            out[key] = os.path.abspath(path)
-        else:
-            logger.warning("SaveAs3 produced no file: %s", path)
+        path = os.path.abspath(path)
+        context = artifact_context(key, path) if artifact_context else nullcontext()
+        with context:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if os.path.exists(path):
+                os.remove(path)
+            draw.SaveAs3(path, 0, 0)
+            if not os.path.isfile(path):
+                raise RuntimeError(f"SaveAs3 produced no file: {path}")
+            out[key] = path
     return out
