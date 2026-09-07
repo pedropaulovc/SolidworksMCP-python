@@ -374,7 +374,7 @@ def test_hole_callout_grouping_keeps_linear_and_unreadable_dimensions_separate()
 
 
 @pytest.mark.parametrize("consolidate,expected", [(True, 1), (False, 2)])
-def test_thread_callout_uses_system_meters_and_replaces_text_idempotently(
+def test_thread_callout_uses_system_meters_and_sets_complete_text(
     consolidate, expected
 ):
     first, first_disp, _ = dimension(value=0.0025)
@@ -453,9 +453,9 @@ def test_third_angle_symbol_scales_sheet_coordinates_and_restores_default_layer(
         SetCurrentLayer=Mock(),
     )
     assert d.add_third_angle_symbol(Adapter(doc), 0.1, 0.2, size=0.01)
-    assert sketch.CreateCircle.call_args_list == [
-        call(0.05, 0.1, 0.0, 0.055, 0.1, 0.0),
-        call(0.05, 0.1, 0.0, 0.052500000000000005, 0.1, 0.0),
+    assert [entry.args for entry in sketch.CreateCircle.call_args_list] == [
+        pytest.approx((0.05, 0.1, 0.0, 0.055, 0.1, 0.0)),
+        pytest.approx((0.05, 0.1, 0.0, 0.0525, 0.1, 0.0)),
     ]
     assert sketch.CreateLine.call_count == 5
     first, second = [entry.args for entry in sketch.CreateLine.call_args_list[:2]]
