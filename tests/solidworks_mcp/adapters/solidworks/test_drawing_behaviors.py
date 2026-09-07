@@ -5,6 +5,7 @@ from unittest.mock import Mock, call
 
 import pytest
 
+from solidworks_mcp.adapters.pywin32_adapter import PyWin32Adapter
 from solidworks_mcp.adapters.solidworks import drawing as d
 
 
@@ -15,17 +16,9 @@ class Adapter:
         self.currentModel = model
         self.swApp = app
 
-    @staticmethod
-    def _attempt(callback, default=None):
-        try:
-            return callback()
-        except Exception:
-            return default
-
-    @staticmethod
-    def _get_attr_or_call(obj, name):
-        member = getattr(obj, name, None)
-        return member() if callable(member) else member
+    # Bind the real pure helpers, without constructing an adapter or COM session.
+    _attempt = PyWin32Adapter._attempt
+    _get_attr_or_call = PyWin32Adapter._get_attr_or_call
 
 
 @pytest.fixture(autouse=True)
