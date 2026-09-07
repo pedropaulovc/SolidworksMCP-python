@@ -21,11 +21,26 @@ BINDING_PATH = "src/solidworks_mcp/adapters/_generated/sldworks_2026.py"
 SHA256_LF = "e74de9374bae3b0b76d95f163ee65cd9c36d180f04ac02dc2652a30ba0e0d4c4"
 
 
+def checkout_bytes(path):
+    """Normalize Git's CRLF pairs only, preserving any lone carriage return."""
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n", b"\r"])
+def test_artifact_newline_normalization_is_limited_to_git_checkout(tmp_path, newline):
+    path = tmp_path / "binding.py"
+    path.write_bytes(b"first" + newline + b"second")
+    assert checkout_bytes(path) == (
+        b"first\rsecond" if newline == b"\r" else b"first\nsecond"
+    )
+
+
 @pytest.fixture(scope="module")
 def binding():
     """Parse the real artifact, never import pywin32 or connect to SolidWorks."""
-    source = (ROOT / BINDING_PATH).read_text(encoding="utf-8")
-    assert hashlib.sha256(source.encode("utf-8")).hexdigest() == SHA256_LF
+    raw = checkout_bytes(ROOT / BINDING_PATH)
+    assert hashlib.sha256(raw).hexdigest() == SHA256_LF
+    source = raw.decode("utf-8")
     tree = ast.parse(source, filename=BINDING_PATH)
     compile(tree, BINDING_PATH, "exec")  # Python syntax gate; no execution.
     return tree
