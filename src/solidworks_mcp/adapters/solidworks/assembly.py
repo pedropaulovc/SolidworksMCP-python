@@ -64,6 +64,7 @@ from .features import (
     _select_named_feature,
     _select_reference_point,
 )
+from .open_trace import opening
 
 try:
     import pythoncom
@@ -833,10 +834,11 @@ def _preload_component_file(adapter: Any, resolved_path: str) -> None:
         # [out] errors/warnings slots and read the model back from the result
         # tuple (retval, errors, warnings). Passing a byref VARIANT here is a
         # late-binding idiom that InvokeTypes rejects.
-        result = adapter._attempt(
-            lambda: app.OpenDoc6(resolved_path, doc_type, 1, "", 0, 0),
-            default=None,
-        )
+        with opening("sw.preload", resolved_path, doc_type):
+            result = adapter._attempt(
+                lambda: app.OpenDoc6(resolved_path, doc_type, 1, "", 0, 0),
+                default=None,
+            )
         loaded = result[0] if isinstance(result, tuple) else result
     finally:
         adapter._attempt(lambda: app.DocumentVisible(True, doc_type), default=None)
