@@ -497,6 +497,13 @@ def test_free_note_preserves_exact_text_and_reports_failed_native_creation(
         assert caplog.records
 
 
+def test_free_note_has_no_size_argument():
+    # add_note used to accept a height and discard it, so callers that sized
+    # a note believed they had. A note takes the document's default format.
+    with pytest.raises(TypeError):
+        d.add_note(Adapter(model()), "NOTE", 0.1, 0.2, height=0.0025)
+
+
 @pytest.mark.parametrize(
     "kind,limits",
     [(d.TOL_BASIC, (0, 0)), (d.TOL_LIMIT, (-0.01, 0.02)), (d.TOL_FIT, (0, 0.02))],

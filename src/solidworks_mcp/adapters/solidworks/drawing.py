@@ -952,14 +952,15 @@ def add_note(
     text: str,
     x: float,
     y: float,
-    *,
-    height: float | None = None,
 ) -> Any:
     """Insert a free note at sheet position ``(x, y)`` (meters) and return it.
 
     Placement is done by setting the note's annotation position after insertion
     (``InsertNote`` drops it at a default spot). Used for the general-notes
     block and any title-block fallbacks.
+
+    The note takes the document's default note format; this sizes nothing. A
+    caller that needs another size sets the annotation's text format itself.
     """
     draw = _draw(adapter)
     adapter._attempt(lambda: draw.ClearSelection2(True))
@@ -976,7 +977,6 @@ def add_note(
             logger.warning("note SetPosition failed for %r", text[:40])
     else:
         logger.warning("note GetAnnotation returned None for %r", text[:40])
-    _ = height  # text sizing left to the sheet/document defaults for now
     return note
 
 
