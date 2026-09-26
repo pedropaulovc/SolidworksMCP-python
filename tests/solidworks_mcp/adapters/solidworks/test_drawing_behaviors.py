@@ -475,6 +475,55 @@ def test_center_mark_types_and_explicit_size(holes, slots, mask):
     )
 
 
+def test_CENTER_MARK_OBSERVER_sees_counts_around_the_insert(monkeypatch):
+    """A set observer gets the view's centre-mark count before and after
+    AutoInsertCenterMarks2, so a doubled insert shows as after = 2 x before."""
+    marks = ["template-mark"]
+
+    def insert(*_args):
+        marks.append("explicit-mark")
+        return True
+
+    view = NS(
+        AutoInsertCenterMarks2=Mock(side_effect=insert),
+        GetAnnotationsByType=Mock(side_effect=lambda kind: tuple(marks) if kind == 13 else ()),
+        GetName2=Mock(return_value="Drawing View1"),
+    )
+    seen = []
+    monkeypatch.setattr(d, "CENTER_MARK_OBSERVER", seen.append)
+    assert d.auto_center_marks(Adapter(), view, holes=True) is True
+    assert seen == [
+        {"view": "Drawing View1", "before": 1, "after": 2, "holes": True, "slots": False, "ok": True}
+    ]
+
+
+def test_center_mark_observer_tells_none_from_a_refused_read(monkeypatch):
+    """No array answers 0 marks; a raising read answers None (unknown)."""
+    reads = iter([None, RuntimeError("E_FAIL")])
+
+    def by_type(_kind):
+        answer = next(reads)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    view = NS(
+        AutoInsertCenterMarks2=Mock(return_value=True),
+        GetAnnotationsByType=Mock(side_effect=by_type),
+        GetName2=Mock(return_value="Drawing View2"),
+    )
+    seen = []
+    monkeypatch.setattr(d, "CENTER_MARK_OBSERVER", seen.append)
+    d.auto_center_marks(Adapter(), view, holes=True)
+    assert (seen[0]["before"], seen[0]["after"]) == (0, None)
+
+
+def test_center_marks_without_an_observer_make_no_extra_reads():
+    view = NS(AutoInsertCenterMarks2=Mock(return_value=True), GetAnnotationsByType=Mock())
+    assert d.auto_center_marks(Adapter(), view, holes=True) is True
+    view.GetAnnotationsByType.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "state", ["normal", "no_note", "no_annotation", "position_rejected"]
 )
