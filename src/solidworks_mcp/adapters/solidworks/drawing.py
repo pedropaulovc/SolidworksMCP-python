@@ -345,6 +345,98 @@ def orientation_name(adapter: Any, view: Any) -> str:
     return name if isinstance(name, str) else ""
 
 
+# swViewEntityType_e -> the interface that declares that entity kind's members.
+_VIEW_ENTITY_INTERFACE = {
+    1: "IEdge",  # swViewEntityType_Edge
+    2: "IVertex",  # swViewEntityType_Vertex
+    3: "IFace2",  # swViewEntityType_Face
+    4: "ISilhouetteEdge",  # swViewEntityType_SilhouetteEdge
+}
+
+
+class _RawDispatch:
+    """Carrier giving a bare ``PyIDispatch`` the ``_oleobj_`` binding reads."""
+
+    __slots__ = ("_oleobj_",)
+
+    def __init__(self, oleobj: Any) -> None:
+        self._oleobj_ = oleobj
+
+
+def raw_visible_entities(
+    view: Any, component: Any, entity_kind: int
+) -> tuple[Any, ...]:
+    """``IView.GetVisibleEntities2`` WITHOUT pywin32 wrapping each element.
+
+    The makepy wrapper returns the array through ``_ApplyTypes_``, which runs
+    ``Dispatch()`` on EVERY element: remote ``GetTypeInfo``/``GetTypeAttr``
+    round-trips, ~30 ms apiece. On a 22,486-edge engraved nameplate that wrapped
+    call took 674 s; this ``InvokeTypes`` fetch took 2-4 s and returned the same
+    elements in the same order. Elements come back as bare ``PyIDispatch``; bind
+    only the ones you use with :func:`bind_view_entity`.
+
+    What this does NOT remove: every element is still a cross-process proxy, and
+    dropping the last reference to one costs a ``Release`` round-trip (5-9 ms
+    measured; 117-206 s for that nameplate's tuple). Fetching the array at all
+    pays it, so a caller that needs one element of a large component should find
+    it by a narrower query instead.
+
+    The dispid comes from the live object's name table, never hard-coded. A test
+    double (no ``_oleobj_``) is called directly, as ``early_bound`` does.
+    """
+    bound_view = _sw_type_info.early_bound(view, "IView")
+    oleobj = getattr(bound_view, "_oleobj_", None)
+    if oleobj is None:
+        return tuple(bound_view.GetVisibleEntities2(component, entity_kind) or ())
+    # Imported here so this module keeps importing on machines without pywin32.
+    import pythoncom
+
+    dispid = oleobj.GetIDsOfNames("GetVisibleEntities2")
+    raw = oleobj.InvokeTypes(
+        dispid,
+        0,
+        pythoncom.DISPATCH_METHOD,
+        (pythoncom.VT_VARIANT, 0),
+        ((pythoncom.VT_DISPATCH, 1), (pythoncom.VT_I4, 1)),
+        getattr(component, "_oleobj_", component),
+        entity_kind,
+    )
+    return tuple(raw or ())
+
+
+def bind_view_entity(raw: Any, entity_kind: int) -> Any:
+    """Bind one :func:`raw_visible_entities` element to its kind's interface.
+
+    Constructing the generated class directly costs ~9 ms/element against
+    ``Dispatch()``'s ~31 ms, and yields the same early-bound object
+    ``early_bound`` would. Anything already wrapped (or a test double) passes
+    through unchanged.
+    """
+    # A raw element is a bare PyIDispatch: it answers InvokeTypes but has no
+    # ``_oleobj_``. Checked by shape, not by pywintypes class, so this module
+    # still imports without pywin32.
+    if hasattr(raw, "_oleobj_") or not hasattr(raw, "InvokeTypes"):
+        return raw
+    interface = _VIEW_ENTITY_INTERFACE[entity_kind]
+    return _sw_type_info.early_bound(_RawDispatch(raw), interface)
+
+
+def visible_component_entities(
+    view: Any, component: Any, entity_kind: int
+) -> list[Any]:
+    """One component's visible entities in ``view``, each bound to its interface.
+
+    Prefer this over calling ``GetVisibleEntities2`` on a makepy view, which pays
+    the per-element ``Dispatch()`` cost (see :func:`raw_visible_entities`). When
+    you only need a few elements, call :func:`raw_visible_entities` and bind
+    those alone.
+    """
+    return [
+        bind_view_entity(raw, entity_kind)
+        for raw in raw_visible_entities(view, component, entity_kind)
+    ]
+
+
 def view_outline(adapter: Any, view: Any) -> tuple[float, float, float, float] | None:
     """Return a view's geometry bounding box ``(xmin, ymin, xmax, ymax)`` in meters.
 
