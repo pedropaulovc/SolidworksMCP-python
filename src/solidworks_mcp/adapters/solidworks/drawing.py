@@ -71,6 +71,15 @@ _SW_INSERT_HOLE_WZD_LOCATION = 0x20000
 _SW_CM_TYPE_HOLE = 0x1  # swAutoInsertCenterMarkTypes_e.swAutoInsertCenterMarkType_Hole
 _SW_CM_TYPE_SLOTS = 0x4  # swAutoInsertCenterMarkTypes_e.swAutoInsertCenterMarkType_Slots
 _SW_CM_CONN_NONE = 0  # swCenterMarkConnectionLine_e.swCenterMarkConnectionLine_None
+_SW_ANNOT_CENTER_MARK = 13  # swAnnotationType_e.swCenterMarkSym
+
+# Optional observer of every ``auto_center_marks`` call, set once by a
+# downstream build (no telemetry dependency here, as with save_drawing's
+# ``artifact_context``). It receives the view's name, its centre-mark count
+# before and after AutoInsertCenterMarks2, the requested feature types and
+# the call's result. Unset, the call makes no extra COM reads.
+CenterMarkObserver = Callable[[dict[str, Any]], None]
+CENTER_MARK_OBSERVER: CenterMarkObserver | None = None
 
 # Document unit preferences (swUserPreferenceIntegerValue_e + value enums), read
 # from the SOLIDWORKS 2026 swconst typelib on this seat.
@@ -929,6 +938,8 @@ def auto_center_marks(
         insert_type |= _SW_CM_TYPE_SLOTS
     if insert_type == 0:
         return False
+    observer = CENTER_MARK_OBSERVER
+    before = _center_mark_count(adapter, view) if observer else None
     ok = adapter._attempt(
         lambda: view.AutoInsertCenterMarks2(
             insert_type,
@@ -944,7 +955,32 @@ def auto_center_marks(
         ),
         default=False,
     )
+    if observer:
+        observer(
+            {
+                "view": adapter._attempt(lambda: view_name(adapter, view), default=""),
+                "before": before,
+                "after": _center_mark_count(adapter, view),
+                "holes": holes,
+                "slots": slots,
+                "ok": bool(ok),
+            }
+        )
     return bool(ok)
+
+
+_REFUSED = object()
+
+
+def _center_mark_count(adapter: Any, view: Any) -> int | None:
+    """The view's centre-mark annotations, or None when the read is refused.
+
+    A view with none answers an empty array or None (no array), so only a
+    raised read is a refusal."""
+    marks = adapter._attempt(lambda: view.GetAnnotationsByType(_SW_ANNOT_CENTER_MARK), default=_REFUSED)
+    if marks is _REFUSED:
+        return None
+    return len(marks or ())
 
 
 def add_note(
