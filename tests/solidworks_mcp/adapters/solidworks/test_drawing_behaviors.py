@@ -518,6 +518,28 @@ def test_center_mark_observer_tells_none_from_a_refused_read(monkeypatch):
     assert (seen[0]["before"], seen[0]["after"]) == (0, None)
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("Drawing View3", id="property"),
+        pytest.param(Mock(return_value="Drawing View3"), id="method"),
+    ],
+)
+def test_center_mark_observer_reads_the_view_name_late_binding_safe(monkeypatch, name):
+    """Codex P2 on #108 (PRRT_kwDOSekkw86mTi8d): a late-bound IView exposes
+    GetName2 as a property, so calling it raised and _attempt swapped in "".
+    The observer reads the name through view_name either way."""
+    view = NS(
+        AutoInsertCenterMarks2=Mock(return_value=True),
+        GetAnnotationsByType=Mock(return_value=()),
+        GetName2=name,
+    )
+    seen = []
+    monkeypatch.setattr(d, "CENTER_MARK_OBSERVER", seen.append)
+    d.auto_center_marks(Adapter(), view, holes=True)
+    assert seen[0]["view"] == "Drawing View3"
+
+
 def test_center_marks_without_an_observer_make_no_extra_reads():
     view = NS(AutoInsertCenterMarks2=Mock(return_value=True), GetAnnotationsByType=Mock())
     assert d.auto_center_marks(Adapter(), view, holes=True) is True

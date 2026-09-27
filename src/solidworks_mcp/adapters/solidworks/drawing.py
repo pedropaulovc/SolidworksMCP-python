@@ -958,7 +958,7 @@ def auto_center_marks(
     if observer:
         observer(
             {
-                "view": str(adapter._attempt(lambda: view.GetName2(), default="") or ""),
+                "view": adapter._attempt(lambda: view_name(adapter, view), default=""),
                 "before": before,
                 "after": _center_mark_count(adapter, view),
                 "holes": holes,
