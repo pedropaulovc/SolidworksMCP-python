@@ -510,6 +510,8 @@ def _select_by_point(
     point_mm: list[float],
     mark: int,
     append: bool,
+    *,
+    geometric: bool = True,
 ) -> bool:
     """Select a geometric entity (face/edge) by a point lying on it.
 
@@ -520,13 +522,15 @@ def _select_by_point(
     ``None`` raises ``Type mismatch`` under pywin32 late binding (see
     :func:`solidworks_mcp.adapters.com_variant.null_callout`).
 
-    .. warning:: Coordinate selection is **view-dependent**: SolidWorks picks
-        at the point's screen projection, so an entity hidden behind the body
-        in the current view orientation fails to select (verified live on SW
-        2026: in the default trimetric view the box vertex at the far-lower
-        corner and its adjacent hidden edges return ``False`` while all
-        visible ones succeed). Callers should locate entities by points
-        visible in the active view.
+    ``SelectByID2`` is **view-dependent**: SolidWorks picks at the point's
+    screen projection, so an entity hidden behind the body or off screen in
+    the current view fails to select (verified live on SW 2026: in the default
+    trimetric view the box vertex at the far-lower corner and its adjacent
+    hidden edges return ``False`` while all visible ones succeed; on the farm
+    the same leaf's edge pick missed on one seat and hit on another). So an
+    ``"EDGE"`` or ``"FACE"`` the pick misses is then selected by geometry
+    (:func:`_select_entity_geometric`, same ``mark`` and ``append``), which
+    no view can hide. Other entity types have no geometric fallback.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -536,14 +540,16 @@ def _select_by_point(
         mark: Selection mark.
         append: ``True`` to add to the current selection set, ``False`` to
             replace it.
+        geometric: Fall back to geometry when the pick misses. ``False`` for
+            a caller that runs its own geometric pass.
 
     Returns:
-        bool: ``True`` when SolidWorks selected an entity at that point.
+        bool: ``True`` when an entity at that point was selected.
     """
     if len(point_mm) != 3:
         return False
     x, y, z = (float(c) / 1000.0 for c in point_mm)
-    return bool(
+    picked = bool(
         adapter._attempt(
             lambda: adapter.currentModel.Extension.SelectByID2(
                 "", entity_type, x, y, z, append, mark, null_callout(), 0
@@ -551,6 +557,9 @@ def _select_by_point(
             default=False,
         )
     )
+    if picked or not geometric:
+        return picked
+    return _select_entity_geometric(adapter, entity_type, point_mm, mark, append)
 
 
 def _flag_feature_methods(obj: Any, interface: str, *fallback_methods: str) -> Any:
@@ -1830,13 +1839,14 @@ def _select_entity_geometric(
 ) -> bool:
     """Select the body edge or face nearest a point on it, whatever the view.
 
-    The geometric counterpart of :func:`_select_by_point` for one ``"EDGE"`` or
-    ``"FACE"``: it scores every body entity of that kind by
-    ``GetClosestPointOn`` and selects the nearest one within ``tol_mm``
-    (``IEntity.Select2(append, mark)``). ``SelectByID2`` picks at the point's
-    screen projection, so a point that lies on the entity still misses when the
-    view puts it off screen or behind the body -- in a fresh part the view
-    scale is whatever the template and the seat's window size give.
+    :func:`_select_by_point`'s fallback for one ``"EDGE"`` or ``"FACE"``: it
+    scores every body entity of that kind by ``GetClosestPointOn`` and selects
+    the nearest one within ``tol_mm`` (``IEntity.Select2(append, mark)``).
+    ``SelectByID2`` picks at the point's screen projection, so a point that
+    lies on the entity still misses when the view puts it off screen or behind
+    the body -- in a fresh part the view scale is whatever the template and
+    the seat's window size give. A model whose bodies cannot be read selects
+    nothing, so the caller reports its own miss.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -1855,12 +1865,17 @@ def _select_entity_geometric(
         return False
     member, interface = kind
     px, py, pz = (float(c) / 1000.0 for c in point_mm)
-    entities = _body_entities(adapter, member)
-    best = _nearest_entity(adapter, entities, interface, (px, py, pz), tol_mm / 1000.0)
+    entities = adapter._attempt(lambda: _body_entities(adapter, member), default=[])
+    best = _nearest_entity(
+        adapter, entities or [], interface, (px, py, pz), tol_mm / 1000.0
+    )
     if best is None:
         return False
-    picked = _raw.bind(best, "IEntity")
-    return bool(adapter._attempt(lambda: picked.Select2(append, mark), default=False))
+    return bool(
+        adapter._attempt(
+            lambda: _raw.bind(best, "IEntity").Select2(append, mark), default=False
+        )
+    )
 
 
 def _select_edge_points(adapter: Any, edge_points: list[list[float]]) -> None:
@@ -1882,7 +1897,7 @@ def _select_edge_points(adapter: Any, edge_points: list[list[float]]) -> None:
         return
     adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True), default=None)
     for point in edge_points:
-        if not _select_by_point(adapter, "EDGE", point, 0, True):
+        if not _select_by_point(adapter, "EDGE", point, 0, True, geometric=False):
             raise Exception(f"Failed to select edge at point {point} (mm)")
 
 
@@ -2084,7 +2099,9 @@ def _select_reference_point(
     A pattern's direction (linear) or axis (circular) can be a linear edge, a
     reference axis, or a cylindrical/planar face.  The caller points at one;
     this tries each entity type at that point and returns the type that
-    selected, or ``None``.
+    selected, or ``None``. Every type's point pick runs first, in order; only
+    when all miss is an ``"EDGE"``/``"FACE"`` found by geometry, so a view
+    that hides nothing picks exactly what it did before.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -2096,7 +2113,12 @@ def _select_reference_point(
         str | None: The entity type that selected, or ``None`` if none matched.
     """
     for entity_type in entity_types:
-        if _select_by_point(adapter, entity_type, point_mm, mark, True):
+        if _select_by_point(
+            adapter, entity_type, point_mm, mark, True, geometric=False
+        ):
+            return entity_type
+    for entity_type in entity_types:
+        if _select_entity_geometric(adapter, entity_type, point_mm, mark, True):
             return entity_type
     return None
 
