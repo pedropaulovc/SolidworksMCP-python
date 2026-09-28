@@ -2288,10 +2288,11 @@ async def test_circular_pattern_feature_around_cylinder_axis(connected_adapter) 
 
 
 async def test_linear_pattern_feature_along_edge(connected_adapter) -> None:
-    """A hole patterned 4x along a bottom edge direction at 10 mm spacing.
+    """A hole patterned 4x along +X on a bottom edge at 10 mm spacing.
 
-    The direction is located by a point on the linear edge (mark 1); the seed
-    cut is selected by name (mark 4).
+    The direction edge is resolved geometrically (the straight body edge along
+    ``direction_vector`` nearest the point, mark 1); the seed cut is selected
+    by name (mark 4).
     """
     adapter = connected_adapter
     await _build_box(adapter)
@@ -2305,6 +2306,7 @@ async def test_linear_pattern_feature_along_edge(connected_adapter) -> None:
         pattern = await adapter.linear_pattern_feature(
             LinearPatternParameters(
                 direction_point=[0.0, -25.0, 0.0],
+                direction_vector=[1.0, 0.0, 0.0],
                 features=[cut.data.name],
                 count=4,
                 spacing=10.0,

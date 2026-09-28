@@ -1713,6 +1713,7 @@ class TestMockAdapterPhase2Features:
     async def test_linear_pattern_guard_and_success(self):
         params = LinearPatternParameters(
             direction_point=[50.0, 0.0, 0.0],
+            direction_vector=[1.0, 0.0, 0.0],
             features=["Cut-Extrude1"],
             count=4,
             spacing=20.0,

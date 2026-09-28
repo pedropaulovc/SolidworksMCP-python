@@ -1648,6 +1648,100 @@ def _select_edges_geometric(
     return True
 
 
+def _select_direction_edge(
+    adapter: Any, point_mm: list[float], direction_vector: list[float], mark: int
+) -> bool:
+    """Select a straight body edge along ``direction_vector`` as a pattern direction.
+
+    The view-independent replacement for a point pick of a pattern direction.
+    ``SelectByID2`` picks at the point's screen projection, so the entity it lands
+    on depends on the active view: measured live on the platen rack, a top view
+    picked the top edge (whose parameter runs -X) and an isometric view fell
+    through to the back face, and either way every instance missed the body.
+    This walks every body edge instead, keeps the ones whose curve is a line
+    (``ICurve.IsLine``) and runs parallel to ``direction_vector``, and selects
+    (``IEntity.Select2``) the one nearest (``IEdge.GetClosestPointOn``)
+    ``point_mm``. Any such edge gives the same direction; the point only makes
+    the choice deterministic.
+
+    The pattern marches along the edge's own start->end sense (as reported by
+    ``IEdge.GetCurveParams2``) unless ``FlipDir1`` reverses it, so the caller
+    passes the returned flag as ``FlipDir1``.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        point_mm: ``[x, y, z]`` in millimetres on or near the wanted edge.
+        direction_vector: ``[x, y, z]`` sense the instances should march in.
+        mark: Selection mark to apply.
+
+    Returns:
+        bool: ``FlipDir1`` -- ``True`` when the selected edge runs against
+        ``direction_vector``.
+
+    Raises:
+        Exception: When the inputs are not 3-vectors, the vector is zero, no
+            straight body edge runs along it, or the edge fails to select.
+    """
+    if len(point_mm) != 3 or len(direction_vector) != 3:
+        raise Exception(
+            f"direction_point {point_mm} and direction_vector {direction_vector} "
+            "must both be [x, y, z]"
+        )
+    norm = sum(float(c) ** 2 for c in direction_vector) ** 0.5
+    if norm == 0.0:
+        raise Exception("direction_vector must be non-zero")
+    unit = [float(c) / norm for c in direction_vector]
+    px, py, pz = (float(c) / 1000.0 for c in point_mm)
+
+    def _distance(a: list[float], b: list[float]) -> float:
+        return sum((a[i] - b[i]) ** 2 for i in range(3)) ** 0.5
+
+    def _is_line(curve: Any) -> bool:
+        curve = _flag_feature_methods(curve, "ICurve", "IsLine")
+        return bool(adapter._attempt(lambda: curve.IsLine(), default=False))
+
+    best: tuple[float, Any, bool] | None = None
+    for edge in _all_body_edges(adapter):
+        edge = _flag_feature_methods(
+            edge, "IEdge", "GetCurve", "GetCurveParams2", "GetClosestPointOn", "Select2"
+        )
+        # GetCurveParams2 requires GetCurve first (SolidWorks keeps no curve).
+        curve = adapter._attempt(lambda e=edge: e.GetCurve(), default=None)
+        if curve is None or not _is_line(curve):
+            continue  # only a straight edge defines a linear direction
+        params = adapter._attempt(lambda e=edge: list(e.GetCurveParams2() or ()), default=[])
+        if len(params) < 6:
+            continue
+        start = [float(c) for c in params[0:3]]
+        end = [float(c) for c in params[3:6]]
+        chord = [end[i] - start[i] for i in range(3)]
+        length = _distance(start, end)
+        if length < 1e-9:
+            continue  # closed curve (circle): no direction
+        along = sum(chord[i] * unit[i] for i in range(3)) / length
+        if abs(along) < 1.0 - 1e-6:
+            continue  # chord not parallel to the requested direction (~0.08 deg)
+        cp = adapter._attempt(
+            lambda e=edge: list(e.GetClosestPointOn(px, py, pz)), default=None
+        )
+        if not cp or len(cp) < 3:
+            continue
+        gap = _distance([float(c) for c in cp[:3]], [px, py, pz])
+        if best is None or gap < best[0]:
+            best = (gap, edge, along < 0.0)
+    if best is None:
+        raise Exception(
+            f"No straight body edge runs along direction_vector {direction_vector}"
+        )
+    picked = _flag_feature_methods(best[1], "IEntity", "Select2")
+    if not adapter._attempt(lambda: picked.Select2(True, mark), default=False):
+        raise Exception(
+            f"Failed to select the direction edge nearest {point_mm} (mm) along "
+            f"{direction_vector}"
+        )
+    return best[2]
+
+
 def _all_body_faces(adapter: Any) -> list[Any]:
     """Every face of every solid body in the active model (RAW dispatches)."""
     return _body_entities(adapter, "GetFaces")
@@ -1946,6 +2040,50 @@ def _select_reference_point(
     return None
 
 
+def _selected_direction(adapter: Any, mark: int) -> str:
+    """Describe the entity actually selected under ``mark``, read back.
+
+    Names what a pattern direction resolved to, so a pattern whose instances
+    all missed says which entity it marched along.
+
+    Returns:
+        str: ``EDGE (x,y,z)->(x,y,z) mm`` in parameter order, ``FACE normal
+        (x,y,z)``, the bare selection type, or ``unread`` when the selection
+        manager cannot be read.
+    """
+    manager = adapter._attempt(
+        lambda: _flag_feature_methods(
+            adapter.currentModel.SelectionManager,
+            "ISelectionMgr",
+            "GetSelectedObjectType3",
+            "GetSelectedObject6",
+        ),
+        default=None,
+    )
+    kind = adapter._attempt(lambda: int(manager.GetSelectedObjectType3(1, mark)), default=None)
+    picked = adapter._attempt(lambda: manager.GetSelectedObject6(1, mark), default=None)
+    if kind is None or picked is None:
+        return "unread"
+
+    def _fmt(values: Any, scale: float) -> str:
+        return "(" + ",".join(f"{float(v) * scale:.3f}" for v in values) + ")"
+
+    if kind == 1:  # swSelEDGES
+        edge = _flag_feature_methods(picked, "IEdge", "GetCurve", "GetCurveParams2")
+        # GetCurveParams2 requires GetCurve first (SolidWorks keeps no curve).
+        adapter._attempt(lambda: edge.GetCurve(), default=None)
+        params = adapter._attempt(lambda: list(edge.GetCurveParams2() or ()), default=[])
+        if len(params) >= 6:
+            return f"EDGE {_fmt(params[0:3], 1000.0)}->{_fmt(params[3:6], 1000.0)} mm"
+        return "EDGE"
+    if kind == 2:  # swSelFACES
+        face = _flag_feature_methods(picked, "IFace2", "Normal")
+        normal = adapter._attempt(lambda: list(_read_member(face, "Normal") or ()), default=[])
+        return f"FACE normal {_fmt(normal[:3], 1.0)}" if len(normal) >= 3 else "FACE"
+    return f"selection type {kind}"
+
+
+
 def _mirror_feature_impl(
     adapter: Any, params: MirrorFeatureParameters
 ) -> AdapterResult[SolidWorksFeature]:
@@ -2141,8 +2279,10 @@ def _linear_pattern_impl(
 ) -> AdapterResult[SolidWorksFeature]:
     """Linear-pattern named features along a direction via ``FeatureLinearPattern5``.
 
-    The direction reference (typically a linear edge) is selected by a point
-    under mark 1; the seed features are selected by name under mark 4.
+    The direction edge is resolved geometrically (see
+    :func:`_select_direction_edge`) and selected under mark 1, with ``FlipDir1``
+    set so the instances march along ``params.direction_vector`` whatever the
+    active view; the seed features are selected by name under mark 4.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -2154,7 +2294,9 @@ def _linear_pattern_impl(
 
     Raises:
         Exception: Propagated through ``_handle_com_operation`` on selection
-            failure or when the pattern feature is not created.
+            failure, when the pattern feature is not created, or when a
+            pattern of more than one instance owns no faces (every instance
+            missed the body).
     """
     if not adapter.currentModel:
         return AdapterResult(status=AdapterResultStatus.ERROR, error="No active model")
@@ -2172,14 +2314,10 @@ def _linear_pattern_impl(
         adapter._attempt(
             lambda: adapter.currentModel.ClearSelection2(True), default=None
         )
-        dir_type = _select_reference_point(
-            adapter, params.direction_point, 1, ("EDGE", "AXIS", "FACE")
+        flip = _select_direction_edge(
+            adapter, params.direction_point, params.direction_vector, 1
         )
-        if dir_type is None:
-            raise Exception(
-                f"Failed to select direction at point {params.direction_point} "
-                "(mm); point at a linear edge or axis"
-            )
+        direction = _selected_direction(adapter, 1)
         for name in params.features:
             if not _select_named_feature(adapter, name, 4, True):
                 raise Exception(f"Failed to select feature to pattern: {name}")
@@ -2194,7 +2332,7 @@ def _linear_pattern_impl(
             float(params.spacing) / 1000.0,  # Spacing1 (metres)
             1,  # Num2 (direction 2 unused)
             0.0,  # Spacing2
-            False,  # FlipDir1
+            flip,  # FlipDir1
             False,  # FlipDir2
             "",  # DName1
             "",  # DName2
@@ -2217,16 +2355,56 @@ def _linear_pattern_impl(
         if not feature:
             raise Exception("Failed to create linear pattern")
 
+        pattern_name = str(_read_member(feature, "Name"))
+        # SolidWorks returns the feature even when every instance lands off the
+        # body or inside the seed's own cut; such a pattern owns no faces, and
+        # the only other symptom is a volume mismatch a step later.
+        faces = adapter._attempt(
+            lambda: _flag_feature_methods(feature, "IFeature", "GetFaces").GetFaces(),
+            default=False,
+        )
+        instance_faces = None if faces is False else len(faces or ())
+        if int(params.count) > 1 and instance_faces == 0:
+            # Take the dead pattern back out so a failed call leaves the model
+            # as it found it (a retry must not stack void patterns).
+            model = adapter.currentModel
+            adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+            selected = adapter._attempt(
+                lambda: _flag_feature_methods(feature, "IFeature", "Select2").Select2(
+                    False, 0
+                ),
+                default=False,
+            )
+            deleted = bool(selected) and bool(
+                adapter._attempt(
+                    lambda: model.Extension.DeleteSelection2(0), default=False
+                )
+            )
+            raise Exception(
+                f"{pattern_name}: none of the {int(params.count) - 1} instances produced "
+                f"geometry (the pattern owns 0 faces); direction edge nearest "
+                f"{params.direction_point} mm along {params.direction_vector} "
+                f"resolved to {direction}, FlipDir1={flip}; "
+                + (
+                    "the pattern was deleted"
+                    if deleted
+                    else "deleting the pattern FAILED, so it is still in the model"
+                )
+            )
+
         return SolidWorksFeature(
-            name=str(_read_member(feature, "Name")),
+            name=pattern_name,
             type="LinearPattern",
             id=adapter._get_feature_id(feature),
             parameters={
                 "direction_point": params.direction_point,
-                "direction_entity": dir_type,
+                "direction_vector": params.direction_vector,
+                "direction": direction,
+                "flip_direction": flip,
                 "features": params.features,
                 "count": int(params.count),
                 "spacing": float(params.spacing),
+                "instance_faces": instance_faces,
             },
             properties={"created": datetime.now().isoformat()},
         )

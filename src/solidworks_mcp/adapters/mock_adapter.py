@@ -937,6 +937,7 @@ class MockSolidWorksAdapter(SolidWorksAdapter):
             "LinearPattern",
             {
                 "direction_point": params.direction_point,
+                "direction_vector": params.direction_vector,
                 "features": params.features,
                 "count": params.count,
                 "spacing": params.spacing,
