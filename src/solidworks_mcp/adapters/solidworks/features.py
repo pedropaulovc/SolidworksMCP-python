@@ -6,6 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
+from .. import raw_dispatch as _raw
 from .. import sw_type_info as _sw_type_info
 from ..base import (
     AdapterResult,
@@ -606,15 +607,64 @@ def _read_member(obj: Any, name: str) -> Any:
         return member
 
 
+def _iter_features(adapter: Any):
+    """Yield the active doc's top-level features in tree order, RAW.
+
+    ``FirstFeature`` → ``GetNextFeature`` through :func:`raw_dispatch.invoke`:
+    one round trip per step, and each feature stays a bare ``PyIDispatch``.
+    The wrapped walk this replaces paid three more round trips per feature it
+    stepped over (``GetTypeInfo``/``GetTypeAttr`` when pywin32 wraps the
+    returned object, a ``QueryInterface`` when it is bound to ``IFeature``) —
+    ~1.2-1.9 s per ``create_plane`` on a 40-feature part, which walks twice.
+    :func:`raw_dispatch.bind` the feature you keep. Bounded so a misbehaving
+    ``GetNextFeature`` cannot spin forever; a ``GetNextFeature`` that raises
+    ends the walk (as before).
+    """
+    feat = _raw.invoke(adapter.currentModel, "IModelDoc2", "FirstFeature")
+    for _ in range(5000):
+        if not feat:
+            return
+        yield feat
+        try:
+            feat = _raw.invoke(feat, "IFeature", "GetNextFeature")
+        except Exception:
+            return
+
+
+def _iter_features_newest_first(adapter: Any):
+    """Yield top-level features newest first, RAW; stops when the seat does
+    not answer, so callers fall back to :func:`_iter_features`.
+
+    ``IModelDoc2.FeatureByPositionReverse(n)`` counts back from the end of the
+    same order ``FirstFeature``/``GetNextFeature`` walk, one round trip per
+    step. A just-created feature is at or near the end, so a newest-first
+    search stops after a step or two instead of walking the whole tree.
+    """
+    model = adapter.currentModel
+    for position in range(5000):
+        try:
+            feat = _raw.invoke(
+                model, "IModelDoc2", "FeatureByPositionReverse", position
+            )
+        except Exception:
+            return
+        if not feat:
+            return
+        yield feat
+
+
+def _is_profile(feat: Any) -> bool:
+    """Whether a raw feature is a sketch (``GetTypeName2 == "ProfileFeature"``)."""
+    return _raw.invoke(feat, "IFeature", "GetTypeName2") == "ProfileFeature"
+
+
 def _profile_feature_names(adapter: Any) -> list[str]:
     """Return sketch (``ProfileFeature``) names in feature-tree order.
 
-    Walks ``FirstFeature`` → ``GetNextFeature`` reading ``GetTypeName2`` and
-    collecting features whose type is ``"ProfileFeature"`` (a 2D/3D sketch).
-    Mirrors the tree walk used by :func:`_create_cut_extrude_impl`, flagging
-    only the two methods the walk calls (see the loop comment) and reading
-    members through :func:`_read_member` so it is robust to pywin32's
-    method-vs-property late-binding ambiguity.
+    Walks the top-level tree (:func:`_iter_features`) reading ``GetTypeName2``
+    and collecting features whose type is ``"ProfileFeature"`` (a 2D/3D
+    sketch). ``GetTypeName2`` and ``Name`` go by dispid, so neither can
+    resolve as a bound method and silently fail the type comparison.
 
     Args:
         adapter: A connected adapter with a valid ``currentModel``.
@@ -625,39 +675,30 @@ def _profile_feature_names(adapter: Any) -> list[str]:
     """
     names: list[str] = []
     try:
-        model = _flag_feature_methods(
-            adapter.currentModel, "IModelDoc2", "FirstFeature"
-        )
-        feat = _read_member(model, "FirstFeature")
-        # Bound the walk so a misbehaving GetNextFeature can't spin forever.
-        for _ in range(5000):
-            if not feat:
-                break
-            # Flag only the two methods the walk CALLS (the _feature_objects
-            # fix, c992057): full IFeature flagging costs a GetIDsOfNames
-            # round-trip per method name per feature, uncached across walks
-            # because every GetNextFeature returns a fresh CDispatch — which
-            # taxed each cut/sweep profile lookup with an O(features) flag
-            # storm. ``GetTypeName2`` MUST stay method-dispatched: resolved
-            # as a property it returns a bound-method object, the comparison
-            # below goes False, and profile selection silently falls back to
-            # the stale ``_last_sketch_name``. ``Name`` is a property and
-            # needs no flag (``_read_member`` tolerates either resolution).
-            feat = _flag_feature_methods(
-                feat, "IFeature", "GetTypeName2", "GetNextFeature"
-            )
+        for feat in _iter_features(adapter):
             try:
-                if _read_member(feat, "GetTypeName2") == "ProfileFeature":
-                    names.append(str(_read_member(feat, "Name")))
+                if _is_profile(feat):
+                    names.append(str(_raw.invoke(feat, "IFeature", "Name")))
             except Exception:
                 pass
-            try:
-                feat = _read_member(feat, "GetNextFeature")
-            except Exception:
-                break
     except Exception:
         pass
     return names
+
+
+def _last_profile_feature_name(adapter: Any) -> str | None:
+    """The last top-level sketch in tree order: ``_profile_feature_names()[-1]``
+    found newest first, which stops at the first sketch from the end instead
+    of reading every feature's type. Falls back to the forward walk when the
+    newest-first search finds none."""
+    try:
+        for feat in _iter_features_newest_first(adapter):
+            if _is_profile(feat):
+                return str(_raw.invoke(feat, "IFeature", "Name"))
+    except Exception:
+        pass
+    names = _profile_feature_names(adapter)
+    return names[-1] if names else None
 
 
 def _create_sweep_impl(
@@ -1075,16 +1116,17 @@ def _create_cut_extrude_impl(
                 )
 
         # Select the profile to cut: the LAST unconsumed top-level sketch
-        # (``ProfileFeature``), by its CURRENT name. ``_profile_feature_names``
-        # walks the tree with the method-flagging the rest of the adapter relies
-        # on -- a bare ``model.FirstFeature``/``GetTypeName2`` walk fails here, the
-        # active doc is a late-bound CDispatch whose feature methods don't resolve
-        # by name without flagging -- and reads LIVE names. So this is rename-proof:
-        # a renamed sketch is still found and selected by its live name, where the
-        # cached ``_last_sketch_name`` string (fallback below) goes stale on rename.
-        profile_names = _profile_feature_names(adapter)
-        if profile_names and not normalized.selected_contours:
-            target = profile_names[-1]
+        # (``ProfileFeature``), by its CURRENT name, read live by dispid
+        # (:func:`_last_profile_feature_name`, newest first). So this is
+        # rename-proof: a renamed sketch is still found and selected by its live
+        # name, where the cached ``_last_sketch_name`` string (fallback below)
+        # goes stale on rename.
+        target = (
+            None
+            if normalized.selected_contours
+            else _last_profile_feature_name(adapter)
+        )
+        if target is not None:
             sketch_selected = bool(
                 adapter._attempt(
                     lambda t=target: adapter.currentModel.Extension.SelectByID2(
@@ -1293,10 +1335,11 @@ def _create_cut_extrude_impl(
 
 
 def _feature_objects(adapter: Any) -> list[tuple[str, Any]]:
-    """Walk the feature tree, returning ``(name, COM object)`` for each feature.
+    """Walk the feature tree, returning ``(name, RAW feature)`` for each feature.
 
-    Robust to pywin32's method-vs-property ambiguity via :func:`_read_member`.
-    The walk is bounded so a misbehaving ``GetNextFeature`` cannot spin forever.
+    Raw walk (:func:`_iter_features`): ``raw_dispatch.bind`` a feature before
+    calling anything but ``raw_dispatch.invoke`` on it. A ``Name`` that cannot
+    be read is recorded as ``""``.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -1307,30 +1350,12 @@ def _feature_objects(adapter: Any) -> list[tuple[str, Any]]:
     """
     out: list[tuple[str, Any]] = []
     try:
-        model = _flag_feature_methods(
-            adapter.currentModel, "IModelDoc2", "FirstFeature"
-        )
-        feat = _read_member(model, "FirstFeature")
-        for _ in range(5000):
-            if not feat:
-                break
-            # Flag only the one method the walk calls. Full IFeature flagging
-            # costs a GetIDsOfNames round-trip per method name per feature —
-            # on every walk, because each GetNextFeature returns a fresh
-            # CDispatch the id()-keyed cache never hits — which made tree
-            # diffs quadratic in feature count (~13 s per feature creation on
-            # a 30-feature tree). ``Name`` is a property and needs no flag;
-            # ``_read_member`` tolerates either resolution anyway.
-            feat = _flag_feature_methods(feat, "IFeature", "GetNextFeature")
+        for feat in _iter_features(adapter):
             try:
-                name = _read_member(feat, "Name")
+                name = _raw.invoke(feat, "IFeature", "Name")
             except Exception:
                 name = None
             out.append((str(name) if name is not None else "", feat))
-            try:
-                feat = _read_member(feat, "GetNextFeature")
-            except Exception:
-                break
     except Exception:
         pass
     return out
@@ -1356,10 +1381,17 @@ def _resolve_feature(adapter: Any, returned: Any, names_before: set[str]) -> Any
 
     Prefers the value the COM call returned when it exposes a readable
     ``Name``.  Some calls instead return a non-feature (``FeatureFillet3``
-    returns an ``int`` on this build) or ``None`` on success
-    (``InsertFeatureShell``); in that case the new feature is found by diffing
-    the current tree against ``names_before``.  Diffing (rather than taking the
-    tree tail) is robust even when a call also appends auxiliary features.
+    returns an ``int`` on this build, ``InsertRefPlane`` an ``IRefPlane``) or
+    ``None`` on success (``InsertFeatureShell``); in that case the new feature
+    is found by diffing the current tree against ``names_before``.  Diffing
+    (rather than taking the tree tail) is robust even when a call also appends
+    auxiliary features.
+
+    The diff answer is the LAST new feature in tree order, so it is searched
+    newest first (:func:`_iter_features_newest_first`): the first feature from
+    the end whose name is new is that same feature, found in a step or two
+    instead of a second whole-tree walk. The forward diff remains the fallback
+    when the newest-first search finds nothing.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -1372,6 +1404,13 @@ def _resolve_feature(adapter: Any, returned: Any, names_before: set[str]) -> Any
     """
     if returned and _read_member(returned, "Name") is not None:
         return returned
+    try:
+        for feat in _iter_features_newest_first(adapter):
+            name = _raw.invoke(feat, "IFeature", "Name")
+            if name is not None and str(name) and str(name) not in names_before:
+                return _raw.bind(feat, "IFeature")
+    except Exception:
+        pass
     new = [
         feat
         for name, feat in _feature_objects(adapter)
@@ -1379,21 +1418,34 @@ def _resolve_feature(adapter: Any, returned: Any, names_before: set[str]) -> Any
     ]
     if not new:
         return None
-    return _flag_feature_methods(new[-1], "IFeature")
+    return _raw.bind(new[-1], "IFeature")
+
+
+def _body_entities(adapter: Any, member: str) -> list[Any]:
+    """Every ``IBody2.<member>`` entity (``GetEdges``/``GetFaces``) of every
+    solid body in the active model, as RAW dispatches in body order.
+
+    Fetched through :func:`raw_dispatch.invoke`, so pywin32 does not wrap each
+    element (``GetTypeInfo``/``GetTypeAttr``) and nothing binds it
+    (``QueryInterface``) — the scorers call one ``GetClosestPointOn`` per
+    entity, and only the winner is bound, to ``IEntity``, for ``Select2``.
+    """
+    model = _sw_type_info.early_bound(adapter.currentModel, "IPartDoc")  # GetBodies2
+    bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
+    entities: list[Any] = []
+    for body in bodies:
+        entities.extend(
+            adapter._attempt(
+                lambda b=body: _raw.invoke(b, "IBody2", member), default=None
+            )
+            or []
+        )
+    return entities
 
 
 def _all_body_edges(adapter: Any) -> list[Any]:
-    """Every edge of every solid body in the active model (flagged for late bind)."""
-    model = _sw_type_info.early_bound(adapter.currentModel, "IPartDoc")  # GetBodies2
-    bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
-    edges: list[Any] = []
-    for body in bodies:
-        body = _flag_feature_methods(body, "IBody2", "GetEdges")
-        for edge in adapter._attempt(lambda b=body: b.GetEdges(), default=None) or []:
-            edges.append(
-                _flag_feature_methods(edge, "IEdge", "GetClosestPointOn", "Select2")
-            )
-    return edges
+    """Every edge of every solid body in the active model (RAW dispatches)."""
+    return _body_entities(adapter, "GetEdges")
 
 
 def _select_edges_geometric(
@@ -1431,7 +1483,9 @@ def _select_edges_geometric(
         best, best_d = None, tol_m
         for edge in edges:
             cp = adapter._attempt(
-                lambda e=edge, px=px, py=py, pz=pz: list(e.GetClosestPointOn(px, py, pz)),
+                lambda e=edge, px=px, py=py, pz=pz: list(
+                    _raw.invoke(e, "IEdge", "GetClosestPointOn", px, py, pz)
+                ),
                 default=None,
             )
             if not cp or len(cp) < 3:
@@ -1441,24 +1495,15 @@ def _select_edges_geometric(
                 best, best_d = edge, d
         if best is None:
             return False
-        best = _flag_feature_methods(best, "IEntity", "Select2")
+        best = _raw.bind(best, "IEntity")
         if not adapter._attempt(lambda e=best: e.Select2(True, 0), default=False):
             return False
     return True
 
 
 def _all_body_faces(adapter: Any) -> list[Any]:
-    """Every face of every solid body in the active model (flagged for late bind)."""
-    model = _sw_type_info.early_bound(adapter.currentModel, "IPartDoc")  # GetBodies2
-    bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
-    faces: list[Any] = []
-    for body in bodies:
-        body = _flag_feature_methods(body, "IBody2", "GetFaces")
-        for face in adapter._attempt(lambda b=body: b.GetFaces(), default=None) or []:
-            faces.append(
-                _flag_feature_methods(face, "IFace2", "GetClosestPointOn", "Select2")
-            )
-    return faces
+    """Every face of every solid body in the active model (RAW dispatches)."""
+    return _body_entities(adapter, "GetFaces")
 
 
 def _select_faces_geometric(
@@ -1497,7 +1542,9 @@ def _select_faces_geometric(
         best, best_d = None, tol_m
         for face in faces:
             cp = adapter._attempt(
-                lambda f=face, px=px, py=py, pz=pz: list(f.GetClosestPointOn(px, py, pz)),
+                lambda f=face, px=px, py=py, pz=pz: list(
+                    _raw.invoke(f, "IFace2", "GetClosestPointOn", px, py, pz)
+                ),
                 default=None,
             )
             if not cp or len(cp) < 3:
@@ -1507,7 +1554,7 @@ def _select_faces_geometric(
                 best, best_d = face, d
         if best is None:
             return False
-        best = _flag_feature_methods(best, "IEntity", "Select2")
+        best = _raw.bind(best, "IEntity")
         keep = append or i > 0
         if not adapter._attempt(lambda f=best, k=keep: f.Select2(k, 0), default=False):
             return False
