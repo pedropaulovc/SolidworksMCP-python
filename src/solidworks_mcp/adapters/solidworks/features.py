@@ -1457,8 +1457,9 @@ def _select_direction_edge(
     on depends on the active view: measured live on the platen rack, a top view
     picked the top edge (whose parameter runs -X) and an isometric view fell
     through to the back face, and either way every instance missed the body.
-    This walks every body edge instead, keeps the straight ones parallel to
-    ``direction_vector``, and selects (``IEntity.Select2``) the one nearest
+    This walks every body edge instead, keeps the ones whose curve is a line
+    (``ICurve.IsLine``) and runs parallel to ``direction_vector``, and selects
+    (``IEntity.Select2``) the one nearest (``IEdge.GetClosestPointOn``)
     ``point_mm``. Any such edge gives the same direction; the point only makes
     the choice deterministic.
 
@@ -1494,9 +1495,9 @@ def _select_direction_edge(
     def _distance(a: list[float], b: list[float]) -> float:
         return sum((a[i] - b[i]) ** 2 for i in range(3)) ** 0.5
 
-    def _closest(edge: Any, x: float, y: float, z: float) -> list[float] | None:
-        cp = adapter._attempt(lambda: list(edge.GetClosestPointOn(x, y, z)), default=None)
-        return [float(c) for c in cp[:3]] if cp and len(cp) >= 3 else None
+    def _is_line(curve: Any) -> bool:
+        curve = _flag_feature_methods(curve, "ICurve", "IsLine")
+        return bool(adapter._attempt(lambda: curve.IsLine(), default=False))
 
     best: tuple[float, Any, bool] | None = None
     for edge in _all_body_edges(adapter):
@@ -1504,7 +1505,9 @@ def _select_direction_edge(
             edge, "IEdge", "GetCurve", "GetCurveParams2", "GetClosestPointOn", "Select2"
         )
         # GetCurveParams2 requires GetCurve first (SolidWorks keeps no curve).
-        adapter._attempt(lambda e=edge: e.GetCurve(), default=None)
+        curve = adapter._attempt(lambda e=edge: e.GetCurve(), default=None)
+        if curve is None or not _is_line(curve):
+            continue  # only a straight edge defines a linear direction
         params = adapter._attempt(lambda e=edge: list(e.GetCurveParams2() or ()), default=[])
         if len(params) < 6:
             continue
@@ -1517,16 +1520,12 @@ def _select_direction_edge(
         along = sum(chord[i] * unit[i] for i in range(3)) / length
         if abs(along) < 1.0 - 1e-6:
             continue  # chord not parallel to the requested direction (~0.08 deg)
-        # A curved edge can still have a parallel chord; a straight one passes
-        # through its chord's midpoint.
-        mid = [(start[i] + end[i]) / 2.0 for i in range(3)]
-        on_mid = _closest(edge, *mid)
-        if on_mid is None or _distance(on_mid, mid) > 1e-6:
+        cp = adapter._attempt(
+            lambda e=edge: list(e.GetClosestPointOn(px, py, pz)), default=None
+        )
+        if not cp or len(cp) < 3:
             continue
-        on_point = _closest(edge, px, py, pz)
-        if on_point is None:
-            continue
-        gap = _distance(on_point, [px, py, pz])
+        gap = _distance([float(c) for c in cp[:3]], [px, py, pz])
         if best is None or gap < best[0]:
             best = (gap, edge, along < 0.0)
     if best is None:
@@ -1540,7 +1539,6 @@ def _select_direction_edge(
             f"{direction_vector}"
         )
     return best[2]
-
 
 
 def _all_body_faces(adapter: Any) -> list[Any]:
@@ -2173,11 +2171,31 @@ def _linear_pattern_impl(
         )
         instance_faces = None if faces is False else len(faces or ())
         if int(params.count) > 1 and instance_faces == 0:
+            # Take the dead pattern back out so a failed call leaves the model
+            # as it found it (a retry must not stack void patterns).
+            model = adapter.currentModel
+            adapter._attempt(lambda: model.ClearSelection2(True), default=None)
+            selected = adapter._attempt(
+                lambda: _flag_feature_methods(feature, "IFeature", "Select2").Select2(
+                    False, 0
+                ),
+                default=False,
+            )
+            deleted = bool(selected) and bool(
+                adapter._attempt(
+                    lambda: model.Extension.DeleteSelection2(0), default=False
+                )
+            )
             raise Exception(
                 f"{pattern_name}: none of the {int(params.count) - 1} instances produced "
                 f"geometry (the pattern owns 0 faces); direction edge nearest "
                 f"{params.direction_point} mm along {params.direction_vector} "
-                f"resolved to {direction}, FlipDir1={flip}"
+                f"resolved to {direction}, FlipDir1={flip}; "
+                + (
+                    "the pattern was deleted"
+                    if deleted
+                    else "deleting the pattern FAILED, so it is still in the model"
+                )
             )
 
         return SolidWorksFeature(

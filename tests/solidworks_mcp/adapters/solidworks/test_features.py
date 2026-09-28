@@ -392,17 +392,17 @@ def test_circular_pattern_impl_requires_axis_reference() -> None:
 
 
 class _FakeEdge:
-    """A body edge from ``start`` to ``end`` (mm). ``bulge`` (mm) offsets every
-    interior point, standing in for a curved edge whose chord is straight."""
+    """A body edge from ``start`` to ``end`` (mm). ``line=False`` stands in for a
+    curved edge (an S-curve) whose ends and chord midpoint lie on the chord."""
 
-    def __init__(self, start, end, bulge=(0.0, 0.0, 0.0)):
+    def __init__(self, start, end, line=True):
         self.start = [c / 1000.0 for c in start]
         self.end = [c / 1000.0 for c in end]
-        self.bulge = [c / 1000.0 for c in bulge]
+        self.line = line
         self.selected = None
 
     def GetCurve(self):
-        return object()
+        return SimpleNamespace(IsLine=lambda: self.line)
 
     def GetCurveParams2(self):
         return (*self.start, *self.end, 0.0, 1.0, 0.0, 0.0, 0.0)
@@ -412,37 +412,46 @@ class _FakeEdge:
         length2 = sum(c * c for c in chord)
         rel = [p - s for p, s in zip((x, y, z), self.start)]
         t = min(1.0, max(0.0, sum(r * c for r, c in zip(rel, chord)) / length2))
-        offset = self.bulge if 0.0 < t < 1.0 else [0.0, 0.0, 0.0]
-        return tuple(s + t * c + o for s, c, o in zip(self.start, chord, offset)) + (t, 0.0)
+        return tuple(s + t * c for s, c in zip(self.start, chord)) + (t, 0.0)
 
     def Select2(self, append, mark):
         self.selected = (append, mark)
         return True
 
 
-def _rack_pattern(chosen, face_count, count=101, vector=(1.0, 0.0, 0.0)):
+def _rack_pattern(
+    chosen, face_count, count=101, vector=(1.0, 0.0, 0.0), delete_ok=True
+):
     """The platen-rack ToothPattern call (point on the bar's bottom-back edge).
 
     The body also has edges that must NOT be chosen: one through the point but
-    along Y, one nearer the point whose chord runs along X but which is curved,
-    and a parallel straight edge farther away than ``chosen``. Returns the
-    result and the ``FeatureLinearPattern5`` arguments.
+    along Y, a curved one nearer the point whose chord runs along X, and a
+    parallel straight edge farther away than ``chosen``. Returns the result,
+    the ``FeatureLinearPattern5`` arguments, and what was deleted.
     """
     adapter = _FakeFeatureAdapter()
     decoys = [
         _FakeEdge((134.82, 0.0, 0.0), (134.82, 12.0, 0.0)),
-        _FakeEdge((100.0, 0.0, 1.0), (170.0, 0.0, 1.0), bulge=(0.0, -1.0, 0.0)),
+        _FakeEdge((100.0, 0.0, 1.0), (170.0, 0.0, 1.0), line=False),
         _FakeEdge((269.64, 12.0, 0.0), (2.2139, 12.0, 0.0)),
     ]
     edges = [*decoys, chosen]
     calls = []
+    deleted = []
+    selection = []
     created = SimpleNamespace(
-        Name="LPattern1", GetFaces=lambda: tuple(object() for _ in range(face_count))
+        Name="LPattern1",
+        GetFaces=lambda: tuple(object() for _ in range(face_count)),
+        Select2=lambda append, mark: selection.append("LPattern1") or True,
     )
 
     def _pattern(*args):
         calls.append(args)
         return created
+
+    def _delete(_options):
+        deleted.extend(selection)
+        return delete_ok
 
     def _selected():
         return next(edge for edge in edges if edge.selected)
@@ -450,6 +459,9 @@ def _rack_pattern(chosen, face_count, count=101, vector=(1.0, 0.0, 0.0)):
     adapter.currentModel = _named_feature_model(
         FeatureManager=SimpleNamespace(FeatureLinearPattern5=_pattern),
         GetBodies2=lambda *_a: [SimpleNamespace(GetEdges=lambda: edges)],
+        Extension=SimpleNamespace(
+            SelectByID2=lambda *a, **k: True, DeleteSelection2=_delete
+        ),
         SelectionManager=SimpleNamespace(
             GetSelectedObjectType3=lambda index, mark: 1,  # swSelEDGES
             GetSelectedObject6=lambda index, mark: _selected(),
@@ -466,7 +478,7 @@ def _rack_pattern(chosen, face_count, count=101, vector=(1.0, 0.0, 0.0)):
         ),
     )
     assert all(edge.selected is None for edge in decoys)
-    return result, calls
+    return result, calls, deleted
 
 
 @pytest.mark.parametrize(
@@ -482,17 +494,17 @@ def _rack_pattern(chosen, face_count, count=101, vector=(1.0, 0.0, 0.0)):
 )
 def test_linear_pattern_impl_sets_flip_from_edge_sense(start, end, vector, flip) -> None:
     chosen = _FakeEdge(start, end)
-    result, calls = _rack_pattern(chosen, face_count=300, vector=vector)
+    result, calls, _ = _rack_pattern(chosen, face_count=300, vector=vector)
     assert result.is_success, result.error
     assert chosen.selected == (True, 1)
     assert calls[0][4] is flip  # FlipDir1
     assert result.data.parameters["flip_direction"] is flip
 
 
-def test_linear_pattern_impl_rejects_pattern_whose_instances_all_missed() -> None:
+def test_linear_pattern_impl_rejects_and_deletes_pattern_whose_instances_all_missed() -> None:
     # SolidWorks still returns a pattern whose every instance missed the body;
     # farm build 7 only noticed a step later, as a bare volume mismatch.
-    result, _ = _rack_pattern(
+    result, _, deleted = _rack_pattern(
         _FakeEdge((269.64, 0.0, 6.0), (0.0, 0.0, 6.0)), face_count=0
     )
     assert result.status == AdapterResultStatus.ERROR
@@ -501,16 +513,29 @@ def test_linear_pattern_impl_rejects_pattern_whose_instances_all_missed() -> Non
     assert "none of the 100 instances" in error
     assert "EDGE (269.640,0.000,6.000)->(0.000,0.000,6.000) mm" in error
     assert "FlipDir1=True" in error
+    assert deleted == ["LPattern1"]
+    assert "the pattern was deleted" in error
+
+
+def test_linear_pattern_impl_reports_void_pattern_it_could_not_delete() -> None:
+    result, _, _ = _rack_pattern(
+        _FakeEdge((269.64, 0.0, 6.0), (0.0, 0.0, 6.0)), face_count=0, delete_ok=False
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "deleting the pattern FAILED, so it is still in the model" in (
+        result.error or ""
+    )
 
 
 def test_linear_pattern_impl_accepts_pattern_whose_instances_landed() -> None:
-    result, calls = _rack_pattern(
+    result, calls, deleted = _rack_pattern(
         _FakeEdge((0.0, 0.0, 6.0), (269.64, 0.0, 6.0)), face_count=300
     )
     assert result.is_success, result.error
     assert result.data.name == "LPattern1"
     assert calls[0][:2] == (101, pytest.approx(0.00265988))
     assert result.data.parameters["instance_faces"] == 300
+    assert deleted == []
     assert result.data.parameters["direction"] == (
         "EDGE (0.000,0.000,6.000)->(269.640,0.000,6.000) mm"
     )
@@ -518,14 +543,14 @@ def test_linear_pattern_impl_accepts_pattern_whose_instances_landed() -> None:
 
 def test_linear_pattern_impl_single_instance_owns_no_faces() -> None:
     # count == 1 is the seed alone: no instance, so no faces is correct.
-    result, _ = _rack_pattern(
+    result, _, _ = _rack_pattern(
         _FakeEdge((0.0, 0.0, 6.0), (269.64, 0.0, 6.0)), face_count=0, count=1
     )
     assert result.is_success, result.error
 
 
 def test_linear_pattern_impl_errors_when_no_edge_runs_along_vector() -> None:
-    result, calls = _rack_pattern(
+    result, calls, _ = _rack_pattern(
         _FakeEdge((0.0, 0.0, 6.0), (269.64, 0.0, 6.0)),
         face_count=300,
         vector=(0.0, 0.0, 1.0),
