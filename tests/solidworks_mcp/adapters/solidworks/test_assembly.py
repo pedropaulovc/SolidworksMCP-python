@@ -745,6 +745,7 @@ def test_fix_component_selection_failure_errors() -> None:
 
 def _pattern_model(components, feature) -> _FakeAssemblyModel:
     model = _FakeAssemblyModel(components=components)
+    model.FirstFeature = None  # an empty, fully readable feature tree
     model.pattern_calls = []
 
     def _linear(*args):

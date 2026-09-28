@@ -25,12 +25,13 @@ from ..base import (
     SolidWorksFeature,
 )
 from .features import (
-    _feature_names,
     _flag_feature_methods,
     _read_member,
     _resolve_feature,
     _select_by_point,
     _select_named_feature,
+    _tree_snapshot,
+    _TreeSnapshot,
 )
 
 # swRefPlaneReferenceConstraints_e (bitmask)
@@ -150,7 +151,7 @@ def _select_vertex(adapter: Any, point_mm: list[float], mark: int) -> bool:
 def _new_reference_feature(
     adapter: Any,
     returned: Any,
-    names_before: set[str],
+    before: _TreeSnapshot,
     type_name: str,
     parameters: dict[str, Any],
     failure: str,
@@ -161,8 +162,9 @@ def _new_reference_feature(
         adapter: Connected adapter with a non-``None`` ``currentModel``.
         returned: Whatever the creating COM call returned (may be a bool or a
             non-feature object such as ``IRefPlane``).
-        names_before: Feature names captured before the call.
-        type_name: Feature ``type`` label for the result.
+        before: The tree captured before the call (``_tree_snapshot``).
+        type_name: Feature ``type`` label for the result, which is also the
+            ``IFeature.GetTypeName2`` of the feature the call creates.
         parameters: Input parameters echoed into the result.
         failure: Error message when no new feature can be resolved.
 
@@ -172,7 +174,7 @@ def _new_reference_feature(
     Raises:
         Exception: When the feature cannot be resolved in the tree.
     """
-    feature = _resolve_feature(adapter, returned, names_before)
+    feature = _resolve_feature(adapter, returned, before, frozenset({type_name}))
     if not feature:
         raise Exception(failure)
     return SolidWorksFeature(
@@ -295,7 +297,7 @@ def _create_plane_impl(
 
         feature_manager = adapter.currentModel.FeatureManager
         feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         returned = feature_manager.InsertRefPlane(*constraints)
         adapter._attempt(
             lambda: adapter.currentModel.ClearSelection2(True), default=None
@@ -303,7 +305,7 @@ def _create_plane_impl(
         return _new_reference_feature(
             adapter,
             returned,
-            names_before,
+            before,
             "RefPlane",
             {
                 "mode": params.mode,
@@ -393,7 +395,7 @@ def _create_axis_impl(
 
         model = adapter.currentModel
         model = _flag_feature_methods(model, "IModelDoc2")
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         returned = model.InsertAxis2(True)  # AutoSize
         adapter._attempt(lambda: model.ClearSelection2(True), default=None)
         if not returned:
@@ -401,7 +403,7 @@ def _create_axis_impl(
         return _new_reference_feature(
             adapter,
             None,  # InsertAxis2 returns a bool; resolve by tree diff
-            names_before,
+            before,
             "RefAxis",
             {
                 "mode": params.mode,
@@ -560,7 +562,7 @@ def _create_reference_point_impl(
 
         feature_manager = adapter.currentModel.FeatureManager
         feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         returned = feature_manager.InsertReferencePoint(*args)
         adapter._attempt(
             lambda: adapter.currentModel.ClearSelection2(True), default=None
@@ -568,7 +570,7 @@ def _create_reference_point_impl(
         return _new_reference_feature(
             adapter,
             returned,
-            names_before,
+            before,
             "RefPoint",
             {
                 "mode": params.mode,
@@ -625,7 +627,7 @@ def _create_coordinate_system_impl(
 
         feature_manager = adapter.currentModel.FeatureManager
         feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         returned = feature_manager.CreateCoordinateSystemUsingNumericalValues(
             True,  # UseLocation
             position_m[0],
@@ -639,7 +641,7 @@ def _create_coordinate_system_impl(
         return _new_reference_feature(
             adapter,
             returned,
-            names_before,
+            before,
             "CoordSys",
             {
                 "position": [float(value) for value in params.position],
