@@ -1423,7 +1423,8 @@ def _tree_snapshot(adapter: Any) -> _TreeSnapshot:
 
 
 def _added_features(adapter: Any, before: _TreeSnapshot) -> list[tuple[str, Any]]:
-    """``(name, RAW feature)`` for every top-level feature added since ``before``.
+    """``(name, RAW feature)`` for every top-level feature added since
+    ``before``, in tree order (newest last).
 
     A creation call only adds top-level features, so every feature whose name
     is not in ``before.names`` is new (an unreadable ``Name`` is reported as
@@ -1455,6 +1456,7 @@ def _added_features(adapter: Any, before: _TreeSnapshot) -> list[tuple[str, Any]
                 if name not in before.names:
                     added.append((name, feat))
                 position += 1
+            added.reverse()
             return added
         except Exception:
             pass
@@ -1472,6 +1474,8 @@ def _resolve_feature(
     returned: Any,
     before: _TreeSnapshot,
     feature_types: frozenset[str],
+    *,
+    expect_many: bool = False,
 ) -> Any:
     """Return a usable ``IFeature`` for a just-created feature.
 
@@ -1484,8 +1488,8 @@ def _resolve_feature(
     decides, never tree position.
 
     Fails closed: an incomplete ``before`` snapshot, added features none of
-    which has an expected type, or more than one that does all raise, naming
-    what was found.
+    which has an expected type, or (unless ``expect_many``) more than one
+    that does all raise, naming what was found.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -1493,6 +1497,9 @@ def _resolve_feature(
         before: The tree captured before the call (:func:`_tree_snapshot`).
         feature_types: ``IFeature.GetTypeName2`` values the created feature
             may have (e.g. ``{"RefPlane"}``).
+        expect_many: The call may legitimately create several features of
+            ``feature_types`` (evenly distributed reference points); the
+            newest one in tree order is returned instead of raising.
 
     Returns:
         Any: A feature object exposing ``Name``, or ``None`` when the call
@@ -1500,7 +1507,8 @@ def _resolve_feature(
 
     Raises:
         RuntimeError: The before-snapshot is incomplete, or the added
-            features do not contain exactly one of ``feature_types``.
+            features contain no ``feature_types`` feature, or more than one
+            when ``expect_many`` is false.
     """
     if returned and _read_member(returned, "Name") is not None:
         return returned
@@ -1518,8 +1526,8 @@ def _resolve_feature(
         if name
     ]
     matches = [feat for _, type_name, feat in typed if type_name in feature_types]
-    if len(matches) == 1:
-        return _raw.bind(matches[0], "IFeature")
+    if len(matches) == 1 or (expect_many and matches):
+        return _raw.bind(matches[-1], "IFeature")
     wanted = "/".join(sorted(feature_types))
     found = ", ".join(f"{name} ({type_name})" for name, type_name, _ in typed)
     found = found or "unnamed features only"

@@ -155,6 +155,8 @@ def _new_reference_feature(
     type_name: str,
     parameters: dict[str, Any],
     failure: str,
+    *,
+    expect_many: bool = False,
 ) -> SolidWorksFeature:
     """Resolve a just-created reference feature and wrap it for the result.
 
@@ -167,6 +169,8 @@ def _new_reference_feature(
             ``IFeature.GetTypeName2`` of the feature the call creates.
         parameters: Input parameters echoed into the result.
         failure: Error message when no new feature can be resolved.
+        expect_many: The call may create several ``type_name`` features;
+            the newest is wrapped (see ``_resolve_feature``).
 
     Returns:
         SolidWorksFeature: Wrapper exposing the new feature's name.
@@ -174,7 +178,13 @@ def _new_reference_feature(
     Raises:
         Exception: When the feature cannot be resolved in the tree.
     """
-    feature = _resolve_feature(adapter, returned, before, frozenset({type_name}))
+    feature = _resolve_feature(
+        adapter,
+        returned,
+        before,
+        frozenset({type_name}),
+        expect_many=expect_many,
+    )
     if not feature:
         raise Exception(failure)
     return SolidWorksFeature(
@@ -531,6 +541,7 @@ def _create_reference_point_impl(
         )
 
     def _point_operation() -> SolidWorksFeature:
+        count = 1
         adapter._attempt(
             lambda: adapter.currentModel.ClearSelection2(True), default=None
         )
@@ -580,6 +591,9 @@ def _create_reference_point_impl(
                 "count": int(params.count),
             },
             "Failed to create reference point",
+            # "evenly" distributes ``count`` points: several RefPoint
+            # features, of which the result wraps the last (newest).
+            expect_many=count > 1,
         )
 
     return cast(

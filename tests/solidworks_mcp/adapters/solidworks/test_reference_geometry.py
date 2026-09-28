@@ -398,6 +398,40 @@ def test_create_reference_point_along_curve_variants() -> None:
     assert calls[-1] == (2, 1, 40.0, 1)  # percentage passes through
 
 
+def test_create_reference_point_evenly_resolves_the_last_point_by_diff() -> None:
+    # InsertReferencePoint returns no named feature, so the new points are
+    # found by the tree diff. "evenly" legitimately adds ``count`` RefPoint
+    # features; the result is the last one, not an "ambiguous" error.
+    adapter = _FakeAdapter()
+    tree: list[SimpleNamespace] = []
+
+    def _node(name: str) -> SimpleNamespace:
+        node = SimpleNamespace(Name=name, GetTypeName2="RefPoint")
+        node.GetNextFeature = lambda: (
+            tree[tree.index(node) + 1] if tree.index(node) + 1 < len(tree) else None
+        )
+        return node
+
+    model = _model()
+
+    def _insert(*args):
+        tree.extend(_node(f"Point{i}") for i in range(1, args[3] + 1))
+        model.FirstFeature = tree[0]
+        return None
+
+    model.FeatureManager = SimpleNamespace(InsertReferencePoint=_insert)
+    adapter.currentModel = model
+
+    result = reference_geometry._create_reference_point_impl(
+        adapter,
+        CreateReferencePointParameters(
+            mode="along_curve", edge_point=[0, 0, 0], along="evenly", count=3
+        ),
+    )
+    assert result.is_success
+    assert result.data.name == "Point3"
+
+
 def test_create_reference_point_guards() -> None:
     adapter = _FakeAdapter()
     no_model = reference_geometry._create_reference_point_impl(
