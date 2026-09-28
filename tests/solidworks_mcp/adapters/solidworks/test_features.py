@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from solidworks_mcp.adapters.base import (
     AdapterResult,
     AdapterResultStatus,
@@ -389,24 +391,148 @@ def test_circular_pattern_impl_requires_axis_reference() -> None:
     assert "axis_name or axis_point" in (result.error or "")
 
 
-def test_linear_pattern_impl_success() -> None:
+class _FakeEdge:
+    """A body edge from ``start`` to ``end`` (mm). ``bulge`` (mm) offsets every
+    interior point, standing in for a curved edge whose chord is straight."""
+
+    def __init__(self, start, end, bulge=(0.0, 0.0, 0.0)):
+        self.start = [c / 1000.0 for c in start]
+        self.end = [c / 1000.0 for c in end]
+        self.bulge = [c / 1000.0 for c in bulge]
+        self.selected = None
+
+    def GetCurve(self):
+        return object()
+
+    def GetCurveParams2(self):
+        return (*self.start, *self.end, 0.0, 1.0, 0.0, 0.0, 0.0)
+
+    def GetClosestPointOn(self, x, y, z):
+        chord = [e - s for s, e in zip(self.start, self.end)]
+        length2 = sum(c * c for c in chord)
+        rel = [p - s for p, s in zip((x, y, z), self.start)]
+        t = min(1.0, max(0.0, sum(r * c for r, c in zip(rel, chord)) / length2))
+        offset = self.bulge if 0.0 < t < 1.0 else [0.0, 0.0, 0.0]
+        return tuple(s + t * c + o for s, c, o in zip(self.start, chord, offset)) + (t, 0.0)
+
+    def Select2(self, append, mark):
+        self.selected = (append, mark)
+        return True
+
+
+def _rack_pattern(chosen, face_count, count=101, vector=(1.0, 0.0, 0.0)):
+    """The platen-rack ToothPattern call (point on the bar's bottom-back edge).
+
+    The body also has edges that must NOT be chosen: one through the point but
+    along Y, one nearer the point whose chord runs along X but which is curved,
+    and a parallel straight edge farther away than ``chosen``. Returns the
+    result and the ``FeatureLinearPattern5`` arguments.
+    """
     adapter = _FakeFeatureAdapter()
-    created = SimpleNamespace(Name="LPattern1")
+    decoys = [
+        _FakeEdge((134.82, 0.0, 0.0), (134.82, 12.0, 0.0)),
+        _FakeEdge((100.0, 0.0, 1.0), (170.0, 0.0, 1.0), bulge=(0.0, -1.0, 0.0)),
+        _FakeEdge((269.64, 12.0, 0.0), (2.2139, 12.0, 0.0)),
+    ]
+    edges = [*decoys, chosen]
+    calls = []
+    created = SimpleNamespace(
+        Name="LPattern1", GetFaces=lambda: tuple(object() for _ in range(face_count))
+    )
+
+    def _pattern(*args):
+        calls.append(args)
+        return created
+
+    def _selected():
+        return next(edge for edge in edges if edge.selected)
+
     adapter.currentModel = _named_feature_model(
-        FeatureManager=SimpleNamespace(FeatureLinearPattern5=lambda *a: created),
+        FeatureManager=SimpleNamespace(FeatureLinearPattern5=_pattern),
+        GetBodies2=lambda *_a: [SimpleNamespace(GetEdges=lambda: edges)],
+        SelectionManager=SimpleNamespace(
+            GetSelectedObjectType3=lambda index, mark: 1,  # swSelEDGES
+            GetSelectedObject6=lambda index, mark: _selected(),
+        ),
     )
     result = features._linear_pattern_impl(
         adapter,
         LinearPatternParameters(
-            direction_point=[50.0, 0.0, 0.0],
-            features=["Cut-Extrude1"],
-            count=4,
-            spacing=20.0,
+            direction_point=[134.82, 0.0, 0.0],
+            direction_vector=list(vector),
+            features=["SeedGap"],
+            count=count,
+            spacing=2.65988,
         ),
     )
-    assert result.is_success
-    assert result.data.type == "LinearPattern"
-    assert result.data.parameters["spacing"] == 20.0
+    assert all(edge.selected is None for edge in decoys)
+    return result, calls
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "vector", "flip"),
+    [
+        # Measured live: the pattern marches along the edge's start->end sense
+        # unless FlipDir1 reverses it; a -X edge with FlipDir1=False sent all
+        # 100 rack gaps off the bar.
+        ((269.64, 0.0, 6.0), (0.0, 0.0, 6.0), (1.0, 0.0, 0.0), True),
+        ((0.0, 0.0, 6.0), (269.64, 0.0, 6.0), (1.0, 0.0, 0.0), False),
+        ((0.0, 0.0, 6.0), (269.64, 0.0, 6.0), (-2.0, 0.0, 0.0), True),
+    ],
+)
+def test_linear_pattern_impl_sets_flip_from_edge_sense(start, end, vector, flip) -> None:
+    chosen = _FakeEdge(start, end)
+    result, calls = _rack_pattern(chosen, face_count=300, vector=vector)
+    assert result.is_success, result.error
+    assert chosen.selected == (True, 1)
+    assert calls[0][4] is flip  # FlipDir1
+    assert result.data.parameters["flip_direction"] is flip
+
+
+def test_linear_pattern_impl_rejects_pattern_whose_instances_all_missed() -> None:
+    # SolidWorks still returns a pattern whose every instance missed the body;
+    # farm build 7 only noticed a step later, as a bare volume mismatch.
+    result, _ = _rack_pattern(
+        _FakeEdge((269.64, 0.0, 6.0), (0.0, 0.0, 6.0)), face_count=0
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    error = result.error or ""
+    assert "LPattern1" in error
+    assert "none of the 100 instances" in error
+    assert "EDGE (269.640,0.000,6.000)->(0.000,0.000,6.000) mm" in error
+    assert "FlipDir1=True" in error
+
+
+def test_linear_pattern_impl_accepts_pattern_whose_instances_landed() -> None:
+    result, calls = _rack_pattern(
+        _FakeEdge((0.0, 0.0, 6.0), (269.64, 0.0, 6.0)), face_count=300
+    )
+    assert result.is_success, result.error
+    assert result.data.name == "LPattern1"
+    assert calls[0][:2] == (101, pytest.approx(0.00265988))
+    assert result.data.parameters["instance_faces"] == 300
+    assert result.data.parameters["direction"] == (
+        "EDGE (0.000,0.000,6.000)->(269.640,0.000,6.000) mm"
+    )
+
+
+def test_linear_pattern_impl_single_instance_owns_no_faces() -> None:
+    # count == 1 is the seed alone: no instance, so no faces is correct.
+    result, _ = _rack_pattern(
+        _FakeEdge((0.0, 0.0, 6.0), (269.64, 0.0, 6.0)), face_count=0, count=1
+    )
+    assert result.is_success, result.error
+
+
+def test_linear_pattern_impl_errors_when_no_edge_runs_along_vector() -> None:
+    result, calls = _rack_pattern(
+        _FakeEdge((0.0, 0.0, 6.0), (269.64, 0.0, 6.0)),
+        face_count=300,
+        vector=(0.0, 0.0, 1.0),
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert "No straight body edge runs along" in (result.error or "")
+    assert calls == []
 
 
 def test_shell_impl_success_recovers_feature_by_diff() -> None:

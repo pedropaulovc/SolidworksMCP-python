@@ -48,6 +48,18 @@ without changelog entries; recorded here retroactively.
   `sketch_offset`, plus rectangle and polygon seeds for the sketch patterns.
 
 ### Fixed
+- **Linear-pattern direction depended on the active view** —
+  `linear_pattern_feature` picked its direction with a `SelectByID2` point
+  pick (a screen-projection pick) and left `FlipDir1=False`, so the view
+  decided which edge (or face) the instances marched along; a wrong pick
+  sent every instance off the body and SolidWorks still returned the
+  feature. `LinearPatternParameters` (and the MCP `LinearPatternInput`) now
+  require `direction_vector`: the direction is the straight body edge
+  parallel to it nearest `direction_point`, resolved with
+  `IEdge.GetClosestPointOn`, and `FlipDir1` follows from the sign of
+  dot(edge start→end, `direction_vector`). A pattern of more than one
+  instance that owns no faces now fails, naming the feature, the instance
+  count and the selected direction edge.
 - **Segment endpoint reads broke after method-flagging** —
   `read_segment_endpoints` accessed `GetStartPoint`/`GetEndPoint` as bare
   properties; once `sw_type_info.flag_methods` touched a line dispatch

@@ -368,8 +368,13 @@ class LinearPatternParameters(BaseModel):
 
     Attributes:
         direction_point (list[float]): A point ``[x, y, z]`` in millimetres on
-            the direction reference — typically a linear edge. Selected under
-            mark 1.
+            or near the direction edge. Among the body's straight edges
+            parallel to ``direction_vector``, the one nearest this point is
+            selected under mark 1.
+        direction_vector (list[float]): ``[x, y, z]`` giving the sense the
+            instances march in from the seed, e.g. ``[1, 0, 0]`` for +X. Need
+            not be unit length. It fixes both which edge is picked and
+            ``FlipDir1``, so the result never depends on the active view.
         features (list[str]): Names of the seed features to pattern. Selected
             under mark 4.
         count (int): Total number of instances, including the seed.
@@ -377,6 +382,7 @@ class LinearPatternParameters(BaseModel):
     """
 
     direction_point: list[float]
+    direction_vector: list[float]
     features: list[str]
     count: int
     spacing: float

@@ -495,7 +495,9 @@ class LinearPatternInput(BaseModel):
     """Input schema for a linear feature pattern.
 
     Attributes:
-        direction_point (list[float]): Point [x, y, z] mm on the direction ref.
+        direction_point (list[float]): Point [x, y, z] mm on or near the
+            direction edge.
+        direction_vector (list[float]): Sense [x, y, z] the instances march in.
         features (list[str]): Names of seed features to pattern.
         count (int): Total instances including the seed.
         spacing (float): Distance between instances in mm.
@@ -503,8 +505,14 @@ class LinearPatternInput(BaseModel):
 
     direction_point: list[float] = Field(
         description=(
-            "Point [x, y, z] in mm on the direction reference, typically a "
-            "linear edge."
+            "Point [x, y, z] in mm on or near the direction edge; the straight "
+            "body edge along direction_vector nearest it is used."
+        )
+    )
+    direction_vector: list[float] = Field(
+        description=(
+            "Direction [x, y, z] the instances march in from the seed, e.g. "
+            "[1, 0, 0] for +X."
         )
     )
     features: list[str] = Field(description="Names of seed features to pattern")
@@ -514,6 +522,8 @@ class LinearPatternInput(BaseModel):
     def model_post_init(self, __context: Any) -> None:
         if len(self.direction_point) != 3:
             raise ValueError("direction_point must be [x, y, z]")
+        if len(self.direction_vector) != 3 or not any(self.direction_vector):
+            raise ValueError("direction_vector must be a non-zero [x, y, z]")
         if not self.features:
             raise ValueError("at least one feature is required")
         if self.count < 1:
@@ -1488,20 +1498,22 @@ async def register_modeling_tools(
     ) -> dict[str, Any]:
         """Create a linear pattern of features along a direction.
 
-        The direction is located by a point on a linear edge (or axis); the
-        seed features are named.
+        The direction is the straight body edge along ``direction_vector``
+        nearest ``direction_point``; the seed features are named.
 
         Args:
-            input_data (LinearPatternInput): Direction point, features, count, spacing.
+            input_data (LinearPatternInput): Direction point and vector,
+                features, count, spacing.
 
         Returns:
             dict[str, Any]: Status and feature details.
 
         Example:
             ```python
-            # 4 copies 20 mm apart along the edge through (50, 0, 0)
+            # 4 copies 20 mm apart along +X, on the edge through (50, 0, 0)
             result = await linear_pattern_feature({
                 "direction_point": [50, 0, 0],
+                "direction_vector": [1, 0, 0],
                 "features": ["Cut-Extrude1"],
                 "count": 4,
                 "spacing": 20.0,
@@ -1513,6 +1525,7 @@ async def register_modeling_tools(
             result = await adapter.linear_pattern_feature(
                 LinearPatternParameters(
                     direction_point=input_data.direction_point,
+                    direction_vector=input_data.direction_vector,
                     features=input_data.features,
                     count=input_data.count,
                     spacing=input_data.spacing,

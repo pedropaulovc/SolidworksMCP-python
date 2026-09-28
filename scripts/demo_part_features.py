@@ -196,6 +196,7 @@ async def build_demo_parts(out_dir: Path) -> dict[str, str]:
             await adapter.linear_pattern_feature(
                 LinearPatternParameters(
                     direction_point=[0.0, -25.0, 0.0],
+                    direction_vector=[1.0, 0.0, 0.0],
                     features=[cut],
                     count=4,
                     spacing=10.0,
