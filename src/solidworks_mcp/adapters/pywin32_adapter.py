@@ -1470,7 +1470,8 @@ class _FeatureSelectionService:
         count = self._adapter._attempt(
             lambda: int(feature_manager.GetFeatureCount(True) or 0), default=0
         )
-        for reverse_pos in range(1, count + 1):
+        # FeatureByPositionReverse is ZERO-based: 0 is the last feature.
+        for reverse_pos in range(count):
             feature = self._adapter._attempt(
                 lambda pos=reverse_pos: (
                     self._adapter.currentModel.FeatureByPositionReverse(pos)
@@ -1485,7 +1486,7 @@ class _FeatureSelectionService:
                 features,
                 seen,
                 feature,
-                count - reverse_pos,
+                count - 1 - reverse_pos,
                 include_suppressed,
             )
 

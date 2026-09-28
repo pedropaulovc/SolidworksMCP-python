@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
+from .. import raw_dispatch as _raw
 from .. import sw_type_info as _sw_type_info
 from ..base import (
     AdapterResult,
@@ -606,15 +608,93 @@ def _read_member(obj: Any, name: str) -> Any:
         return member
 
 
+_TREE_WALK_LIMIT = 5000
+
+# Which strategy each feature-tree lookup took, for a host that records
+# telemetry (``set_tree_path_observer``). The adapter never depends on it.
+_tree_path_observer: Callable[[str, str], None] | None = None
+
+
+def set_tree_path_observer(observer: Callable[[str, str], None] | None) -> None:
+    """Install ``observer(lookup, path)``, called once per feature-tree lookup
+    with the strategy it took: ``("diff", "positional" | "walk")`` from
+    :func:`_added_features` and ``("last_profile", "newest_first" | "walk")``
+    from :func:`_last_profile_feature_name`. ``None`` removes it. An observer
+    that raises is ignored."""
+    global _tree_path_observer
+    _tree_path_observer = observer
+
+
+def _report_tree_path(lookup: str, path: str) -> None:
+    observer = _tree_path_observer
+    if observer is not None:
+        try:
+            observer(lookup, path)
+        except Exception:
+            pass
+
+
+def _iter_features(adapter: Any):
+    """Yield the active doc's top-level features in tree order, RAW.
+
+    ``FirstFeature`` → ``GetNextFeature`` through :func:`raw_dispatch.invoke`:
+    one round trip per step, and each feature stays a bare ``PyIDispatch``.
+    The wrapped walk this replaces paid three more round trips per feature it
+    stepped over (``GetTypeInfo``/``GetTypeAttr`` when pywin32 wraps the
+    returned object, a ``QueryInterface`` when it is bound to ``IFeature``) —
+    ~1.2-1.9 s per ``create_plane`` on a 40-feature part, which walks twice.
+    :func:`raw_dispatch.bind` the feature you keep.
+
+    A walk that cannot finish RAISES — a ``FirstFeature``/``GetNextFeature``
+    that fails, or more than ``_TREE_WALK_LIMIT`` features — so no caller can
+    mistake a truncated walk for the whole tree. Callers that only want what
+    the walk reached (a sketch lookup) catch it themselves.
+    """
+    feat = _raw.invoke(adapter.currentModel, "IModelDoc2", "FirstFeature")
+    for _ in range(_TREE_WALK_LIMIT):
+        if not feat:
+            return
+        yield feat
+        feat = _raw.invoke(feat, "IFeature", "GetNextFeature")
+    if feat:
+        raise RuntimeError(f"feature tree walk exceeded {_TREE_WALK_LIMIT} features")
+
+
+def _iter_features_newest_first(adapter: Any):
+    """Yield top-level features newest first, RAW; stops when the seat does
+    not answer, so callers fall back to :func:`_iter_features`.
+
+    ``IModelDoc2.FeatureByPositionReverse(n)`` counts back from the end of the
+    same order ``FirstFeature``/``GetNextFeature`` walk, ZERO-based: ``0`` is
+    the last feature (SOLIDWORKS API help). One round trip per step; a
+    just-created feature is at or near the end, so a newest-first search stops
+    after a step or two instead of walking the whole tree.
+    """
+    model = adapter.currentModel
+    for position in range(5000):
+        try:
+            feat = _raw.invoke(
+                model, "IModelDoc2", "FeatureByPositionReverse", position
+            )
+        except Exception:
+            return
+        if not feat:
+            return
+        yield feat
+
+
+def _is_profile(feat: Any) -> bool:
+    """Whether a raw feature is a sketch (``GetTypeName2 == "ProfileFeature"``)."""
+    return _raw.invoke(feat, "IFeature", "GetTypeName2") == "ProfileFeature"
+
+
 def _profile_feature_names(adapter: Any) -> list[str]:
     """Return sketch (``ProfileFeature``) names in feature-tree order.
 
-    Walks ``FirstFeature`` → ``GetNextFeature`` reading ``GetTypeName2`` and
-    collecting features whose type is ``"ProfileFeature"`` (a 2D/3D sketch).
-    Mirrors the tree walk used by :func:`_create_cut_extrude_impl`, flagging
-    only the two methods the walk calls (see the loop comment) and reading
-    members through :func:`_read_member` so it is robust to pywin32's
-    method-vs-property late-binding ambiguity.
+    Walks the top-level tree (:func:`_iter_features`) reading ``GetTypeName2``
+    and collecting features whose type is ``"ProfileFeature"`` (a 2D/3D
+    sketch). ``GetTypeName2`` and ``Name`` go by dispid, so neither can
+    resolve as a bound method and silently fail the type comparison.
 
     Args:
         adapter: A connected adapter with a valid ``currentModel``.
@@ -625,39 +705,33 @@ def _profile_feature_names(adapter: Any) -> list[str]:
     """
     names: list[str] = []
     try:
-        model = _flag_feature_methods(
-            adapter.currentModel, "IModelDoc2", "FirstFeature"
-        )
-        feat = _read_member(model, "FirstFeature")
-        # Bound the walk so a misbehaving GetNextFeature can't spin forever.
-        for _ in range(5000):
-            if not feat:
-                break
-            # Flag only the two methods the walk CALLS (the _feature_objects
-            # fix, c992057): full IFeature flagging costs a GetIDsOfNames
-            # round-trip per method name per feature, uncached across walks
-            # because every GetNextFeature returns a fresh CDispatch — which
-            # taxed each cut/sweep profile lookup with an O(features) flag
-            # storm. ``GetTypeName2`` MUST stay method-dispatched: resolved
-            # as a property it returns a bound-method object, the comparison
-            # below goes False, and profile selection silently falls back to
-            # the stale ``_last_sketch_name``. ``Name`` is a property and
-            # needs no flag (``_read_member`` tolerates either resolution).
-            feat = _flag_feature_methods(
-                feat, "IFeature", "GetTypeName2", "GetNextFeature"
-            )
+        for feat in _iter_features(adapter):
             try:
-                if _read_member(feat, "GetTypeName2") == "ProfileFeature":
-                    names.append(str(_read_member(feat, "Name")))
+                if _is_profile(feat):
+                    names.append(str(_raw.invoke(feat, "IFeature", "Name")))
             except Exception:
                 pass
-            try:
-                feat = _read_member(feat, "GetNextFeature")
-            except Exception:
-                break
     except Exception:
         pass
     return names
+
+
+def _last_profile_feature_name(adapter: Any) -> str | None:
+    """The last top-level sketch in tree order: ``_profile_feature_names()[-1]``
+    found newest first, which stops at the first sketch from the end instead
+    of reading every feature's type. Falls back to the forward walk when the
+    newest-first search finds none."""
+    try:
+        for feat in _iter_features_newest_first(adapter):
+            if _is_profile(feat):
+                name = str(_raw.invoke(feat, "IFeature", "Name"))
+                _report_tree_path("last_profile", "newest_first")
+                return name
+    except Exception:
+        pass
+    _report_tree_path("last_profile", "walk")
+    names = _profile_feature_names(adapter)
+    return names[-1] if names else None
 
 
 def _create_sweep_impl(
@@ -1075,16 +1149,17 @@ def _create_cut_extrude_impl(
                 )
 
         # Select the profile to cut: the LAST unconsumed top-level sketch
-        # (``ProfileFeature``), by its CURRENT name. ``_profile_feature_names``
-        # walks the tree with the method-flagging the rest of the adapter relies
-        # on -- a bare ``model.FirstFeature``/``GetTypeName2`` walk fails here, the
-        # active doc is a late-bound CDispatch whose feature methods don't resolve
-        # by name without flagging -- and reads LIVE names. So this is rename-proof:
-        # a renamed sketch is still found and selected by its live name, where the
-        # cached ``_last_sketch_name`` string (fallback below) goes stale on rename.
-        profile_names = _profile_feature_names(adapter)
-        if profile_names and not normalized.selected_contours:
-            target = profile_names[-1]
+        # (``ProfileFeature``), by its CURRENT name, read live by dispid
+        # (:func:`_last_profile_feature_name`, newest first). So this is
+        # rename-proof: a renamed sketch is still found and selected by its live
+        # name, where the cached ``_last_sketch_name`` string (fallback below)
+        # goes stale on rename.
+        target = (
+            None
+            if normalized.selected_contours
+            else _last_profile_feature_name(adapter)
+        )
+        if target is not None:
             sketch_selected = bool(
                 adapter._attempt(
                     lambda t=target: adapter.currentModel.Extension.SelectByID2(
@@ -1292,108 +1367,232 @@ def _create_cut_extrude_impl(
     )
 
 
-def _feature_objects(adapter: Any) -> list[tuple[str, Any]]:
-    """Walk the feature tree, returning ``(name, COM object)`` for each feature.
+# ``IFeature.GetTypeName2`` of the feature each creation call makes: when the
+# call does not return the feature, :func:`_resolve_feature` takes the one added
+# feature of this type, never an auxiliary feature added alongside it.
+_FILLET_TYPES = frozenset({"Fillet"})
+_CHAMFER_TYPES = frozenset({"Chamfer"})
+_MIRROR_TYPES = frozenset({"MirrorPattern"})
+_CIRCULAR_PATTERN_TYPES = frozenset({"CirPattern"})
+_LINEAR_PATTERN_TYPES = frozenset({"LPattern"})
+_SHELL_TYPES = frozenset({"Shell"})
+_DRAFT_TYPES = frozenset({"Draft"})
 
-    Robust to pywin32's method-vs-property ambiguity via :func:`_read_member`.
-    The walk is bounded so a misbehaving ``GetNextFeature`` cannot spin forever.
+
+class _TreeSnapshot(NamedTuple):
+    """The top-level feature tree as it stood before a creation call.
+
+    Attributes:
+        names: Every feature's ``Name``.
+        count: How many top-level features the walk visited.
+        positional: ``FeatureByPositionReverse`` enumerates exactly ``count``
+            features too, so the features a creation adds can be counted and
+            found from the end of the tree (:func:`_added_features`).
+        error: Why the walk is incomplete, or ``None``. An incomplete snapshot
+            can never stand in as the before-set: :func:`_resolve_feature`
+            refuses it instead of diffing against it.
+    """
+
+    names: frozenset[str]
+    count: int
+    positional: bool
+    error: str | None
+
+
+def _feature_at_reverse(adapter: Any, position: int) -> Any:
+    """``IModelDoc2.FeatureByPositionReverse(position)`` as a RAW dispatch
+    (``None`` past the start of the tree)."""
+    return _raw.invoke(
+        adapter.currentModel, "IModelDoc2", "FeatureByPositionReverse", position
+    )
+
+
+def _tree_snapshot(adapter: Any) -> _TreeSnapshot:
+    """Record the feature tree before a creation call, for :func:`_resolve_feature`.
+
+    One raw forward walk (:func:`_iter_features`) reads every feature's
+    ``Name``. A walk that fails part way, or a feature whose ``Name`` cannot be
+    read, leaves the snapshot INCOMPLETE (``error`` set) rather than silently
+    short: diffing against a partial before-set would report an old feature
+    the walk never reached as the new one. The snapshot is taken before the
+    call knows whether it will need a diff (most calls return their feature),
+    so the refusal happens only when the diff is actually needed.
+
+    Two probes check that ``FeatureByPositionReverse`` enumerates the same
+    ``count`` features (``count - 1`` exists, ``count`` does not); only then
+    are the added features counted and found from the end of the tree.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
 
     Returns:
-        list[tuple[str, Any]]: ``(name, feature)`` pairs in tree order. Empty
-        when the tree is inaccessible.
+        _TreeSnapshot: The before-state of the tree.
     """
-    out: list[tuple[str, Any]] = []
+    names: set[str] = set()
+    count = 0
     try:
-        model = _flag_feature_methods(
-            adapter.currentModel, "IModelDoc2", "FirstFeature"
+        for feat in _iter_features(adapter):
+            count += 1
+            name = _raw.invoke(feat, "IFeature", "Name")
+            if not name:
+                raise RuntimeError(f"feature {count} has no readable Name")
+            names.add(str(name))
+    except Exception as exc:
+        return _TreeSnapshot(
+            frozenset(names), count, False, f"{type(exc).__name__}: {exc}"
         )
-        feat = _read_member(model, "FirstFeature")
-        for _ in range(5000):
-            if not feat:
-                break
-            # Flag only the one method the walk calls. Full IFeature flagging
-            # costs a GetIDsOfNames round-trip per method name per feature —
-            # on every walk, because each GetNextFeature returns a fresh
-            # CDispatch the id()-keyed cache never hits — which made tree
-            # diffs quadratic in feature count (~13 s per feature creation on
-            # a 30-feature tree). ``Name`` is a property and needs no flag;
-            # ``_read_member`` tolerates either resolution anyway.
-            feat = _flag_feature_methods(feat, "IFeature", "GetNextFeature")
-            try:
-                name = _read_member(feat, "Name")
-            except Exception:
-                name = None
-            out.append((str(name) if name is not None else "", feat))
-            try:
-                feat = _read_member(feat, "GetNextFeature")
-            except Exception:
-                break
+    try:
+        positional = (count == 0 or bool(_feature_at_reverse(adapter, count - 1))) and (
+            not _feature_at_reverse(adapter, count)
+        )
     except Exception:
-        pass
-    return out
+        positional = False
+    return _TreeSnapshot(frozenset(names), count, positional, None)
 
 
-def _feature_names(adapter: Any) -> set[str]:
-    """Return the set of feature names currently in the tree.
+def _added_features(adapter: Any, before: _TreeSnapshot) -> list[tuple[str, Any]]:
+    """``(name, RAW feature)`` for every top-level feature added since
+    ``before``, in tree order (newest last).
 
-    Captured before a feature-creation call so the new feature can later be
-    identified by diffing (see :func:`_resolve_feature`).
-
-    Args:
-        adapter: Connected adapter with a non-``None`` ``currentModel``.
-
-    Returns:
-        set[str]: Feature names present now.
+    A creation call only adds top-level features, so every feature whose name
+    is not in ``before.names`` is new (an unreadable ``Name`` is reported as
+    ``""``). With a positional snapshot the added features are COUNTED (probe
+    ``FeatureByPositionReverse`` upward from ``before.count`` to the new end of
+    the tree) and found newest first, stopping once all of them are seen: a
+    few round trips instead of a second whole-tree walk, and still complete
+    wherever a rollback bar put them. Otherwise, or when the positional
+    answer is inconsistent, a full forward walk finds them; a walk that cannot
+    finish raises.
     """
-    return {name for name, _ in _feature_objects(adapter) if name}
+    if before.positional:
+        try:
+            if before.count and not _feature_at_reverse(adapter, before.count - 1):
+                raise RuntimeError("the feature tree shrank")
+            total = before.count
+            while _feature_at_reverse(adapter, total):
+                total += 1
+                if total - before.count > _TREE_WALK_LIMIT:
+                    raise RuntimeError("feature count probe did not terminate")
+            added: list[tuple[str, Any]] = []
+            position = 0
+            while len(added) < total - before.count:
+                feat = _feature_at_reverse(adapter, position)
+                if not feat:
+                    raise RuntimeError("tree ended before every added feature")
+                name = _raw.invoke(feat, "IFeature", "Name")
+                name = str(name) if name else ""
+                if name not in before.names:
+                    added.append((name, feat))
+                position += 1
+            added.reverse()
+            _report_tree_path("diff", "positional")
+            return added
+        except Exception:
+            pass
+    added = []
+    for feat in _iter_features(adapter):
+        name = _raw.invoke(feat, "IFeature", "Name")
+        name = str(name) if name else ""
+        if name not in before.names:
+            added.append((name, feat))
+    _report_tree_path("diff", "walk")
+    return added
 
 
-def _resolve_feature(adapter: Any, returned: Any, names_before: set[str]) -> Any:
+def _resolve_feature(
+    adapter: Any,
+    returned: Any,
+    before: _TreeSnapshot,
+    feature_types: frozenset[str],
+    *,
+    expect_many: bool = False,
+) -> Any:
     """Return a usable ``IFeature`` for a just-created feature.
 
     Prefers the value the COM call returned when it exposes a readable
     ``Name``.  Some calls instead return a non-feature (``FeatureFillet3``
-    returns an ``int`` on this build) or ``None`` on success
-    (``InsertFeatureShell``); in that case the new feature is found by diffing
-    the current tree against ``names_before``.  Diffing (rather than taking the
-    tree tail) is robust even when a call also appends auxiliary features.
+    returns an ``int`` on this build, ``InsertRefPlane`` an ``IRefPlane``) or
+    ``None`` on success (``InsertFeatureShell``); then the new feature is the
+    one added feature (:func:`_added_features`) whose ``GetTypeName2`` is in
+    ``feature_types``. A call may add auxiliary features too, so the type
+    decides, never tree position.
+
+    Fails closed: an incomplete ``before`` snapshot, added features none of
+    which has an expected type, or (unless ``expect_many``) more than one
+    that does all raise, naming what was found.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
         returned: Whatever the feature-creation COM call returned.
-        names_before: Feature names captured before the call
-            (:func:`_feature_names`).
+        before: The tree captured before the call (:func:`_tree_snapshot`).
+        feature_types: ``IFeature.GetTypeName2`` values the created feature
+            may have (e.g. ``{"RefPlane"}``).
+        expect_many: The call may legitimately create several features of
+            ``feature_types`` (evenly distributed reference points); the
+            newest one in tree order is returned instead of raising.
 
     Returns:
-        Any: A feature object exposing ``Name``, or ``None`` if none is found.
+        Any: A feature object exposing ``Name``, or ``None`` when the call
+        added no feature at all.
+
+    Raises:
+        RuntimeError: The before-snapshot is incomplete, or the added
+            features contain no ``feature_types`` feature, or more than one
+            when ``expect_many`` is false.
     """
     if returned and _read_member(returned, "Name") is not None:
         return returned
-    new = [
-        feat
-        for name, feat in _feature_objects(adapter)
-        if name and name not in names_before
-    ]
-    if not new:
+    if before.error is not None:
+        raise RuntimeError(
+            "cannot identify the created feature: the feature tree read before "
+            f"creating it is incomplete ({before.error})"
+        )
+    added = _added_features(adapter, before)
+    if not added:
         return None
-    return _flag_feature_methods(new[-1], "IFeature")
+    typed = [
+        (name, str(_raw.invoke(feat, "IFeature", "GetTypeName2")), feat)
+        for name, feat in added
+        if name
+    ]
+    matches = [feat for _, type_name, feat in typed if type_name in feature_types]
+    if len(matches) == 1 or (expect_many and matches):
+        return _raw.bind(matches[-1], "IFeature")
+    wanted = "/".join(sorted(feature_types))
+    found = ", ".join(f"{name} ({type_name})" for name, type_name, _ in typed)
+    found = found or "unnamed features only"
+    if not matches:
+        raise RuntimeError(
+            f"no {wanted} feature among the {len(added)} added features: {found}"
+        )
+    raise RuntimeError(f"ambiguous: {len(matches)} added {wanted} features: {found}")
+
+
+def _body_entities(adapter: Any, member: str) -> list[Any]:
+    """Every ``IBody2.<member>`` entity (``GetEdges``/``GetFaces``) of every
+    solid body in the active model, as RAW dispatches in body order.
+
+    Fetched through :func:`raw_dispatch.invoke`, so pywin32 does not wrap each
+    element (``GetTypeInfo``/``GetTypeAttr``) and nothing binds it
+    (``QueryInterface``) — the scorers call one ``GetClosestPointOn`` per
+    entity, and only the winner is bound, to ``IEntity``, for ``Select2``.
+    """
+    model = _sw_type_info.early_bound(adapter.currentModel, "IPartDoc")  # GetBodies2
+    bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
+    entities: list[Any] = []
+    for body in bodies:
+        entities.extend(
+            adapter._attempt(
+                lambda b=body: _raw.invoke(b, "IBody2", member), default=None
+            )
+            or []
+        )
+    return entities
 
 
 def _all_body_edges(adapter: Any) -> list[Any]:
-    """Every edge of every solid body in the active model (flagged for late bind)."""
-    model = _sw_type_info.early_bound(adapter.currentModel, "IPartDoc")  # GetBodies2
-    bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
-    edges: list[Any] = []
-    for body in bodies:
-        body = _flag_feature_methods(body, "IBody2", "GetEdges")
-        for edge in adapter._attempt(lambda b=body: b.GetEdges(), default=None) or []:
-            edges.append(
-                _flag_feature_methods(edge, "IEdge", "GetClosestPointOn", "Select2")
-            )
-    return edges
+    """Every edge of every solid body in the active model (RAW dispatches)."""
+    return _body_entities(adapter, "GetEdges")
 
 
 def _select_edges_geometric(
@@ -1431,7 +1630,9 @@ def _select_edges_geometric(
         best, best_d = None, tol_m
         for edge in edges:
             cp = adapter._attempt(
-                lambda e=edge, px=px, py=py, pz=pz: list(e.GetClosestPointOn(px, py, pz)),
+                lambda e=edge, px=px, py=py, pz=pz: list(
+                    _raw.invoke(e, "IEdge", "GetClosestPointOn", px, py, pz)
+                ),
                 default=None,
             )
             if not cp or len(cp) < 3:
@@ -1441,24 +1642,15 @@ def _select_edges_geometric(
                 best, best_d = edge, d
         if best is None:
             return False
-        best = _flag_feature_methods(best, "IEntity", "Select2")
+        best = _raw.bind(best, "IEntity")
         if not adapter._attempt(lambda e=best: e.Select2(True, 0), default=False):
             return False
     return True
 
 
 def _all_body_faces(adapter: Any) -> list[Any]:
-    """Every face of every solid body in the active model (flagged for late bind)."""
-    model = _sw_type_info.early_bound(adapter.currentModel, "IPartDoc")  # GetBodies2
-    bodies = adapter._attempt(lambda: model.GetBodies2(0, True), default=None) or []
-    faces: list[Any] = []
-    for body in bodies:
-        body = _flag_feature_methods(body, "IBody2", "GetFaces")
-        for face in adapter._attempt(lambda b=body: b.GetFaces(), default=None) or []:
-            faces.append(
-                _flag_feature_methods(face, "IFace2", "GetClosestPointOn", "Select2")
-            )
-    return faces
+    """Every face of every solid body in the active model (RAW dispatches)."""
+    return _body_entities(adapter, "GetFaces")
 
 
 def _select_faces_geometric(
@@ -1497,7 +1689,9 @@ def _select_faces_geometric(
         best, best_d = None, tol_m
         for face in faces:
             cp = adapter._attempt(
-                lambda f=face, px=px, py=py, pz=pz: list(f.GetClosestPointOn(px, py, pz)),
+                lambda f=face, px=px, py=py, pz=pz: list(
+                    _raw.invoke(f, "IFace2", "GetClosestPointOn", px, py, pz)
+                ),
                 default=None,
             )
             if not cp or len(cp) < 3:
@@ -1507,7 +1701,7 @@ def _select_faces_geometric(
                 best, best_d = face, d
         if best is None:
             return False
-        best = _flag_feature_methods(best, "IEntity", "Select2")
+        best = _raw.bind(best, "IEntity")
         keep = append or i > 0
         if not adapter._attempt(lambda f=best, k=keep: f.Select2(k, 0), default=False):
             return False
@@ -1582,7 +1776,7 @@ def _add_fillet_impl(
         )
 
     def _fillet_operation() -> SolidWorksFeature:
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         _select_edge_points(adapter, edge_points)
 
         # IModelDoc2.FeatureFillet3 constant-radius form (9 args) — verified on
@@ -1600,7 +1794,7 @@ def _add_fillet_impl(
             False,  # UseHelpPoint
             False,  # UseTangentHoldLine
         )
-        feature = _resolve_feature(adapter, feature, names_before)
+        feature = _resolve_feature(adapter, feature, before, _FILLET_TYPES)
         if not feature:
             raise Exception("Failed to create fillet")
 
@@ -1674,7 +1868,7 @@ def _add_chamfer_impl(
         )
 
     def _chamfer_operation() -> SolidWorksFeature:
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         if edge_points:
             _select_edge_points(adapter, edge_points)
         else:
@@ -1701,7 +1895,7 @@ def _add_chamfer_impl(
             0.0,
             0.0,  # Vertex distances (vertex chamfer only)
         )
-        feature = _resolve_feature(adapter, feature, names_before)
+        feature = _resolve_feature(adapter, feature, before, _CHAMFER_TYPES)
         if not feature:
             raise Exception("Failed to create chamfer")
 
@@ -1797,7 +1991,7 @@ def _mirror_feature_impl(
         feature_manager = _flag_feature_methods(
             feature_manager, "IFeatureManager", "InsertMirrorFeature2"
         )
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         feature = feature_manager.InsertMirrorFeature2(
             False,  # BMirrorBody (mirror features, not bodies)
             bool(params.geometry_pattern),  # BGeometryPattern
@@ -1805,7 +1999,7 @@ def _mirror_feature_impl(
             False,  # BKnit (surfaces only)
             0,  # ScopeOptions = swFeatureScope_AllBodies
         )
-        feature = _resolve_feature(adapter, feature, names_before)
+        feature = _resolve_feature(adapter, feature, before, _MIRROR_TYPES)
         if not feature:
             raise Exception("Failed to create mirror feature")
 
@@ -1898,7 +2092,7 @@ def _circular_pattern_impl(
         feature_manager = _flag_feature_methods(
             feature_manager, "IFeatureManager", "FeatureCircularPattern5"
         )
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         feature = feature_manager.FeatureCircularPattern5(
             int(params.count),  # Number (incl. seed)
             spacing_rad,  # Spacing (radians; total angle when EqualSpacing)
@@ -1915,7 +2109,7 @@ def _circular_pattern_impl(
             "NULL",  # DName2
             False,  # EqualSpacing2
         )
-        feature = _resolve_feature(adapter, feature, names_before)
+        feature = _resolve_feature(adapter, feature, before, _CIRCULAR_PATTERN_TYPES)
         if not feature:
             raise Exception("Failed to create circular pattern")
 
@@ -1994,7 +2188,7 @@ def _linear_pattern_impl(
         feature_manager = _flag_feature_methods(
             feature_manager, "IFeatureManager", "FeatureLinearPattern5"
         )
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         feature = feature_manager.FeatureLinearPattern5(
             int(params.count),  # Num1 (incl. seed)
             float(params.spacing) / 1000.0,  # Spacing1 (metres)
@@ -2019,7 +2213,7 @@ def _linear_pattern_impl(
             False,  # D2PatternSeedOnly
             False,  # SyncSubAssemblies
         )
-        feature = _resolve_feature(adapter, feature, names_before)
+        feature = _resolve_feature(adapter, feature, before, _LINEAR_PATTERN_TYPES)
         if not feature:
             raise Exception("Failed to create linear pattern")
 
@@ -2079,11 +2273,11 @@ def _shell_impl(
                 raise Exception(f"Failed to select face at point {point} (mm)")
 
         # InsertFeatureShell(Thickness metres, Outward) returns void.
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         adapter.currentModel.InsertFeatureShell(
             float(params.thickness) / 1000.0, bool(params.outward)
         )
-        feature = _resolve_feature(adapter, None, names_before)
+        feature = _resolve_feature(adapter, None, before, _SHELL_TYPES)
         if not feature:
             raise Exception("Failed to create shell")
 
@@ -2153,7 +2347,7 @@ def _draft_impl(
         feature_manager = _flag_feature_methods(
             feature_manager, "IFeatureManager", "InsertMultiFaceDraft"
         )
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         feature = feature_manager.InsertMultiFaceDraft(
             math.radians(float(params.angle)),  # Angle (radians)
             bool(params.flip),  # FlipDir
@@ -2162,7 +2356,7 @@ def _draft_impl(
             False,  # IsStepDraft
             False,  # IsBodyDraft
         )
-        feature = _resolve_feature(adapter, feature, names_before)
+        feature = _resolve_feature(adapter, feature, before, _DRAFT_TYPES)
         if not feature:
             raise Exception("Failed to create draft")
 

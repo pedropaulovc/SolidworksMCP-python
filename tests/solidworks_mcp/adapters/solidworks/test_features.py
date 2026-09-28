@@ -414,7 +414,9 @@ def test_shell_impl_success_recovers_feature_by_diff() -> None:
     # tree against the names captured before the call. The fake appends the
     # shell feature only when InsertFeatureShell runs, so the diff finds it.
     adapter = _FakeFeatureAdapter()
-    shell_feat = SimpleNamespace(Name="Shell1", GetNextFeature=lambda: None)
+    shell_feat = SimpleNamespace(
+        Name="Shell1", GetTypeName2="Shell", GetNextFeature=lambda: None
+    )
     model = _named_feature_model(FirstFeature=None)
 
     def _insert(thickness, outward):

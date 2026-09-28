@@ -57,12 +57,12 @@ from ..com_variant import (
     null_variant,
 )
 from .features import (
-    _feature_names,
     _flag_feature_methods,
     _read_member,
     _resolve_feature,
     _select_named_feature,
     _select_reference_point,
+    _tree_snapshot,
 )
 
 try:
@@ -1299,7 +1299,7 @@ def _pattern_components_linear_impl(
 
         feature_manager = adapter.currentModel.FeatureManager
         feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         feature = feature_manager.FeatureLinearPattern5(
             int(params.count),  # Num1 (incl. seed)
             float(params.spacing) / 1000.0,  # Spacing1 (metres)
@@ -1324,7 +1324,9 @@ def _pattern_components_linear_impl(
             False,  # D2PatternSeedOnly
             False,  # SyncSubAssemblies
         )
-        feature = _resolve_feature(adapter, feature, names_before)
+        feature = _resolve_feature(
+            adapter, feature, before, frozenset({"LocalLPattern"})
+        )
         if not feature:
             raise Exception("Failed to create linear component pattern")
 
@@ -1405,7 +1407,7 @@ def _pattern_components_circular_impl(
         spacing_rad = _math.radians(float(params.angle))
         feature_manager = adapter.currentModel.FeatureManager
         feature_manager = _flag_feature_methods(feature_manager, "IFeatureManager")
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         feature = feature_manager.FeatureCircularPattern5(
             int(params.count),  # Number (incl. seed)
             spacing_rad,  # Spacing (radians; total angle when EqualSpacing)
@@ -1422,7 +1424,9 @@ def _pattern_components_circular_impl(
             "NULL",  # DName2
             False,  # EqualSpacing2
         )
-        feature = _resolve_feature(adapter, feature, names_before)
+        feature = _resolve_feature(
+            adapter, feature, before, frozenset({"LocalCirPattern"})
+        )
         if not feature:
             raise Exception("Failed to create circular component pattern")
 
@@ -1538,7 +1542,7 @@ def _pattern_components_chain_impl(
 
         fm = model.FeatureManager
         fm = _flag_feature_methods(fm, "IFeatureManager")
-        names_before = _feature_names(adapter)
+        before = _tree_snapshot(adapter)
         # FeatureChainPattern(PitchMethod, FlipDirection, FillPath, Number,
         #   Spacing, GroupOneFlipPlane, GroupTwoChain, GroupTwoFlipPlane,
         #   AlignMethod, Options)
@@ -1554,7 +1558,9 @@ def _pattern_components_chain_impl(
             _CHAIN_ALIGN.get(params.align_method, 1),
             _CHAIN_OPTIONS.get(params.options, 1),
         )
-        feature = _resolve_feature(adapter, feature, names_before)
+        feature = _resolve_feature(
+            adapter, feature, before, frozenset({"LocalChainPattern"})
+        )
         if not feature:
             raise Exception("Failed to create chain component pattern")
 
@@ -1781,10 +1787,12 @@ def _insert_belt_chain_impl(
                 lambda t=typed, a=attr, v=value: setattr(t, a, v), default=None
             )
 
-        names_before = _feature_names(adapter)
+        # CreateFeature returns the IFeature it made. No tree diff stands in
+        # for it: the belt/chain feature's GetTypeName2 is unverified, and
+        # CreateBeltPart also adds a belt component, so a diff could not tell
+        # the two apart.
         feature = adapter._attempt(lambda: fm.CreateFeature(data), default=None)
-        feature = _resolve_feature(adapter, feature, names_before)
-        if not feature:
+        if not feature or _read_member(feature, "Name") is None:
             errs = adapter._attempt(lambda: fm.GetCreateFeatureErrors(), default="?")
             raise Exception(f"Failed to create belt/chain feature (errors={errs})")
 
