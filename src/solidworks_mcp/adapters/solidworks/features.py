@@ -1595,6 +1595,35 @@ def _all_body_edges(adapter: Any) -> list[Any]:
     return _body_entities(adapter, "GetEdges")
 
 
+def _nearest_entity(
+    adapter: Any,
+    entities: list[Any],
+    interface: str,
+    point_m: tuple[float, float, float],
+    tol_m: float,
+) -> Any:
+    """The RAW entity whose ``<interface>.GetClosestPointOn`` lands nearest
+    ``point_m`` (metres), closer than ``tol_m``; ``None`` when none does.
+
+    One raw ``GetClosestPointOn`` per entity; an entity that does not answer
+    is skipped."""
+    px, py, pz = point_m
+    best, best_d = None, tol_m
+    for entity in entities:
+        cp = adapter._attempt(
+            lambda e=entity: list(
+                _raw.invoke(e, interface, "GetClosestPointOn", px, py, pz)
+            ),
+            default=None,
+        )
+        if not cp or len(cp) < 3:
+            continue
+        d = ((cp[0] - px) ** 2 + (cp[1] - py) ** 2 + (cp[2] - pz) ** 2) ** 0.5
+        if d < best_d:
+            best, best_d = entity, d
+    return best
+
+
 def _select_edges_geometric(
     adapter: Any, edge_points: list[list[float]], tol_mm: float = 0.5
 ) -> bool:
@@ -1627,19 +1656,7 @@ def _select_edges_geometric(
         if len(point) != 3:
             return False
         px, py, pz = (float(c) / 1000.0 for c in point)
-        best, best_d = None, tol_m
-        for edge in edges:
-            cp = adapter._attempt(
-                lambda e=edge, px=px, py=py, pz=pz: list(
-                    _raw.invoke(e, "IEdge", "GetClosestPointOn", px, py, pz)
-                ),
-                default=None,
-            )
-            if not cp or len(cp) < 3:
-                continue
-            d = ((cp[0] - px) ** 2 + (cp[1] - py) ** 2 + (cp[2] - pz) ** 2) ** 0.5
-            if d < best_d:
-                best, best_d = edge, d
+        best = _nearest_entity(adapter, edges, "IEdge", (px, py, pz), tol_m)
         if best is None:
             return False
         best = _raw.bind(best, "IEntity")
@@ -1663,6 +1680,12 @@ def _select_direction_edge(
     (``IEntity.Select2``) the one nearest (``IEdge.GetClosestPointOn``)
     ``point_mm``. Any such edge gives the same direction; the point only makes
     the choice deterministic.
+
+    The edges are RAW dispatches (:func:`_all_body_edges`), so every per-edge
+    query goes through :func:`raw_dispatch.invoke` and only the winner is bound,
+    to ``IEntity``, for ``Select2``. A raw dispatch has no named members: a
+    by-name call on one raises, and the ``_attempt`` around it would drop every
+    edge as "not a line".
 
     The pattern marches along the edge's own start->end sense (as reported by
     ``IEdge.GetCurveParams2``) unless ``FlipDir1`` reverses it, so the caller
@@ -1696,20 +1719,20 @@ def _select_direction_edge(
     def _distance(a: list[float], b: list[float]) -> float:
         return sum((a[i] - b[i]) ** 2 for i in range(3)) ** 0.5
 
-    def _is_line(curve: Any) -> bool:
-        curve = _flag_feature_methods(curve, "ICurve", "IsLine")
-        return bool(adapter._attempt(lambda: curve.IsLine(), default=False))
-
     best: tuple[float, Any, bool] | None = None
     for edge in _all_body_edges(adapter):
-        edge = _flag_feature_methods(
-            edge, "IEdge", "GetCurve", "GetCurveParams2", "GetClosestPointOn", "Select2"
-        )
         # GetCurveParams2 requires GetCurve first (SolidWorks keeps no curve).
-        curve = adapter._attempt(lambda e=edge: e.GetCurve(), default=None)
-        if curve is None or not _is_line(curve):
+        curve = adapter._attempt(
+            lambda e=edge: _raw.invoke(e, "IEdge", "GetCurve"), default=None
+        )
+        if curve is None or not adapter._attempt(
+            lambda c=curve: bool(_raw.invoke(c, "ICurve", "IsLine")), default=False
+        ):
             continue  # only a straight edge defines a linear direction
-        params = adapter._attempt(lambda e=edge: list(e.GetCurveParams2() or ()), default=[])
+        params = adapter._attempt(
+            lambda e=edge: list(_raw.invoke(e, "IEdge", "GetCurveParams2") or ()),
+            default=[],
+        )
         if len(params) < 6:
             continue
         start = [float(c) for c in params[0:3]]
@@ -1722,7 +1745,10 @@ def _select_direction_edge(
         if abs(along) < 1.0 - 1e-6:
             continue  # chord not parallel to the requested direction (~0.08 deg)
         cp = adapter._attempt(
-            lambda e=edge: list(e.GetClosestPointOn(px, py, pz)), default=None
+            lambda e=edge: list(
+                _raw.invoke(e, "IEdge", "GetClosestPointOn", px, py, pz)
+            ),
+            default=None,
         )
         if not cp or len(cp) < 3:
             continue
@@ -1733,7 +1759,7 @@ def _select_direction_edge(
         raise Exception(
             f"No straight body edge runs along direction_vector {direction_vector}"
         )
-    picked = _flag_feature_methods(best[1], "IEntity", "Select2")
+    picked = _raw.bind(best[1], "IEntity")
     if not adapter._attempt(lambda: picked.Select2(True, mark), default=False):
         raise Exception(
             f"Failed to select the direction edge nearest {point_mm} (mm) along "
@@ -1780,19 +1806,7 @@ def _select_faces_geometric(
         if len(point) != 3:
             return False
         px, py, pz = (float(c) / 1000.0 for c in point)
-        best, best_d = None, tol_m
-        for face in faces:
-            cp = adapter._attempt(
-                lambda f=face, px=px, py=py, pz=pz: list(
-                    _raw.invoke(f, "IFace2", "GetClosestPointOn", px, py, pz)
-                ),
-                default=None,
-            )
-            if not cp or len(cp) < 3:
-                continue
-            d = ((cp[0] - px) ** 2 + (cp[1] - py) ** 2 + (cp[2] - pz) ** 2) ** 0.5
-            if d < best_d:
-                best, best_d = face, d
+        best = _nearest_entity(adapter, faces, "IFace2", (px, py, pz), tol_m)
         if best is None:
             return False
         best = _raw.bind(best, "IEntity")
@@ -1800,6 +1814,53 @@ def _select_faces_geometric(
         if not adapter._attempt(lambda f=best, k=keep: f.Select2(k, 0), default=False):
             return False
     return True
+
+
+# ``SelectByID2`` entity type -> (``IBody2`` member listing it, its interface).
+_BODY_ENTITY_MEMBERS = {"EDGE": ("GetEdges", "IEdge"), "FACE": ("GetFaces", "IFace2")}
+
+
+def _select_entity_geometric(
+    adapter: Any,
+    entity_type: str,
+    point_mm: list[float],
+    mark: int,
+    append: bool,
+    tol_mm: float = 0.5,
+) -> bool:
+    """Select the body edge or face nearest a point on it, whatever the view.
+
+    The geometric counterpart of :func:`_select_by_point` for one ``"EDGE"`` or
+    ``"FACE"``: it scores every body entity of that kind by
+    ``GetClosestPointOn`` and selects the nearest one within ``tol_mm``
+    (``IEntity.Select2(append, mark)``). ``SelectByID2`` picks at the point's
+    screen projection, so a point that lies on the entity still misses when the
+    view puts it off screen or behind the body -- in a fresh part the view
+    scale is whatever the template and the seat's window size give.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        entity_type: ``"EDGE"`` or ``"FACE"``; any other type selects nothing.
+        point_mm: ``[x, y, z]`` in millimetres on the target entity.
+        mark: Selection mark.
+        append: ``True`` to add to the current selection set, ``False`` to
+            replace it.
+        tol_mm: Max distance (mm) from the point to the entity.
+
+    Returns:
+        bool: ``True`` when an entity was found and selected.
+    """
+    kind = _BODY_ENTITY_MEMBERS.get(entity_type.upper())
+    if kind is None or len(point_mm) != 3:
+        return False
+    member, interface = kind
+    px, py, pz = (float(c) / 1000.0 for c in point_mm)
+    entities = _body_entities(adapter, member)
+    best = _nearest_entity(adapter, entities, interface, (px, py, pz), tol_mm / 1000.0)
+    if best is None:
+        return False
+    picked = _raw.bind(best, "IEntity")
+    return bool(adapter._attempt(lambda: picked.Select2(append, mark), default=False))
 
 
 def _select_edge_points(adapter: Any, edge_points: list[list[float]]) -> None:

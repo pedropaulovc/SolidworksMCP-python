@@ -15,7 +15,12 @@ from ..base import (
     AdapterResultStatus,
     MeasureParameters,
 )
-from .features import _flag_feature_methods, _read_member, _select_by_point
+from .features import (
+    _flag_feature_methods,
+    _read_member,
+    _select_by_point,
+    _select_entity_geometric,
+)
 
 # IMeasure::ArcOption values (no public enum; documented in the API example)
 _ARC_OPTIONS = {"center": 0, "minimum": 1, "maximum": 2}
@@ -78,7 +83,9 @@ def _select_measure_entities(adapter: Any, params: MeasureParameters) -> None:
 
     Named entities go through ``SelectByID2`` with their name; unnamed ones
     (faces/edges/vertices) are located by a point on them — subject to the
-    view-dependent picking caveat documented on :func:`_select_by_point`.
+    view-dependent picking caveat documented on :func:`_select_by_point`. An
+    edge or face that point-picking misses is then found by geometry
+    (:func:`_select_entity_geometric`), which no view can hide.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -112,7 +119,11 @@ def _select_measure_entities(adapter: Any, params: MeasureParameters) -> None:
                 )
             )
         else:
+            # SelectByID2 picks at the point's screen projection; when the view
+            # leaves the entity off screen or hidden, find it by geometry.
             selected = _select_by_point(
+                adapter, entity.entity_type, entity.point, 0, append
+            ) or _select_entity_geometric(
                 adapter, entity.entity_type, entity.point, 0, append
             )
         if not selected:
