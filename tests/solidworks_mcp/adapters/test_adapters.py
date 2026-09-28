@@ -752,9 +752,10 @@ class TestPyWin32AdapterBranches:
                 """Test helper for IsSuppressed."""
                 return False
 
+        # FeatureByPositionReverse is zero-based: 0 is the LAST feature.
         by_pos = {
-            1: _Feature("Boss-Extrude1", "Boss"),
-            2: _Feature("Sketch1", "ProfileFeature"),
+            0: _Feature("Boss-Extrude1", "Boss"),
+            1: _Feature("Sketch1", "ProfileFeature"),
         }
 
         adapter.currentModel = SimpleNamespace(

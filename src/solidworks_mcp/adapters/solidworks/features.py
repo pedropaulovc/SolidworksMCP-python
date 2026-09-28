@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, NamedTuple, cast
@@ -609,6 +610,29 @@ def _read_member(obj: Any, name: str) -> Any:
 
 _TREE_WALK_LIMIT = 5000
 
+# Which strategy each feature-tree lookup took, for a host that records
+# telemetry (``set_tree_path_observer``). The adapter never depends on it.
+_tree_path_observer: Callable[[str, str], None] | None = None
+
+
+def set_tree_path_observer(observer: Callable[[str, str], None] | None) -> None:
+    """Install ``observer(lookup, path)``, called once per feature-tree lookup
+    with the strategy it took: ``("diff", "positional" | "walk")`` from
+    :func:`_added_features` and ``("last_profile", "newest_first" | "walk")``
+    from :func:`_last_profile_feature_name`. ``None`` removes it. An observer
+    that raises is ignored."""
+    global _tree_path_observer
+    _tree_path_observer = observer
+
+
+def _report_tree_path(lookup: str, path: str) -> None:
+    observer = _tree_path_observer
+    if observer is not None:
+        try:
+            observer(lookup, path)
+        except Exception:
+            pass
+
 
 def _iter_features(adapter: Any):
     """Yield the active doc's top-level features in tree order, RAW.
@@ -641,9 +665,10 @@ def _iter_features_newest_first(adapter: Any):
     not answer, so callers fall back to :func:`_iter_features`.
 
     ``IModelDoc2.FeatureByPositionReverse(n)`` counts back from the end of the
-    same order ``FirstFeature``/``GetNextFeature`` walk, one round trip per
-    step. A just-created feature is at or near the end, so a newest-first
-    search stops after a step or two instead of walking the whole tree.
+    same order ``FirstFeature``/``GetNextFeature`` walk, ZERO-based: ``0`` is
+    the last feature (SOLIDWORKS API help). One round trip per step; a
+    just-created feature is at or near the end, so a newest-first search stops
+    after a step or two instead of walking the whole tree.
     """
     model = adapter.currentModel
     for position in range(5000):
@@ -699,9 +724,12 @@ def _last_profile_feature_name(adapter: Any) -> str | None:
     try:
         for feat in _iter_features_newest_first(adapter):
             if _is_profile(feat):
-                return str(_raw.invoke(feat, "IFeature", "Name"))
+                name = str(_raw.invoke(feat, "IFeature", "Name"))
+                _report_tree_path("last_profile", "newest_first")
+                return name
     except Exception:
         pass
+    _report_tree_path("last_profile", "walk")
     names = _profile_feature_names(adapter)
     return names[-1] if names else None
 
@@ -1457,6 +1485,7 @@ def _added_features(adapter: Any, before: _TreeSnapshot) -> list[tuple[str, Any]
                     added.append((name, feat))
                 position += 1
             added.reverse()
+            _report_tree_path("diff", "positional")
             return added
         except Exception:
             pass
@@ -1466,6 +1495,7 @@ def _added_features(adapter: Any, before: _TreeSnapshot) -> list[tuple[str, Any]
         name = str(name) if name else ""
         if name not in before.names:
             added.append((name, feat))
+    _report_tree_path("diff", "walk")
     return added
 
 
