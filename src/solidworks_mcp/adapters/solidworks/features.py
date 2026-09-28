@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import datetime
 from types import SimpleNamespace
@@ -24,6 +25,8 @@ from ..base import (
     SweepParameters,
 )
 from ..com_variant import empty_double_array, null_callout
+
+logger = logging.getLogger(__name__)
 
 
 class SolidWorksFeaturesMixin:
@@ -510,6 +513,8 @@ def _select_by_point(
     point_mm: list[float],
     mark: int,
     append: bool,
+    *,
+    geometric: bool = True,
 ) -> bool:
     """Select a geometric entity (face/edge) by a point lying on it.
 
@@ -520,13 +525,16 @@ def _select_by_point(
     ``None`` raises ``Type mismatch`` under pywin32 late binding (see
     :func:`solidworks_mcp.adapters.com_variant.null_callout`).
 
-    .. warning:: Coordinate selection is **view-dependent**: SolidWorks picks
-        at the point's screen projection, so an entity hidden behind the body
-        in the current view orientation fails to select (verified live on SW
-        2026: in the default trimetric view the box vertex at the far-lower
-        corner and its adjacent hidden edges return ``False`` while all
-        visible ones succeed). Callers should locate entities by points
-        visible in the active view.
+    ``SelectByID2`` is **view-dependent**: SolidWorks picks at the point's
+    screen projection, so an entity hidden behind the body or off screen in
+    the current view fails to select (verified live on SW 2026: in the default
+    trimetric view the box vertex at the far-lower corner and its adjacent
+    hidden edges return ``False`` while all visible ones succeed; on the farm
+    the same leaf's edge pick missed on one seat and hit on another). So an
+    ``"EDGE"`` or ``"FACE"`` the pick misses is then selected by geometry
+    (:func:`_select_entity_geometric`, same ``mark`` and ``append``), which
+    no view can hide. Only a part's bodies are searched; in an assembly, and
+    for other entity types, a miss stays a miss.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -536,14 +544,16 @@ def _select_by_point(
         mark: Selection mark.
         append: ``True`` to add to the current selection set, ``False`` to
             replace it.
+        geometric: Fall back to geometry when the pick misses. ``False`` for
+            a caller that runs its own geometric pass.
 
     Returns:
-        bool: ``True`` when SolidWorks selected an entity at that point.
+        bool: ``True`` when an entity at that point was selected.
     """
     if len(point_mm) != 3:
         return False
     x, y, z = (float(c) / 1000.0 for c in point_mm)
-    return bool(
+    picked = bool(
         adapter._attempt(
             lambda: adapter.currentModel.Extension.SelectByID2(
                 "", entity_type, x, y, z, append, mark, null_callout(), 0
@@ -551,6 +561,9 @@ def _select_by_point(
             default=False,
         )
     )
+    if picked or not geometric:
+        return picked
+    return _select_entity_geometric(adapter, entity_type, point_mm, mark, append)
 
 
 def _flag_feature_methods(obj: Any, interface: str, *fallback_methods: str) -> Any:
@@ -1595,6 +1608,35 @@ def _all_body_edges(adapter: Any) -> list[Any]:
     return _body_entities(adapter, "GetEdges")
 
 
+def _nearest_entity(
+    adapter: Any,
+    entities: list[Any],
+    interface: str,
+    point_m: tuple[float, float, float],
+    tol_m: float,
+) -> Any:
+    """The RAW entity whose ``<interface>.GetClosestPointOn`` lands nearest
+    ``point_m`` (metres), closer than ``tol_m``; ``None`` when none does.
+
+    One raw ``GetClosestPointOn`` per entity; an entity that does not answer
+    is skipped."""
+    px, py, pz = point_m
+    best, best_d = None, tol_m
+    for entity in entities:
+        cp = adapter._attempt(
+            lambda e=entity: list(
+                _raw.invoke(e, interface, "GetClosestPointOn", px, py, pz)
+            ),
+            default=None,
+        )
+        if not cp or len(cp) < 3:
+            continue
+        d = ((cp[0] - px) ** 2 + (cp[1] - py) ** 2 + (cp[2] - pz) ** 2) ** 0.5
+        if d < best_d:
+            best, best_d = entity, d
+    return best
+
+
 def _select_edges_geometric(
     adapter: Any, edge_points: list[list[float]], tol_mm: float = 0.5
 ) -> bool:
@@ -1627,19 +1669,7 @@ def _select_edges_geometric(
         if len(point) != 3:
             return False
         px, py, pz = (float(c) / 1000.0 for c in point)
-        best, best_d = None, tol_m
-        for edge in edges:
-            cp = adapter._attempt(
-                lambda e=edge, px=px, py=py, pz=pz: list(
-                    _raw.invoke(e, "IEdge", "GetClosestPointOn", px, py, pz)
-                ),
-                default=None,
-            )
-            if not cp or len(cp) < 3:
-                continue
-            d = ((cp[0] - px) ** 2 + (cp[1] - py) ** 2 + (cp[2] - pz) ** 2) ** 0.5
-            if d < best_d:
-                best, best_d = edge, d
+        best = _nearest_entity(adapter, edges, "IEdge", (px, py, pz), tol_m)
         if best is None:
             return False
         best = _raw.bind(best, "IEntity")
@@ -1663,6 +1693,12 @@ def _select_direction_edge(
     (``IEntity.Select2``) the one nearest (``IEdge.GetClosestPointOn``)
     ``point_mm``. Any such edge gives the same direction; the point only makes
     the choice deterministic.
+
+    The edges are RAW dispatches (:func:`_all_body_edges`), so every per-edge
+    query goes through :func:`raw_dispatch.invoke` and only the winner is bound,
+    to ``IEntity``, for ``Select2``. A raw dispatch has no named members: a
+    by-name call on one raises, and the ``_attempt`` around it would drop every
+    edge as "not a line".
 
     The pattern marches along the edge's own start->end sense (as reported by
     ``IEdge.GetCurveParams2``) unless ``FlipDir1`` reverses it, so the caller
@@ -1696,20 +1732,20 @@ def _select_direction_edge(
     def _distance(a: list[float], b: list[float]) -> float:
         return sum((a[i] - b[i]) ** 2 for i in range(3)) ** 0.5
 
-    def _is_line(curve: Any) -> bool:
-        curve = _flag_feature_methods(curve, "ICurve", "IsLine")
-        return bool(adapter._attempt(lambda: curve.IsLine(), default=False))
-
     best: tuple[float, Any, bool] | None = None
     for edge in _all_body_edges(adapter):
-        edge = _flag_feature_methods(
-            edge, "IEdge", "GetCurve", "GetCurveParams2", "GetClosestPointOn", "Select2"
-        )
         # GetCurveParams2 requires GetCurve first (SolidWorks keeps no curve).
-        curve = adapter._attempt(lambda e=edge: e.GetCurve(), default=None)
-        if curve is None or not _is_line(curve):
+        curve = adapter._attempt(
+            lambda e=edge: _raw.invoke(e, "IEdge", "GetCurve"), default=None
+        )
+        if curve is None or not adapter._attempt(
+            lambda c=curve: bool(_raw.invoke(c, "ICurve", "IsLine")), default=False
+        ):
             continue  # only a straight edge defines a linear direction
-        params = adapter._attempt(lambda e=edge: list(e.GetCurveParams2() or ()), default=[])
+        params = adapter._attempt(
+            lambda e=edge: list(_raw.invoke(e, "IEdge", "GetCurveParams2") or ()),
+            default=[],
+        )
         if len(params) < 6:
             continue
         start = [float(c) for c in params[0:3]]
@@ -1722,7 +1758,10 @@ def _select_direction_edge(
         if abs(along) < 1.0 - 1e-6:
             continue  # chord not parallel to the requested direction (~0.08 deg)
         cp = adapter._attempt(
-            lambda e=edge: list(e.GetClosestPointOn(px, py, pz)), default=None
+            lambda e=edge: list(
+                _raw.invoke(e, "IEdge", "GetClosestPointOn", px, py, pz)
+            ),
+            default=None,
         )
         if not cp or len(cp) < 3:
             continue
@@ -1733,7 +1772,7 @@ def _select_direction_edge(
         raise Exception(
             f"No straight body edge runs along direction_vector {direction_vector}"
         )
-    picked = _flag_feature_methods(best[1], "IEntity", "Select2")
+    picked = _raw.bind(best[1], "IEntity")
     if not adapter._attempt(lambda: picked.Select2(True, mark), default=False):
         raise Exception(
             f"Failed to select the direction edge nearest {point_mm} (mm) along "
@@ -1780,19 +1819,7 @@ def _select_faces_geometric(
         if len(point) != 3:
             return False
         px, py, pz = (float(c) / 1000.0 for c in point)
-        best, best_d = None, tol_m
-        for face in faces:
-            cp = adapter._attempt(
-                lambda f=face, px=px, py=py, pz=pz: list(
-                    _raw.invoke(f, "IFace2", "GetClosestPointOn", px, py, pz)
-                ),
-                default=None,
-            )
-            if not cp or len(cp) < 3:
-                continue
-            d = ((cp[0] - px) ** 2 + (cp[1] - py) ** 2 + (cp[2] - pz) ** 2) ** 0.5
-            if d < best_d:
-                best, best_d = face, d
+        best = _nearest_entity(adapter, faces, "IFace2", (px, py, pz), tol_m)
         if best is None:
             return False
         best = _raw.bind(best, "IEntity")
@@ -1800,6 +1827,77 @@ def _select_faces_geometric(
         if not adapter._attempt(lambda f=best, k=keep: f.Select2(k, 0), default=False):
             return False
     return True
+
+
+# ``SelectByID2`` entity type -> (``IBody2`` member listing it, its interface).
+_BODY_ENTITY_MEMBERS = {"EDGE": ("GetEdges", "IEdge"), "FACE": ("GetFaces", "IFace2")}
+_SW_DOC_PART = 1  # swDocumentTypes_e
+
+
+def _select_entity_geometric(
+    adapter: Any,
+    entity_type: str,
+    point_mm: list[float],
+    mark: int,
+    append: bool,
+    tol_mm: float = 0.5,
+) -> bool:
+    """Select the body edge or face nearest a point on it, whatever the view.
+
+    :func:`_select_by_point`'s fallback for one ``"EDGE"`` or ``"FACE"``: it
+    scores every body entity of that kind by ``GetClosestPointOn`` and selects
+    the nearest one within ``tol_mm`` (``IEntity.Select2(append, mark)``).
+    ``SelectByID2`` picks at the point's screen projection, so a point that
+    lies on the entity still misses when the view puts it off screen or behind
+    the body -- in a fresh part the view scale is whatever the template and
+    the seat's window size give. A model whose bodies cannot be read selects
+    nothing, so the caller reports its own miss.
+
+    Parts only: the bodies are read with ``IPartDoc.GetBodies2``. An assembly's
+    geometry lives in its components' bodies, each in its component's space,
+    and ``SelectByID2`` picks it through the component-context entity; this
+    does not enumerate those, so on any document other than a part it logs a
+    warning and selects nothing.
+
+    Args:
+        adapter: Connected adapter with a non-``None`` ``currentModel``.
+        entity_type: ``"EDGE"`` or ``"FACE"``; any other type selects nothing.
+        point_mm: ``[x, y, z]`` in millimetres on the target entity.
+        mark: Selection mark.
+        append: ``True`` to add to the current selection set, ``False`` to
+            replace it.
+        tol_mm: Max distance (mm) from the point to the entity.
+
+    Returns:
+        bool: ``True`` when an entity was found and selected.
+    """
+    kind = _BODY_ENTITY_MEMBERS.get(entity_type.upper())
+    if kind is None or len(point_mm) != 3:
+        return False
+    member, interface = kind
+    doc_type = adapter._attempt(lambda: adapter.currentModel.GetType(), default=None)
+    if doc_type != _SW_DOC_PART:
+        logger.warning(
+            "no geometric %s selection at %s mm: the active document "
+            "(swDocumentTypes_e %r) is not a part, and only a part's bodies "
+            "are enumerated",
+            entity_type,
+            point_mm,
+            doc_type,
+        )
+        return False
+    px, py, pz = (float(c) / 1000.0 for c in point_mm)
+    entities = adapter._attempt(lambda: _body_entities(adapter, member), default=[])
+    best = _nearest_entity(
+        adapter, entities or [], interface, (px, py, pz), tol_mm / 1000.0
+    )
+    if best is None:
+        return False
+    return bool(
+        adapter._attempt(
+            lambda: _raw.bind(best, "IEntity").Select2(append, mark), default=False
+        )
+    )
 
 
 def _select_edge_points(adapter: Any, edge_points: list[list[float]]) -> None:
@@ -1821,7 +1919,7 @@ def _select_edge_points(adapter: Any, edge_points: list[list[float]]) -> None:
         return
     adapter._attempt(lambda: adapter.currentModel.ClearSelection2(True), default=None)
     for point in edge_points:
-        if not _select_by_point(adapter, "EDGE", point, 0, True):
+        if not _select_by_point(adapter, "EDGE", point, 0, True, geometric=False):
             raise Exception(f"Failed to select edge at point {point} (mm)")
 
 
@@ -2023,7 +2121,9 @@ def _select_reference_point(
     A pattern's direction (linear) or axis (circular) can be a linear edge, a
     reference axis, or a cylindrical/planar face.  The caller points at one;
     this tries each entity type at that point and returns the type that
-    selected, or ``None``.
+    selected, or ``None``. Every type's point pick runs first, in order; only
+    when all miss is an ``"EDGE"``/``"FACE"`` found by geometry, so a view
+    that hides nothing picks exactly what it did before.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -2035,7 +2135,12 @@ def _select_reference_point(
         str | None: The entity type that selected, or ``None`` if none matched.
     """
     for entity_type in entity_types:
-        if _select_by_point(adapter, entity_type, point_mm, mark, True):
+        if _select_by_point(
+            adapter, entity_type, point_mm, mark, True, geometric=False
+        ):
+            return entity_type
+    for entity_type in entity_types:
+        if _select_entity_geometric(adapter, entity_type, point_mm, mark, True):
             return entity_type
     return None
 

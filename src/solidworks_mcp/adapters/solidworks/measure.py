@@ -78,7 +78,8 @@ def _select_measure_entities(adapter: Any, params: MeasureParameters) -> None:
 
     Named entities go through ``SelectByID2`` with their name; unnamed ones
     (faces/edges/vertices) are located by a point on them — subject to the
-    view-dependent picking caveat documented on :func:`_select_by_point`.
+    view-dependent picking caveat documented on :func:`_select_by_point`, which
+    finds an edge or face the pick misses by geometry.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
