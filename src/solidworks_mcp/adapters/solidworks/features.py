@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import datetime
 from types import SimpleNamespace
@@ -24,6 +25,8 @@ from ..base import (
     SweepParameters,
 )
 from ..com_variant import empty_double_array, null_callout
+
+logger = logging.getLogger(__name__)
 
 
 class SolidWorksFeaturesMixin:
@@ -530,7 +533,8 @@ def _select_by_point(
     the same leaf's edge pick missed on one seat and hit on another). So an
     ``"EDGE"`` or ``"FACE"`` the pick misses is then selected by geometry
     (:func:`_select_entity_geometric`, same ``mark`` and ``append``), which
-    no view can hide. Other entity types have no geometric fallback.
+    no view can hide. Only a part's bodies are searched; in an assembly, and
+    for other entity types, a miss stays a miss.
 
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
@@ -1827,6 +1831,7 @@ def _select_faces_geometric(
 
 # ``SelectByID2`` entity type -> (``IBody2`` member listing it, its interface).
 _BODY_ENTITY_MEMBERS = {"EDGE": ("GetEdges", "IEdge"), "FACE": ("GetFaces", "IFace2")}
+_SW_DOC_PART = 1  # swDocumentTypes_e
 
 
 def _select_entity_geometric(
@@ -1848,6 +1853,12 @@ def _select_entity_geometric(
     the seat's window size give. A model whose bodies cannot be read selects
     nothing, so the caller reports its own miss.
 
+    Parts only: the bodies are read with ``IPartDoc.GetBodies2``. An assembly's
+    geometry lives in its components' bodies, each in its component's space,
+    and ``SelectByID2`` picks it through the component-context entity; this
+    does not enumerate those, so on any document other than a part it logs a
+    warning and selects nothing.
+
     Args:
         adapter: Connected adapter with a non-``None`` ``currentModel``.
         entity_type: ``"EDGE"`` or ``"FACE"``; any other type selects nothing.
@@ -1864,6 +1875,17 @@ def _select_entity_geometric(
     if kind is None or len(point_mm) != 3:
         return False
     member, interface = kind
+    doc_type = adapter._attempt(lambda: adapter.currentModel.GetType(), default=None)
+    if doc_type != _SW_DOC_PART:
+        logger.warning(
+            "no geometric %s selection at %s mm: the active document "
+            "(swDocumentTypes_e %r) is not a part, and only a part's bodies "
+            "are enumerated",
+            entity_type,
+            point_mm,
+            doc_type,
+        )
+        return False
     px, py, pz = (float(c) / 1000.0 for c in point_mm)
     entities = adapter._attempt(lambda: _body_entities(adapter, member), default=[])
     best = _nearest_entity(
