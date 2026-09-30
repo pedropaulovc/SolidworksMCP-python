@@ -22,8 +22,34 @@ from solidworks_mcp.config import (
 )
 from solidworks_mcp.server import SolidWorksMCPServer
 
+from . import _launch_guard
+
 # Test configuration
 os.environ["USE_MOCK_SOLIDWORKS"] = "true"
+
+
+@pytest.fixture(autouse=True)
+def solidworks_launch_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[_launch_guard.LaunchGuard | None, None, None]:
+    """Refuse any real SolidWorks start (or kill) unless the live flag is set.
+
+    See ``tests/_launch_guard.py``. An attempt the code under test swallowed
+    still fails the test here, at teardown, with the caller's stack.
+    """
+    if _launch_guard.live_launch_allowed(os.environ):
+        yield None
+        return
+
+    guard = _launch_guard.LaunchGuard()
+    _launch_guard.install(monkeypatch, guard)
+    yield guard
+    if guard.attempts:
+        pytest.fail(
+            f"{len(guard.attempts)} SolidWorks launch attempt(s) were refused:\n"
+            + "\n".join(guard.attempts),
+            pytrace=False,
+        )
 
 
 @pytest.fixture(scope="session")

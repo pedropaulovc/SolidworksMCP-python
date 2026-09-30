@@ -127,8 +127,12 @@ class TestServerCoverage:
         from solidworks_mcp.config import DeploymentMode, SolidWorksMCPConfig
         from solidworks_mcp.server import SolidWorksMCPServer
 
+        # Windows validation would COM-dispatch SldWorks.Application, which
+        # cold-starts SolidWorks on a seat where it is not running.
         cfg = SolidWorksMCPConfig(
-            mock_solidworks=False, deployment_mode=DeploymentMode.LOCAL
+            mock_solidworks=False,
+            deployment_mode=DeploymentMode.LOCAL,
+            enable_windows_validation=False,
         )
         server = SolidWorksMCPServer(cfg)
         await server.setup()
