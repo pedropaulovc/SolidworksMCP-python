@@ -200,7 +200,9 @@ def _load_wrapper() -> None:
         if method_names:
             _interface_methods[name] = frozenset(method_names)
 
-    # Make TYPED returns strict too (see _register_strict_classes).
+    # Correct known typelib mistypings, then make TYPED returns strict
+    # (order matters: strict subclasses inherit the fixed members).
+    _apply_typelib_fixups(_wrapper_module)
     _register_strict_classes(_wrapper_module)
 
     logger.info(
@@ -516,6 +518,99 @@ def _strict_subclass(base: type) -> type:
     _EarlyBoundStrict.__qualname__ = _EarlyBoundStrict.__name__
     _strict_classes[base] = _EarlyBoundStrict
     return _EarlyBoundStrict
+
+
+# ``EntitiesToMate`` indexed properties whose VALUE the SolidWorks typelib
+# mistypes as a bare ``VT_DISPATCH`` ``(9, 1)`` even though the member takes an
+# entity ARRAY.  Comparators in the same typelib pin the correct shape: the
+# semantically identical ``IHingeMateFeatureData`` member types the value
+# ``VT_VARIANT`` ``(12, 1)``, and every non-indexed mate-data
+# ``EntitiesToMate`` is a plain ``(12, 0)`` VARIANT property.  makepy honours
+# the declared ``(9, 1)``, so the generated setter rejects any sequence
+# (``TypeError: ... can not be converted to a COM object``) and coerces a
+# VARIANT-wrapped SAFEARRAY to a single dispatch (``Type mismatch``), while a
+# single dispatch "succeeds" but stores nothing (readback count 0).  Maps
+# wrapper class name -> DISPID of its ``EntitiesToMate`` indexed property.
+_ENTITY_ARRAY_FIXUPS: dict[str, int] = {
+    "ICamFollowerMateFeatureData": 1,
+    "IRackPinionMateFeatureData": 1,
+}
+
+
+def _entity_array_variant(value: Any) -> Any:
+    """Coerce a Python sequence of entities into the SAFEARRAY VARIANT the
+    fixed ``SetEntitiesToMate`` value slot carries.
+
+    A non-sequence (a prewrapped ``VARIANT``, a raw dispatch the caller wants
+    passed verbatim) goes through unchanged.  Sequence items are unwrapped to
+    their ``_oleobj_`` when they are makepy wrappers, mirroring what pywin32
+    does for typed dispatch params.  Without pywin32 (Linux CI mock runs) the
+    sequence is returned as a list — nothing there ever reaches a real COM
+    boundary.
+    """
+    if not isinstance(value, (list, tuple)):
+        return value
+    items = [getattr(item, "_oleobj_", item) for item in value]
+    try:
+        import pythoncom
+        from win32com.client import VARIANT
+
+        return VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_DISPATCH, items)
+    except Exception:
+        return items
+
+
+def _apply_typelib_fixups(module: Any) -> None:
+    """Correct known SolidWorks typelib mistypings on the loaded wrapper.
+
+    Applied once per wrapper module (idempotent via the
+    ``_sw_entity_array_fixup`` class marker), BEFORE strict-class registration
+    so the strict subclasses inherit the corrected members.  Each patched class
+    gets:
+
+    - ``SetEntitiesToMate`` re-invoked with the value slot typed ``(12, 1)``
+      VT_VARIANT (the ``IHingeMateFeatureData`` calling convention), carrying
+      the entity array as ``VT_ARRAY | VT_DISPATCH``;
+    - ``EntitiesToMate`` re-invoked through ``_ApplyTypes_`` with a
+      ``(12, 0)`` VARIANT return, so readback yields the entity tuple instead
+      of a mangled single-dispatch wrap.
+
+    A wrapper without the class (older typelib via the gencache fallback) is
+    skipped silently — the fixup targets members by name and DISPID, both
+    binary-stable across SolidWorks releases.
+    """
+    for class_name, dispid in _ENTITY_ARRAY_FIXUPS.items():
+        cls = getattr(module, class_name, None)
+        if not inspect.isclass(cls):
+            continue
+        if cls.__dict__.get("_sw_entity_array_fixup", False):
+            continue
+
+        def entities_to_mate(
+            self: Any, EntityType: Any, *, _dispid: int = dispid
+        ) -> Any:
+            return self._ApplyTypes_(
+                _dispid, 2, (12, 0), ((3, 1),), "EntitiesToMate", None, EntityType
+            )
+
+        def set_entities_to_mate(
+            self: Any, EntityType: Any, arg1: Any, *, _dispid: int = dispid
+        ) -> Any:
+            return self._oleobj_.InvokeTypes(
+                _dispid,
+                0,
+                4,
+                (24, 0),
+                ((3, 1), (12, 1)),
+                EntityType,
+                _entity_array_variant(arg1),
+            )
+
+        entities_to_mate.__name__ = "EntitiesToMate"
+        set_entities_to_mate.__name__ = "SetEntitiesToMate"
+        cls.EntitiesToMate = entities_to_mate
+        cls.SetEntitiesToMate = set_entities_to_mate
+        cls._sw_entity_array_fixup = True
 
 
 def _register_strict_classes(module: Any) -> None:
