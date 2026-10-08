@@ -284,7 +284,7 @@ def _create_equation_driven_curve_impl(
             params.lock_start,
             params.lock_end,
         )
-        if not segment:
+        if segment is None:
             raise Exception(
                 "Failed to create equation-driven curve (check expression "
                 "syntax and range)"

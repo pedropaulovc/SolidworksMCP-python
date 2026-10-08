@@ -881,7 +881,7 @@ def _create_sweep_impl(
             0,  # Direction
         )
 
-        if not feature:
+        if feature is None:
             raise Exception("Failed to create sweep feature")
 
         return SolidWorksFeature(
@@ -2353,7 +2353,7 @@ def _circular_pattern_impl(
             False,  # EqualSpacing2
         )
         feature = _resolve_feature(adapter, feature, before, _CIRCULAR_PATTERN_TYPES)
-        if not feature:
+        if feature is None:
             raise Exception("Failed to create circular pattern")
 
         return SolidWorksFeature(

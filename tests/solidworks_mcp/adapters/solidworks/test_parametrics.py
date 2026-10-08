@@ -171,6 +171,31 @@ def test_create_equation_curve_explicit_and_lock_flags() -> None:
     assert calls[0][-2:] == (False, False)
 
 
+def test_create_equation_curve_does_not_truth_test_segment() -> None:
+    class SegmentDispatch:
+        Name = "curve"
+
+        def __bool__(self):
+            raise AssertionError("A non-null sketch dispatch must not be truth-tested")
+
+    adapter = _FakeAdapter()
+    segment = SegmentDispatch()
+    adapter.currentSketchManager = SimpleNamespace(
+        CreateEquationSpline2=lambda *a: segment
+    )
+    result = parametrics._create_equation_driven_curve_impl(
+        adapter,
+        CreateEquationCurveParameters(
+            y_expression="sin(x)", range_start="0", range_end="1"
+        ),
+    )
+    assert result.is_success, result.error
+    assert result.data == "EquationCurve_1"
+    assert len(adapter._registered) == 1
+    assert adapter._registered[0][0] == "EquationCurve"
+    assert adapter._registered[0][1] is segment
+
+
 def test_create_equation_curve_requires_active_sketch() -> None:
     adapter = _FakeAdapter()
     result = parametrics._create_equation_driven_curve_impl(
@@ -195,7 +220,10 @@ def test_create_equation_curve_null_segment_errors() -> None:
         ),
     )
     assert result.is_error
-    assert "Failed to create equation-driven curve" in (result.error or "")
+    assert result.error == (
+        "Failed to create equation-driven curve (check expression syntax and range)"
+    )
+    assert adapter._registered == []
 
 
 # ---------------------------------------------------------------------------
