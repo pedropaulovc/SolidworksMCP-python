@@ -48,6 +48,12 @@ without changelog entries; recorded here retroactively.
   `sketch_offset`, plus rectangle and polygon seeds for the sketch patterns.
 
 ### Fixed
+- **Nullable native creation results** — `CreateEquationSpline2`,
+  `InsertProtrusionSwept4`, and `FeatureCircularPattern5` creation paths now
+  reject only `None`, not non-null COM objects with false truth values.
+  The shared feature resolver keeps a named non-null return without
+  truth-testing it; feature-tree fallback for absent or unnamed returns
+  retains its existing reconciliation semantics.
 - **Linear-pattern direction depended on the active view** —
   `linear_pattern_feature` picked its direction with a `SelectByID2` point
   pick (a screen-projection pick) and left `FlipDir1=False`, so the view
