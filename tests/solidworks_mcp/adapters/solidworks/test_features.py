@@ -341,18 +341,57 @@ def test_circular_pattern_impl_success() -> None:
     assert result.data.parameters["count"] == 6
 
 
-@pytest.mark.parametrize("null_return", [False, True])
-def test_circular_pattern_impl_accepts_falsey_resolved_dispatch(
-    monkeypatch, null_return
+@pytest.mark.parametrize("falsey", [False, True])
+def test_circular_pattern_impl_keeps_non_null_native_return(
+    monkeypatch, falsey
 ) -> None:
     adapter = _FakeFeatureAdapter()
-    created = _CreationFeatureDispatch("CircPattern1", "CirPattern", falsey=True)
+    created = _CreationFeatureDispatch("CircPattern1", "CirPattern", falsey=falsey)
     calls = []
     reconciled = []
 
     def _pattern(*args):
         calls.append(args)
-        return None if null_return else created
+        return created
+
+    def _added_features(_adapter, _before):
+        reconciled.append(True)
+        if falsey:
+            return []  # Falling back would wrongly report absence.
+        raise AssertionError("A named non-null return must not use tree fallback")
+
+    adapter.currentModel = _named_feature_model(
+        FeatureManager=SimpleNamespace(FeatureCircularPattern5=_pattern),
+    )
+    monkeypatch.setattr(features, "_added_features", _added_features)
+    result = features._circular_pattern_impl(
+        adapter,
+        CircularPatternParameters(
+            axis_name="Axis1", features=["Cut-Extrude1"], count=6
+        ),
+    )
+    assert result.is_success, result.error
+    assert len(calls) == 1
+    assert reconciled == []
+    assert created.truth_tests == 0
+    assert result.data.name == "CircPattern1"
+    assert result.data.id == "CircPattern1"
+    assert result.data.type == "CircularPattern"
+    assert result.data.parameters["count"] == 6
+
+
+@pytest.mark.parametrize("falsey", [False, True])
+def test_circular_pattern_impl_null_return_recovers_non_null_dispatch(
+    monkeypatch, falsey
+) -> None:
+    adapter = _FakeFeatureAdapter()
+    created = _CreationFeatureDispatch("CircPattern1", "CirPattern", falsey=falsey)
+    calls = []
+    reconciled = []
+
+    def _pattern(*args):
+        calls.append(args)
+        return None
 
     def _added_features(actual_adapter, before):
         assert actual_adapter is adapter
@@ -375,9 +414,7 @@ def test_circular_pattern_impl_accepts_falsey_resolved_dispatch(
     assert result.is_success, result.error
     assert len(calls) == 1
     assert len(reconciled) == 1
-    # The existing resolver truth-tests the raw return to choose its fallback;
-    # the resolved feature must not receive another truth test.
-    assert created.truth_tests == (0 if null_return else 1)
+    assert created.truth_tests == 0
     assert result.data.name == "CircPattern1"
     assert result.data.id == "CircPattern1"
     assert result.data.type == "CircularPattern"

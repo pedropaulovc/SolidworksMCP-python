@@ -1553,7 +1553,7 @@ def _resolve_feature(
             features contain no ``feature_types`` feature, or more than one
             when ``expect_many`` is false.
     """
-    if returned and _read_member(returned, "Name") is not None:
+    if returned is not None and _read_member(returned, "Name") is not None:
         return returned
     if before.error is not None:
         raise RuntimeError(
