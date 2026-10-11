@@ -15,6 +15,7 @@ from solidworks_mcp.adapters.base import (
     LinearPatternParameters,
     MirrorFeatureParameters,
     ShellParameters,
+    SweepParameters,
 )
 from solidworks_mcp.adapters.solidworks import features
 
@@ -244,6 +245,56 @@ def _named_feature_model(**extra):
     return SimpleNamespace(**base)
 
 
+class _CreationFeatureDispatch:
+    """A named native-feature double, distinct from the ordinary model/manager."""
+
+    def __init__(self, name, type_name, *, falsey=False):
+        self.Name = name
+        self.type_name = type_name
+        self.falsey = falsey
+        self.truth_tests = 0
+
+    def GetTypeName2(self):
+        return self.type_name
+
+    def __bool__(self):
+        self.truth_tests += 1
+        if self.falsey:
+            return False
+        raise AssertionError("A non-null creation dispatch must not be truth-tested")
+
+
+@pytest.mark.parametrize("null_result", [False, True])
+def test_create_sweep_impl_checks_only_null_result(monkeypatch, null_result) -> None:
+    adapter = _FakeFeatureAdapter()
+    created = _CreationFeatureDispatch("Sweep1", "Sweep")
+    calls = []
+
+    def _sweep(*args):
+        calls.append(args)
+        return None if null_result else created
+
+    adapter.currentModel = _named_feature_model(
+        FeatureManager=SimpleNamespace(InsertProtrusionSwept4=_sweep),
+    )
+    monkeypatch.setattr(
+        features, "_profile_feature_names", lambda _adapter: ["Profile", "Path"]
+    )
+    result = features._create_sweep_impl(adapter, SweepParameters(path="Path"))
+    assert len(calls) == 1
+    assert created.truth_tests == 0
+    if null_result:
+        assert result.status == AdapterResultStatus.ERROR
+        assert result.error == "Failed to create sweep feature"
+    else:
+        assert result.is_success, result.error
+        assert result.data.name == "Sweep1"
+        assert result.data.id == "Sweep1"
+        assert result.data.type == "Sweep"
+        assert result.data.parameters["profile"] == "Profile"
+        assert result.data.parameters["path"] == "Path"
+
+
 def test_mirror_feature_impl_success() -> None:
     adapter = _FakeFeatureAdapter()
     created = SimpleNamespace(Name="Mirror1")
@@ -288,6 +339,101 @@ def test_circular_pattern_impl_success() -> None:
     assert result.is_success
     assert result.data.type == "CircularPattern"
     assert result.data.parameters["count"] == 6
+
+
+@pytest.mark.parametrize("falsey", [False, True])
+def test_circular_pattern_impl_keeps_non_null_native_return(
+    monkeypatch, falsey
+) -> None:
+    adapter = _FakeFeatureAdapter()
+    created = _CreationFeatureDispatch("CircPattern1", "CirPattern", falsey=falsey)
+    calls = []
+    reconciled = []
+
+    def _pattern(*args):
+        calls.append(args)
+        return created
+
+    def _added_features(_adapter, _before):
+        reconciled.append(True)
+        if falsey:
+            return []  # Falling back would wrongly report absence.
+        raise AssertionError("A named non-null return must not use tree fallback")
+
+    adapter.currentModel = _named_feature_model(
+        FeatureManager=SimpleNamespace(FeatureCircularPattern5=_pattern),
+    )
+    monkeypatch.setattr(features, "_added_features", _added_features)
+    result = features._circular_pattern_impl(
+        adapter,
+        CircularPatternParameters(
+            axis_name="Axis1", features=["Cut-Extrude1"], count=6
+        ),
+    )
+    assert result.is_success, result.error
+    assert len(calls) == 1
+    assert reconciled == []
+    assert created.truth_tests == 0
+    assert result.data.name == "CircPattern1"
+    assert result.data.id == "CircPattern1"
+    assert result.data.type == "CircularPattern"
+    assert result.data.parameters["count"] == 6
+
+
+@pytest.mark.parametrize("falsey", [False, True])
+def test_circular_pattern_impl_null_return_recovers_non_null_dispatch(
+    monkeypatch, falsey
+) -> None:
+    adapter = _FakeFeatureAdapter()
+    created = _CreationFeatureDispatch("CircPattern1", "CirPattern", falsey=falsey)
+    calls = []
+    reconciled = []
+
+    def _pattern(*args):
+        calls.append(args)
+        return None
+
+    def _added_features(actual_adapter, before):
+        assert actual_adapter is adapter
+        assert before.names == frozenset()
+        reconciled.append(before)
+        return [(created.Name, created)]
+
+    adapter.currentModel = _named_feature_model(
+        FeatureManager=SimpleNamespace(FeatureCircularPattern5=_pattern),
+    )
+    # Bound only tree enumeration; keep the real resolver, type matching and
+    # raw-to-feature binding so the post-reconciliation guard is exercised.
+    monkeypatch.setattr(features, "_added_features", _added_features)
+    result = features._circular_pattern_impl(
+        adapter,
+        CircularPatternParameters(
+            axis_name="Axis1", features=["Cut-Extrude1"], count=6
+        ),
+    )
+    assert result.is_success, result.error
+    assert len(calls) == 1
+    assert len(reconciled) == 1
+    assert created.truth_tests == 0
+    assert result.data.name == "CircPattern1"
+    assert result.data.id == "CircPattern1"
+    assert result.data.type == "CircularPattern"
+    assert result.data.parameters["count"] == 6
+
+
+def test_circular_pattern_impl_null_without_added_feature_errors() -> None:
+    adapter = _FakeFeatureAdapter()
+    adapter.currentModel = _named_feature_model(
+        FeatureManager=SimpleNamespace(FeatureCircularPattern5=lambda *a: None),
+    )
+    result = features._circular_pattern_impl(
+        adapter,
+        CircularPatternParameters(
+            axis_name="Axis1", features=["Cut-Extrude1"], count=6
+        ),
+    )
+    assert result.status == AdapterResultStatus.ERROR
+    assert result.error == "Failed to create circular pattern"
 
 
 def test_circular_pattern_impl_geometry_pattern_forwarded() -> None:
