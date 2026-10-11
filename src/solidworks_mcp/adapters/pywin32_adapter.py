@@ -2175,6 +2175,68 @@ class PyWin32Adapter(
         """
         return self._document_routing.resolve_export_target_doc()
 
+    @contextlib.contextmanager
+    def _image_capture_defaults(self, target_doc: Any):
+        """Disable image-only floor effects without changing the caller's session.
+
+        Drawings have no configuration scene; parts and assemblies may have no
+        scene assigned. Never persist these transient changes with scene.Modify
+        or a native-document save. AO and appearances remain untouched.
+        """
+        app = sw_type_info.early_bound(self.swApp, "ISldWorks")
+        doc = sw_type_info.early_bound(target_doc, "IModelDoc2")
+        preferences = {
+            name: sw_type_info.constant(name)
+            for name in (
+                "swDisplayShadowsInShadedMode",
+                "swDisplayRealViewGraphics",
+            )
+        }
+        original = {
+            name: bool(app.GetUserPreferenceToggle(value))
+            for name, value in preferences.items()
+        }
+        scene = None
+        if doc.GetType() in (
+            sw_type_info.constant("swDocPART"),
+            sw_type_info.constant("swDocASSEMBLY"),
+        ):
+            manager = sw_type_info.early_bound(
+                doc.ConfigurationManager, "IConfigurationManager"
+            )
+            configuration = manager.ActiveConfiguration
+            if configuration is None:
+                raise RuntimeError("Image target has no active configuration")
+            configuration = sw_type_info.early_bound(configuration, "IConfiguration")
+            scene = configuration.GetScene()
+            if scene is not None:
+                scene = sw_type_info.early_bound(scene, "ISwScene")
+        reflections = bool(scene.FloorReflections) if scene is not None else None
+
+        def set_preference(name: str, enabled: bool) -> None:
+            # ISldWorks.SetUserPreferenceToggle returns void, not a success flag.
+            app.SetUserPreferenceToggle(preferences[name], enabled)
+            if bool(app.GetUserPreferenceToggle(preferences[name])) != enabled:
+                raise RuntimeError(f"Failed to set {name} to {enabled}")
+
+        def set_reflections(enabled: bool) -> None:
+            scene.FloorReflections = enabled
+            if bool(scene.FloorReflections) != enabled:
+                raise RuntimeError(f"Failed to set scene FloorReflections to {enabled}")
+
+        # Register before each mutation: a setter may change state then throw.
+        # ExitStack attempts every restoration even if an earlier one fails.
+        with contextlib.ExitStack() as restore:
+            restore.callback(doc.GraphicsRedraw2)
+            for name in preferences:
+                restore.callback(set_preference, name, original[name])
+                set_preference(name, False)
+            if scene is not None:
+                restore.callback(set_reflections, reflections)
+                set_reflections(False)
+            doc.GraphicsRedraw2()
+            yield
+
     async def export_image(self, payload: dict) -> AdapterResult[dict]:
         """Export a screenshot of the current model to a PNG/JPG file.
 
@@ -2252,18 +2314,19 @@ class PyWin32Adapter(
                 # Zoom to fit so the model fills the viewport before capture
                 self._zoom_to_fit(target_doc)
 
-            # Try screenshot methods in order: SaveBMP (sized) → SaveAs3
-            saved = self._save_screenshot_with_savebmp(
-                target_doc, resolved, width, height
-            )
-            if not saved:
-                self._save_screenshot_with_saveas3(target_doc, resolved)
-                saved = _os.path.exists(resolved)
-
-            if not saved:
-                raise RuntimeError(
-                    f"All screenshot methods produced no output for {resolved}"
+            with self._image_capture_defaults(target_doc):
+                # Try screenshot methods in order: SaveBMP (sized) → SaveAs3
+                saved = self._save_screenshot_with_savebmp(
+                    target_doc, resolved, width, height
                 )
+                if not saved:
+                    self._save_screenshot_with_saveas3(target_doc, resolved)
+                    saved = _os.path.exists(resolved)
+
+                if not saved:
+                    raise RuntimeError(
+                        f"All screenshot methods produced no output for {resolved}"
+                    )
 
             return {
                 "file_path": resolved,
