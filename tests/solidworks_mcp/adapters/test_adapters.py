@@ -515,6 +515,172 @@ class TestPyWin32AdapterBranches:
         adapter._com = mock_com
         return adapter
 
+    @staticmethod
+    def _mock_image_capture_surface(monkeypatch, adapter, target_doc, doc_type=1, scene=True):
+        """Supply stateful render-only COM doubles without touching a real seat."""
+        preferences = {101: True, 102: False}
+        constants = {
+            "swDisplayShadowsInShadedMode": 101,
+            "swDisplayRealViewGraphics": 102,
+            "swDocPART": 1,
+            "swDocASSEMBLY": 2,
+        }
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_type_info.constant",
+            Mock(side_effect=constants.__getitem__),
+        )
+        monkeypatch.setattr(
+            "solidworks_mcp.adapters.pywin32_adapter.sw_type_info.early_bound",
+            Mock(side_effect=lambda obj, *_args, **_kwargs: obj),
+        )
+
+        def set_toggle(key, value):
+            preferences[key] = value
+            return True
+
+        adapter.swApp.GetUserPreferenceToggle = Mock(side_effect=preferences.__getitem__)
+        adapter.swApp.SetUserPreferenceToggle = Mock(side_effect=set_toggle)
+        target_doc.GetType = Mock(return_value=doc_type)
+        target_doc.GraphicsRedraw2 = Mock()
+        render_scene = SimpleNamespace(FloorReflections=True) if scene else None
+        target_doc.ConfigurationManager = SimpleNamespace(
+            ActiveConfiguration=SimpleNamespace(GetScene=Mock(return_value=render_scene))
+        )
+        return preferences, render_scene
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fallback", [False, True], ids=["savebmp", "saveas3"])
+    @pytest.mark.parametrize("doc_type", [1, 2], ids=["part", "assembly"])
+    async def test_export_image_capture_defaults_at_both_save_methods(
+        self, monkeypatch, tmp_path, fallback, doc_type
+    ):
+        """Both image writers see neutral rendering; the user's state returns."""
+        adapter = self._build_adapter(monkeypatch)
+        target_doc = SimpleNamespace()
+        adapter.currentModel = target_doc
+        adapter.swApp = SimpleNamespace(ActiveDoc=target_doc)
+        preferences, scene = self._mock_image_capture_surface(
+            monkeypatch, adapter, target_doc, doc_type
+        )
+        preferences[102] = True
+        output = tmp_path / "capture.bmp"
+        captures = []
+
+        def capture(method, path):
+            assert preferences == {101: False, 102: False}
+            assert scene.FloorReflections is False
+            target_doc.GraphicsRedraw2.assert_called()
+            captures.append(method)
+            if method == "SaveBMP" and fallback:
+                return False
+            Path(path).write_bytes(b"image")
+            return True
+
+        target_doc.SaveBMP = Mock(side_effect=lambda path, *_args: capture("SaveBMP", path))
+        target_doc.SaveAs3 = Mock(side_effect=lambda path, *_args: capture("SaveAs3", path))
+        result = await adapter.export_image(
+            {"file_path": str(output), "view_orientation": "current"}
+        )
+
+        assert result.is_success
+        assert captures == (["SaveBMP", "SaveAs3"] if fallback else ["SaveBMP"])
+        assert preferences == {101: True, 102: True}
+        assert scene.FloorReflections is True
+        assert target_doc.GraphicsRedraw2.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_export_image_capture_defaults_restore_after_capture_error(
+        self, monkeypatch, tmp_path
+    ):
+        adapter = self._build_adapter(monkeypatch)
+        target_doc = SimpleNamespace()
+        adapter.currentModel = target_doc
+        adapter.swApp = SimpleNamespace(ActiveDoc=target_doc)
+        preferences, scene = self._mock_image_capture_surface(monkeypatch, adapter, target_doc)
+
+        def fail_capture(*_args):
+            assert preferences == {101: False, 102: False}
+            assert scene.FloorReflections is False
+            raise RuntimeError("capture failed")
+
+        target_doc.SaveBMP = Mock(side_effect=fail_capture)
+        target_doc.SaveAs3 = Mock(side_effect=fail_capture)
+        result = await adapter.export_image(
+            {"file_path": str(tmp_path / "failed.bmp"), "view_orientation": "current"}
+        )
+
+        assert result.is_error
+        target_doc.SaveBMP.assert_called_once()
+        target_doc.SaveAs3.assert_called_once()
+        assert preferences == {101: True, 102: False}
+        assert scene.FloorReflections is True
+
+    @pytest.mark.parametrize("failure", ["raise", "ineffective"])
+    def test_image_capture_defaults_restore_partial_toggle_mutation(self, monkeypatch, failure):
+        adapter = self._build_adapter(monkeypatch)
+        target_doc = SimpleNamespace()
+        adapter.swApp = SimpleNamespace()
+        preferences, scene = self._mock_image_capture_surface(monkeypatch, adapter, target_doc)
+        preferences[102] = True
+
+        def set_toggle(key, value):
+            if key == 102 and value is False:
+                if failure == "raise":
+                    preferences[key] = False
+                    raise RuntimeError("setter failed after mutation")
+                return None
+            preferences[key] = value
+            return None
+
+        adapter.swApp.SetUserPreferenceToggle.side_effect = set_toggle
+        with pytest.raises(RuntimeError):
+            with adapter._image_capture_defaults(target_doc):
+                pytest.fail("Capture must not start after a failed preference setter")
+        assert preferences == {101: True, 102: True}
+        assert scene.FloorReflections is True
+
+    def test_image_capture_defaults_restore_all_after_restore_setter_error(self, monkeypatch):
+        adapter = self._build_adapter(monkeypatch)
+        target_doc = SimpleNamespace()
+        adapter.swApp = SimpleNamespace()
+        preferences, scene = self._mock_image_capture_surface(monkeypatch, adapter, target_doc)
+        preferences[102] = True
+
+        def set_toggle(key, value):
+            preferences[key] = value
+            if key == 102 and value is True:
+                raise RuntimeError("restore setter failed")
+
+        adapter.swApp.SetUserPreferenceToggle.side_effect = set_toggle
+        with pytest.raises(RuntimeError, match="restore setter failed"):
+            with adapter._image_capture_defaults(target_doc):
+                assert preferences == {101: False, 102: False}
+                assert scene.FloorReflections is False
+        assert preferences == {101: True, 102: True}
+        assert scene.FloorReflections is True
+        adapter.swApp.SetUserPreferenceToggle.assert_any_call(101, True)
+
+    @pytest.mark.parametrize("doc_type", [1, 2, 3], ids=["part-no-scene", "assembly-no-scene", "drawing"])
+    def test_image_capture_defaults_without_scene(self, monkeypatch, doc_type):
+        adapter = self._build_adapter(monkeypatch)
+        target_doc = SimpleNamespace()
+        adapter.swApp = SimpleNamespace()
+        preferences, scene = self._mock_image_capture_surface(
+            monkeypatch, adapter, target_doc, doc_type, scene=False
+        )
+        get_scene = target_doc.ConfigurationManager.ActiveConfiguration.GetScene
+        if doc_type == 3:
+            del target_doc.ConfigurationManager
+        with adapter._image_capture_defaults(target_doc):
+            assert preferences == {101: False, 102: False}
+            assert scene is None
+            target_doc.GraphicsRedraw2.assert_called()
+        assert preferences == {101: True, 102: False}
+        if doc_type == 3:
+            get_scene.assert_not_called()
+        else:
+            get_scene.assert_called_once()
+
     @pytest.mark.asyncio
     async def test_health_check_and_model_info_branches(self, monkeypatch):
         """Test healthy/disconnected checks and model-info default branches."""
@@ -2177,6 +2343,7 @@ class TestPyWin32AdapterBranches:
             ActivateDoc3=Mock(return_value=target_doc),
             Frame=SimpleNamespace(SetFocus=Mock()),
         )
+        self._mock_image_capture_surface(monkeypatch, adapter, target_doc)
 
         result = await adapter.export_image(
             {
@@ -2218,6 +2385,7 @@ class TestPyWin32AdapterBranches:
             ActivateDoc3=Mock(return_value=target_doc),
             Frame=SimpleNamespace(SetFocus=Mock()),
         )
+        self._mock_image_capture_surface(monkeypatch, adapter, target_doc)
 
         result = await adapter.export_image(
             {
@@ -3182,6 +3350,7 @@ class TestPyWin32AdapterBranches:
             ActiveDoc=None,
             Frame=SimpleNamespace(SetFocus=Mock()),
         )
+        self._mock_image_capture_surface(monkeypatch, adapter, adapter.currentModel)
 
         monkeypatch.setattr(
             adapter,

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Native `export_image` captures now temporarily disable cast shadows, RealView,
+  and active part/assembly scene floor reflections for both bitmap capture and
+  its image-export fallback. Original session settings are restored on success
+  and failure; ambient occlusion and appearances are unchanged, and native
+  documents and scenes are not saved.
+
 Python-port harmonic-analyzer tool-surface expansion. These phases were shipped
 without changelog entries; recorded here retroactively.
 

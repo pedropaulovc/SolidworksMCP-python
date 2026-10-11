@@ -103,6 +103,41 @@ _interface_methods: dict[str, frozenset[str]] = {}
 _flag_cache: dict[int, tuple[weakref.ref[Any], set[str]]] = {}
 
 
+# Native enum values are read once from the installed constants typelib, not
+# the adapter's intentionally small legacy constant table.
+_constants: dict[str, int] | None = None
+_constants_lock = threading.Lock()
+
+
+def constant(name: str) -> int:
+    """Resolve a named enum from the installed swconst.tlb, cached per process."""
+    global _constants
+    if _constants is None:
+        with _constants_lock:
+            if _constants is None:
+                if not PYWIN32_AVAILABLE:
+                    raise RuntimeError("SolidWorks constants require pywin32")
+                import pythoncom
+
+                path = _find_aux_tlb("swconst.tlb")
+                if path is None:
+                    raise RuntimeError("Installed SolidWorks swconst.tlb not found")
+                typelib = pythoncom.LoadTypeLib(str(path))
+                values: dict[str, int] = {}
+                for index in range(typelib.GetTypeInfoCount()):
+                    if typelib.GetTypeInfoType(index) != pythoncom.TKIND_ENUM:
+                        continue
+                    info = typelib.GetTypeInfo(index)
+                    for variable in range(info.GetTypeAttr().cVars):
+                        descriptor = info.GetVarDesc(variable)
+                        values[info.GetNames(descriptor[0])[0]] = int(descriptor[1])
+                _constants = values
+    try:
+        return _constants[name]
+    except KeyError as exc:
+        raise RuntimeError(f"SolidWorks named constant unavailable: {name}") from exc
+
+
 def _cache_entry_for(obj: Any) -> set[str]:
     """Return the flagged-interface set for ``obj``, verifying identity.
 
