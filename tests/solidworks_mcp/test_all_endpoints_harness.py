@@ -59,8 +59,22 @@ def _is_windows() -> bool:
 
 
 @pytest_asyncio.fixture
-async def mock_server() -> AsyncGenerator[SolidWorksMCPServer, None]:
-    """Mock-adapter server — no SolidWorks required."""
+async def mock_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncGenerator[SolidWorksMCPServer, None]:
+    """Mock-adapter server — no SolidWorks required.
+
+    ``discover_solidworks_docs`` bypasses the adapter and connects over COM
+    itself; with nothing running it launches SolidWorks through the Platform
+    shortcut. The smoke tests call every tool, so report "not connected" here.
+    """
+    from solidworks_mcp.tools import docs_discovery
+
+    monkeypatch.setattr(
+        docs_discovery.SolidWorksDocsDiscovery,
+        "connect_to_solidworks",
+        lambda self: False,
+    )
     config = SolidWorksMCPConfig(
         adapter_type=AdapterType.MOCK,
         deployment_mode=DeploymentMode.LOCAL,
