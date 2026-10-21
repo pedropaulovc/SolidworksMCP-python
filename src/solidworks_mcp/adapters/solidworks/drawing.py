@@ -93,6 +93,8 @@ def set_place_view_context(factory: PlaceViewContext | None) -> None:
     Already-imported ``place_view`` aliases consult this factory on each call.
     Attributes come only from arguments; scale observation records an attempt,
     not verification that SolidWorks persisted the requested ratio.
+    Names include an argument-derived source/orientation/placement hint, not an
+    actual sheet identity. Stable ``phase_kind`` attributes support aggregation.
     """
     global _place_view_context
     _place_view_context = factory
@@ -507,16 +509,27 @@ def place_view(
     """
     factory = _place_view_context
     attributes: dict[str, Any] = {}
+    suffix = ""
     if factory is not None:
-        attributes["scale_requested"] = scale is not None
+        attributes["scale_request"] = "specified" if scale is not None else "omitted"
         if isinstance(model_path, str):
             attributes["source_file"] = os.path.basename(model_path)
         if isinstance(view_name, str):
             attributes["orientation"] = view_name
-    with factory("drawing.place_view", attributes) if factory else nullcontext():
+        attributes["phase_kind"] = "placement"
+        # Describe built-in numbers without moving native float conversions out
+        # of _attempt. This is a placement hint, never an actual sheet identity.
+        source = attributes.get("source_file", "<model>")
+        orientation = view_name if type(view_name) is str else "<view>"
+        placement = f"{source} {orientation}"
+        if type(x) is float and type(y) is float:
+            placement += f" x={x!r} y={y!r}"
+        suffix = f" [{placement}]"
+    with factory(f"drawing.place_view{suffix}", attributes) if factory else nullcontext():
         with (
             factory(
-                "drawing.place_view.create", {"phase_kind": "native_create_envelope"}
+                f"drawing.place_view.create{suffix}",
+                {"phase_kind": "native_create_envelope"},
             )
             if factory
             else nullcontext()
@@ -532,14 +545,17 @@ def place_view(
                     f"(model={model_path!r})"
                 )
         with (
-            factory("drawing.place_view.bind", {"phase_kind": "binding"})
+            factory(f"drawing.place_view.bind{suffix}", {"phase_kind": "binding"})
             if factory
             else nullcontext()
         ):
             view = _sw_type_info.early_bound_or_flag(view, "IView")
         if scale is not None:
             with (
-                factory("drawing.place_view.scale", {"phase_kind": "native_scale_attempt"})
+                factory(
+                    f"drawing.place_view.scale{suffix}",
+                    {"phase_kind": "native_scale_attempt"},
+                )
                 if factory
                 else nullcontext()
             ):

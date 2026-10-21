@@ -155,6 +155,8 @@ Pass `None` to clear it. The SDK has no telemetry dependency; registration makes
 no native calls, and aliases imported before registration use the factory.
 
 `drawing.place_view` contains create, bind and optional scale-attempt phases.
+Names include source, orientation and available float-coordinate placement hints;
+`phase_kind` remains stable for aggregation. These are not native sheet IDs.
 Creation includes document access and argument marshalling. Scale timing does
 not establish persisted-scale success. Existing `_attempt` handling is unchanged:
 a failed creation exposes its existing false-result error, not an original
