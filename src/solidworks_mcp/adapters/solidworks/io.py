@@ -16,6 +16,7 @@ from ..base import (
     SolidWorksModel,
 )
 from ..com_variant import null_callout
+from .open_trace import opening
 
 
 class SolidWorksIOMixin:
@@ -159,7 +160,8 @@ class SolidWorksIOMixin:
                 raise ValueError(f"Unsupported file type: {resolved_path}")
 
             app = adapter.swApp
-            open_result = app.OpenDoc6(resolved_path, doc_type, 1, "", 0, 0)
+            with opening("sw.open", resolved_path, doc_type):
+                open_result = app.OpenDoc6(resolved_path, doc_type, 1, "", 0, 0)
             # makepy returns the retval followed by OpenDoc6's two [out]
             # integers.  Retain the scalar form for compatible test doubles and
             # old wrappers while every real session now acquires ISldWorks via
