@@ -525,13 +525,13 @@ def place_view(
         if type(x) is float and type(y) is float:
             placement += f" x={x!r} y={y!r}"
         suffix = f" [{placement}]"
-    with factory(f"drawing.place_view{suffix}", attributes) if factory else nullcontext():
+    with factory(f"drawing.place_view{suffix}", attributes) if factory is not None else nullcontext():
         with (
             factory(
                 f"drawing.place_view.create{suffix}",
                 {"phase_kind": "native_create_envelope"},
             )
-            if factory
+            if factory is not None
             else nullcontext()
         ):
             view = adapter._attempt(
@@ -546,7 +546,7 @@ def place_view(
                 )
         with (
             factory(f"drawing.place_view.bind{suffix}", {"phase_kind": "binding"})
-            if factory
+            if factory is not None
             else nullcontext()
         ):
             view = _sw_type_info.early_bound_or_flag(view, "IView")
@@ -556,7 +556,7 @@ def place_view(
                     f"drawing.place_view.scale{suffix}",
                     {"phase_kind": "native_scale_attempt"},
                 )
-                if factory
+                if factory is not None
                 else nullcontext()
             ):
                 adapter._attempt(

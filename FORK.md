@@ -151,8 +151,9 @@ explicitly.
 
 `drawing.set_place_view_context(factory)` installs an optional factory taking
 `(phase_name, attributes)` and returning a non-suppressing context manager.
-Pass `None` to clear it. The SDK has no telemetry dependency; registration makes
-no native calls, and aliases imported before registration use the factory.
+Only `None` disables observation; false-valued callable objects remain enabled.
+The SDK has no telemetry dependency; registration makes no native calls, and
+aliases imported before registration use the factory.
 
 `drawing.place_view` contains create, bind and optional scale-attempt phases.
 Names include source, orientation and available float-coordinate placement hints;
