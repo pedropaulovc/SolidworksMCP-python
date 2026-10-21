@@ -61,11 +61,87 @@ def test_detect_state_connected(monkeypatch):
 def test_detect_state_starting_when_status_zero(monkeypatch):
     monkeypatch.setattr(r, "_running_images", lambda images: {r.SW_MAIN_PROCESS})
     monkeypatch.setattr(r, "is_dotnet_splash_wedged", lambda: False)
+    monkeypatch.setattr(r, "com_attach_probe", lambda timeout=5.0: False)
     monkeypatch.setattr(
         r, "read_last_run_status",
         lambda: {"CONNECTED_LOAD_STATUS": 0, "SOLIDWORKS_ISCONNECTED": 0},
     )
     assert r.detect_state() is r.SolidWorksState.STARTING
+
+
+def test_detect_state_attach_probe_overrides_stale_flags(monkeypatch):
+    # The drift a live session hit: flags read CONNECTED_LOAD_STATUS=1 while
+    # the instance answered COM attaches instantly. The probe outranks the
+    # persistent breadcrumbs on the attach path.
+    monkeypatch.setattr(r, "_running_images", lambda images: {r.SW_MAIN_PROCESS})
+    monkeypatch.setattr(r, "is_dotnet_splash_wedged", lambda: False)
+    monkeypatch.setattr(
+        r, "read_last_run_status",
+        lambda: {"CONNECTED_LOAD_STATUS": 1, "SOLIDWORKS_ISCONNECTED": 1},
+    )
+    monkeypatch.setattr(r, "com_attach_probe", lambda timeout=5.0: True)
+    assert r.detect_state() is r.SolidWorksState.CONNECTED
+
+
+def test_detect_state_probe_failure_falls_back_to_flags(monkeypatch):
+    monkeypatch.setattr(r, "_running_images", lambda images: {r.SW_MAIN_PROCESS})
+    monkeypatch.setattr(r, "is_dotnet_splash_wedged", lambda: False)
+    monkeypatch.setattr(r, "com_attach_probe", lambda timeout=5.0: False)
+    monkeypatch.setattr(
+        r, "read_last_run_status",
+        lambda: {"CONNECTED_LOAD_STATUS": 3, "SOLIDWORKS_ISCONNECTED": 0},
+    )
+    assert r.detect_state() is r.SolidWorksState.RUNNING_DISCONNECTED
+
+
+def test_com_attach_probe_bounded_by_timeout(monkeypatch):
+    # A hung (non-pumping) server can only burn the probe's deadline, never
+    # wedge the caller: the probe thread is a daemon the caller abandons.
+    import time as _time
+
+    monkeypatch.setattr(r, "_attach_probe_once", lambda: _time.sleep(30) or True)
+    start = _time.monotonic()
+    assert r.com_attach_probe(timeout=0.2) is False
+    assert _time.monotonic() - start < 5.0
+
+
+def test_com_attach_probe_reports_success(monkeypatch):
+    monkeypatch.setattr(r, "_attach_probe_once", lambda: True)
+    assert r.com_attach_probe(timeout=2.0) is True
+
+
+def test_running_images_matches_snapshot_case_insensitively(monkeypatch):
+    # No tasklist subprocess: the running set comes from one Toolhelp walk.
+    monkeypatch.setattr(
+        r, "_snapshot_image_names", lambda: {"sldworks.exe", "notepad.exe"}
+    )
+    assert r._running_images(("SLDWORKS.EXE", "missing.exe")) == {"SLDWORKS.EXE"}
+
+
+def test_taskkill_spawns_without_pipes(monkeypatch):
+    # The untimed-drain wedge needs an inherited pipe handle; assert taskkill
+    # opens none (all stdio DEVNULL) and never uses capture_output.
+    captured: dict[str, object] = {}
+
+    class _FakeProc:
+        def wait(self, timeout=None):
+            captured["waited"] = timeout
+            return 0
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(r.subprocess, "Popen", fake_popen)
+    r._taskkill("sldworks.exe", tree=True)
+
+    assert captured["args"] == ["taskkill", "/F", "/IM", "sldworks.exe", "/T"]
+    kwargs = captured["kwargs"]
+    assert kwargs["stdin"] is r.subprocess.DEVNULL
+    assert kwargs["stdout"] is r.subprocess.DEVNULL
+    assert kwargs["stderr"] is r.subprocess.DEVNULL
+    assert captured["waited"] == 30
 
 
 def test_is_connector_loaded_requires_live_process(monkeypatch):
