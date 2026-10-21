@@ -81,6 +81,25 @@ _SW_ANNOT_CENTER_MARK = 13  # swAnnotationType_e.swCenterMarkSym
 CenterMarkObserver = Callable[[dict[str, Any]], None]
 CENTER_MARK_OBSERVER: CenterMarkObserver | None = None
 
+# Like ``artifact_context``, placement observation has no telemetry dependency.
+PlaceViewContext = Callable[[str, dict[str, Any]], AbstractContextManager[Any]]
+_place_view_context: PlaceViewContext | None = None
+
+
+def set_place_view_context(factory: PlaceViewContext | None) -> None:
+    """Install or clear placement contexts; registration performs no COM work.
+
+    ``factory(name, attributes)`` must return a context that propagates errors.
+    Already-imported ``place_view`` aliases consult this factory on each call.
+    Attributes come only from arguments; scale observation records an attempt,
+    not verification that SolidWorks persisted the requested ratio.
+    Names include an argument-derived source/orientation/placement hint, not an
+    actual sheet identity. Stable ``phase_kind`` attributes support aggregation.
+    """
+    global _place_view_context
+    _place_view_context = factory
+
+
 # Document unit preferences (swUserPreferenceIntegerValue_e + value enums), read
 # from the SOLIDWORKS 2026 swconst typelib on this seat.
 _SW_PREF_UNIT_SYSTEM = 263  # swUserPreferenceIntegerValue_e.swUnitSystem
@@ -488,22 +507,64 @@ def place_view(
     ``x``/``y`` are the view-center position on the sheet, in METERS.
     ``scale`` (num, den) overrides the sheet scale for this view.
     """
-    view = adapter._attempt(
-        lambda: _ddoc(adapter).CreateDrawViewFromModelView3(
-            model_path, view_name, float(x), float(y), 0.0
-        )
-    )
-    if not view:
-        raise RuntimeError(
-            f"CreateDrawViewFromModelView3 failed for {view_name!r} "
-            f"(model={model_path!r})"
-        )
-    view = _sw_type_info.early_bound_or_flag(view, "IView")
-    if scale is not None:
-        adapter._attempt(
-            lambda: setattr(view, "ScaleRatio", double_array([float(scale[0]), float(scale[1])]))
-        )
-    return view
+    factory = _place_view_context
+    attributes: dict[str, Any] = {}
+    suffix = ""
+    if factory is not None:
+        attributes["scale_request"] = "specified" if scale is not None else "omitted"
+        if isinstance(model_path, str):
+            attributes["source_file"] = os.path.basename(model_path)
+        if isinstance(view_name, str):
+            attributes["orientation"] = view_name
+        attributes["phase_kind"] = "placement"
+        # Describe built-in numbers without moving native float conversions out
+        # of _attempt. This is a placement hint, never an actual sheet identity.
+        source = attributes.get("source_file", "<model>")
+        orientation = view_name if type(view_name) is str else "<view>"
+        placement = f"{source} {orientation}"
+        if type(x) is float and type(y) is float:
+            placement += f" x={x!r} y={y!r}"
+        suffix = f" [{placement}]"
+    with factory(f"drawing.place_view{suffix}", attributes) if factory is not None else nullcontext():
+        with (
+            factory(
+                f"drawing.place_view.create{suffix}",
+                {"phase_kind": "native_create_envelope"},
+            )
+            if factory is not None
+            else nullcontext()
+        ):
+            view = adapter._attempt(
+                lambda: _ddoc(adapter).CreateDrawViewFromModelView3(
+                    model_path, view_name, float(x), float(y), 0.0
+                )
+            )
+            if not view:
+                raise RuntimeError(
+                    f"CreateDrawViewFromModelView3 failed for {view_name!r} "
+                    f"(model={model_path!r})"
+                )
+        with (
+            factory(f"drawing.place_view.bind{suffix}", {"phase_kind": "binding"})
+            if factory is not None
+            else nullcontext()
+        ):
+            view = _sw_type_info.early_bound_or_flag(view, "IView")
+        if scale is not None:
+            with (
+                factory(
+                    f"drawing.place_view.scale{suffix}",
+                    {"phase_kind": "native_scale_attempt"},
+                )
+                if factory is not None
+                else nullcontext()
+            ):
+                adapter._attempt(
+                    lambda: setattr(
+                        view, "ScaleRatio", double_array([float(scale[0]), float(scale[1])])
+                    )
+                )
+        return view
 
 
 def create_standard_views(adapter: Any, model_path: str, *, first_angle: bool = False) -> bool:

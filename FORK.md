@@ -147,6 +147,23 @@ explicitly.
   difficult to land upstream).
 - [ ] Optional: `.github/dependabot.yml` tuned for the fork's extras.
 
+## Drawing placement tracing
+
+`drawing.set_place_view_context(factory)` installs an optional factory taking
+`(phase_name, attributes)` and returning a non-suppressing context manager.
+Only `None` disables observation; false-valued callable objects remain enabled.
+The SDK has no telemetry dependency; registration makes no native calls, and
+aliases imported before registration use the factory.
+
+`drawing.place_view` contains create, bind and optional scale-attempt phases.
+Names include source, orientation and available float-coordinate placement hints;
+`phase_kind` remains stable for aggregation. These are not native sheet IDs.
+Creation includes document access and argument marshalling. Scale timing does
+not establish persisted-scale success. Existing `_attempt` handling is unchanged:
+a failed creation exposes its existing false-result error, not an original
+COM exception already swallowed by `_attempt`. Tracing adds no native reads,
+rebuilds or retries.
+
 ## SolidWorks COM learnings (from Phase 0 sketch-op PRs, mid-2026)
 
 Collected while implementing the nine sketch primitives in
