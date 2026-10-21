@@ -752,6 +752,17 @@ def test_discovery_connect_handles_com_error(monkeypatch: pytest.MonkeyPatch) ->
         ),
         raising=False,
     )
+    # A standard install with nothing running, so the cold start reaches the
+    # failing EnsureDispatch. Left real, these probe the host and, on a
+    # 3DEXPERIENCE install, launch SolidWorks through the Platform shortcut.
+    monkeypatch.setattr(
+        docs_mod.sw_install, "is_solidworks_process_running", lambda: False
+    )
+    monkeypatch.setattr(
+        docs_mod.sw_install,
+        "resolve_launch_strategy",
+        lambda: (docs_mod.sw_install.LaunchStrategy.COM_DISPATCH, None),
+    )
 
     discovery = docs_mod.SolidWorksDocsDiscovery(
         output_dir=Path("tests/.generated/docs-connect-com-error")
