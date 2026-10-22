@@ -1261,12 +1261,12 @@ def save_drawing(
         | None
     ) = None,
 ) -> dict[str, str]:
-    """Save the drawing and export sibling PDF/PNG via extension-driven SaveAs3.
+    """Save the drawing and export sibling PDF/PNG via IModelDocExtension.SaveAs3.
 
-    Delete each stale target, call ``SaveAs3`` once (format inferred from the
-    extension), then require a newly created file. COM and filesystem errors
-    propagate; requested artifacts must all exist for this call to succeed.
-    The file check remains authoritative over SaveAs3's integer return code.
+    Delete each stale target, call the bound extension's ``SaveAs3`` once
+    (format inferred from the filename extension), then require native success,
+    zero errors, and a newly created file. Nonzero native warnings are logged.
+    COM and filesystem errors propagate; requested artifacts must all succeed.
 
     ``artifact_context(kind, absolute_path)`` optionally supplies an observation
     context for each requested output: ``drawing``, ``pdf``, or ``png``. It wraps
@@ -1290,7 +1290,23 @@ def save_drawing(
             os.makedirs(os.path.dirname(path), exist_ok=True)
             if os.path.exists(path):
                 os.remove(path)
-            draw.SaveAs3(path, 0, 0)
+            extension = _sw_type_info.early_bound(draw.Extension, "IModelDocExtension")
+            result = extension.SaveAs3(path, 0, 1, None, None, 0, 0)
+            if (
+                type(result) is not tuple
+                or len(result) != 3
+                or type(result[0]) is not bool
+                or type(result[1]) is not int
+                or type(result[2]) is not int
+            ):
+                raise RuntimeError(f"SaveAs3 returned invalid native status for {path}: {result!r}")
+            ok, errors, warnings = result
+            if warnings:
+                logger.warning("SaveAs3 warnings=%s for %s", warnings, path)
+            if not ok or errors:
+                raise RuntimeError(
+                    f"SaveAs3 failed for {path}: success={ok}, errors={errors}, warnings={warnings}"
+                )
             if not os.path.isfile(path):
                 raise RuntimeError(f"SaveAs3 produced no file: {path}")
             out[key] = path
