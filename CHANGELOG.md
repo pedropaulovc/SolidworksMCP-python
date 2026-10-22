@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Drawing saves and PDF/PNG exports now use bound `IModelDocExtension.SaveAs3`,
+  require native success with zero errors and a fresh output file, and log
+  native warnings.
 - Native `export_image` captures now temporarily disable cast shadows, RealView,
   and active part/assembly scene floor reflections for both bitmap capture and
   its image-export fallback. Original session settings are restored on success
