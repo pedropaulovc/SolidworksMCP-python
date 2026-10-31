@@ -46,6 +46,7 @@ from solidworks_mcp.ui.service import (
     select_workflow_mode,
     update_ui_preferences,
 )
+from solidworks_mcp.ui.services import llm_service
 
 
 class _DummyAdapter:
@@ -1085,7 +1086,6 @@ async def test_run_go_orchestration_exception_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Provider credential failures become dashboard errors without external lookup."""
-    from solidworks_mcp.ui.services import llm_service
 
     def _unavailable(*_args: Any, **_kwargs: Any) -> None:
         raise RuntimeError("provider credentials unavailable")
