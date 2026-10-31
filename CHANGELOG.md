@@ -11,11 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made the dashboard Go-orchestration exception-path test independent of local
   provider credentials and network access by stubbing credential lookup and
   injecting a recoverable provider failure, preserving its clean-completion check.
-- `set_units_inch` now selects IPS after every explicit unit/display preference,
-  since component unit writes can switch the unit system to Custom. Full strict
-  readback and toggle/scoping rules are unchanged. A stateful regression models
-  that transition; the R2026x farm canary proved IPS persistence and decimal-inch
-  drawing output with model-authored four-place reamed-bore tolerances intact.
 
 ### Added
 - `adapters.solidworks.drawing.set_units_inch(adapter, *, decimals)` sets the
@@ -25,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   display, `decimals` places, round half away from zero, round-to-fraction
   off, decimal leading zeros suppressed, dimension and tolerance trailing
   zeros shown, and dual dimensions off for the general, arc-length, chamfer,
-  diameter, hole, linear, ordinate and radius dimension scopes. Integer writes
+  diameter, hole, linear, ordinate and radius dimension scopes. IPS is selected
+  last because explicit component-unit writes can select Custom. Integer writes
   must return `True` and every preference must read back with its exact value
   and type after all writes, or it raises. Dimension-type precision defaults
   and per-dimension overrides are untouched.
