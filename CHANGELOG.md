@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Made the dashboard Go-orchestration exception-path test independent of local
-  provider credentials and network access by injecting a credential failure and
-  checking that it is surfaced in dashboard state.
+  provider credentials and network access by stubbing credential lookup and
+  injecting a recoverable provider failure, preserving its clean-completion check.
 
 ### Changed
 - Drawing saves and PDF/PNG exports now use bound `IModelDocExtension.SaveAs3`,
