@@ -107,6 +107,7 @@ _SW_UNIT_SYSTEM_MMGS = 5  # swUnitSystem_e.swUnitSystem_MMGS
 _SW_PREF_UNITS_LINEAR = 47  # swUserPreferenceIntegerValue_e.swUnitsLinear
 _SW_LENGTH_MM = 0  # swLengthUnit_e.swMM
 _SW_PREF_UNITS_LINEAR_DP = 49  # swUserPreferenceIntegerValue_e.swUnitsLinearDecimalPlaces
+_SW_DOC_DRAWING = 3  # swDocumentTypes_e.swDocDRAWING
 
 # Dimension text parts (swDimensionTextParts_e) + dimension type (swDimensionType_e).
 _SW_DIM_TEXT_ALL = 0  # swDimensionTextAll (whole string incl. value — SetText only)
@@ -344,18 +345,71 @@ def set_units_mm(adapter: Any, *, decimals: int = 2) -> None:
 
     The parts are inch documents, so a fresh drawing inherits inch display — set
     mm here so every dimension reads in mm (matching the general note). Call
-    before inserting dimensions.
+    before inserting dimensions. Select MMGS last because explicit component
+    unit writes can switch the unit system to Custom.
     """
     draw = _draw(adapter)
-    adapter._attempt(
-        lambda: draw.SetUserPreferenceIntegerValue(_SW_PREF_UNIT_SYSTEM, _SW_UNIT_SYSTEM_MMGS)
-    )
     adapter._attempt(
         lambda: draw.SetUserPreferenceIntegerValue(_SW_PREF_UNITS_LINEAR, _SW_LENGTH_MM)
     )
     adapter._attempt(
         lambda: draw.SetUserPreferenceIntegerValue(_SW_PREF_UNITS_LINEAR_DP, int(decimals))
     )
+    adapter._attempt(
+        lambda: draw.SetUserPreferenceIntegerValue(_SW_PREF_UNIT_SYSTEM, _SW_UNIT_SYSTEM_MMGS)
+    )
+
+
+def set_units_inch(adapter: Any, *, decimals: int) -> None:
+    """Set the active drawing to decimal-inch (IPS) presentation.
+
+    Call before inserting dimensions. ``decimals`` (an ``int`` 0..8) is the
+    linear decimal places. Writes the preferences below in order, unit system
+    IPS last (explicit unit writes can switch the system to Custom), then reads
+    every one back and raises ``RuntimeError`` listing any that differ.
+    """
+    if type(decimals) is not int or not 0 <= decimals <= 8:
+        raise ValueError(f"decimals must be an int in 0..8, got {decimals!r}")
+    draw = _draw(adapter)
+    doc_type = draw.GetType()
+    if doc_type != _SW_DOC_DRAWING:
+        raise RuntimeError(
+            f"set_units_inch requires a drawing document, got type {doc_type!r}"
+        )
+    ext = _sw_type_info.early_bound(draw.Extension, "IModelDocExtension")
+    # (preference, swUserPreferenceOption_e scope, value) in write order; a bool
+    # value is a toggle. Scope 0 is swDetailingNoOptionSpecified.
+    preferences = [
+        (47, 0, 3),  # swUnitsLinear = swINCHES
+        (48, 0, 1),  # swUnitsLinearDecimalDisplay = swDECIMAL
+        (49, 0, decimals),  # swUnitsLinearDecimalPlaces
+        (522, 0, 0),  # swUnitsDecimalRounding = swUnitsDecimalRounding_HalfAway
+        (62, 0, False),  # swUnitsLinearRoundToNearestFraction
+        (265, 0, 3),  # swDetailingLeadingZero = swLeadingZero_DoNotShow
+        (15, 0, 1),  # swDetailingDimTrailingZero = swDimShowTrailingZeroes
+        (582, 0, 1),  # swDetailingTrailingZeroTolerance = show
+        # swDetailingDualDimensions off for general Dimension (200), then
+        # ArcLength, Chamfer, Diameter, Hole, Linear, Ordinate and Radius (202-208).
+        *((43, scope, False) for scope in (200, 202, 203, 204, 205, 206, 207, 208)),
+        (263, 0, 3),  # swUnitSystem = swUnitSystem_IPS, last
+    ]
+    for preference, scope, value in preferences:
+        if type(value) is bool:
+            ext.SetUserPreferenceToggle(preference, scope, value)
+        else:
+            ext.SetUserPreferenceInteger(preference, scope, value)
+    mismatches = []
+    for preference, scope, value in preferences:
+        if type(value) is bool:
+            actual = ext.GetUserPreferenceToggle(preference, scope)
+        else:
+            actual = ext.GetUserPreferenceInteger(preference, scope)
+        if type(actual) is not type(value) or actual != value:
+            mismatches.append(
+                f"{preference}/{scope}: wanted {value!r}, read {actual!r}"
+            )
+    if mismatches:
+        raise RuntimeError("Inch drawing units did not stick: " + "; ".join(mismatches))
 
 
 def orientation_name(adapter: Any, view: Any) -> str:

@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made the dashboard Go-orchestration exception-path test independent of local
   provider credentials and network access by stubbing credential lookup and
   injecting a recoverable provider failure, preserving its clean-completion check.
+- `set_units_mm` now selects MMGS after the linear-unit and decimal-place
+  writes, which could otherwise leave the drawing's unit system on Custom.
+
+### Added
+- `adapters.solidworks.drawing.set_units_inch(adapter, *, decimals)` sets the
+  active drawing to decimal-inch (IPS) dimensions with `decimals` places,
+  leading zeros hidden, trailing zeros shown and dual dimensions off, and raises
+  if any setting does not read back.
 
 ### Changed
 - Drawing saves and PDF/PNG exports now use bound `IModelDocExtension.SaveAs3`,

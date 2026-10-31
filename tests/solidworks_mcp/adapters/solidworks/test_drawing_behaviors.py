@@ -208,10 +208,76 @@ def test_units_request_exact_metric_preset_length_and_precision():
     doc = model(SetUserPreferenceIntegerValue=Mock())
     d.set_units_mm(Adapter(doc), decimals=3)
     assert doc.SetUserPreferenceIntegerValue.call_args_list == [
-        call(263, 5),
         call(47, 0),
         call(49, 3),
+        call(263, 5),
     ]
+
+
+class Preferences:
+    """IModelDocExtension double: stores written preferences and reads them back."""
+
+    def __init__(self, unit_system_reads=None):
+        self.writes = []
+        self.unit_system_reads = unit_system_reads
+
+    def SetUserPreferenceInteger(self, preference, scope, value):
+        self.writes.append((preference, scope, value))
+        return True
+
+    def SetUserPreferenceToggle(self, preference, scope, value):
+        self.writes.append((preference, scope, value))
+        return value
+
+    def _read(self, preference, scope):
+        if preference == 263 and self.unit_system_reads is not None:
+            return self.unit_system_reads
+        return {(p, s): v for p, s, v in self.writes}[preference, scope]
+
+    GetUserPreferenceInteger = GetUserPreferenceToggle = _read
+
+
+def inch_drawing(prefs, doc_type=3):
+    return model(GetType=Mock(return_value=doc_type), Extension=prefs)
+
+
+def test_inch_units_write_every_preference_with_ips_last_and_read_back():
+    prefs = Preferences()
+    d.set_units_inch(Adapter(inch_drawing(prefs)), decimals=3)
+    assert prefs.writes == [
+        (47, 0, 3),  # swUnitsLinear = inches
+        (48, 0, 1),  # decimal display
+        (49, 0, 3),  # decimal places
+        (522, 0, 0),  # round half away from zero
+        (62, 0, False),  # round to nearest fraction off
+        (265, 0, 3),  # leading zero: do not show
+        (15, 0, 1),  # dimension trailing zeros shown
+        (582, 0, 1),  # tolerance trailing zeros shown
+        *((43, scope, False) for scope in (200, 202, 203, 204, 205, 206, 207, 208)),
+        (263, 0, 3),  # unit system IPS
+    ]
+
+
+def test_inch_units_raise_when_unit_system_reads_back_custom():
+    prefs = Preferences(unit_system_reads=4)  # swUnitSystem_Custom
+    with pytest.raises(RuntimeError, match="263/0: wanted 3, read 4"):
+        d.set_units_inch(Adapter(inch_drawing(prefs)), decimals=3)
+
+
+@pytest.mark.parametrize("decimals", [-1, 9, 2.0, True, "2"])
+def test_inch_units_refuse_bad_decimals_before_touching_the_document(decimals):
+    doc = inch_drawing(Preferences())
+    with pytest.raises(ValueError, match="decimals"):
+        d.set_units_inch(Adapter(doc), decimals=decimals)
+    doc.GetType.assert_not_called()
+    assert doc.Extension.writes == []
+
+
+def test_inch_units_refuse_non_drawing_documents():
+    prefs = Preferences()
+    with pytest.raises(RuntimeError, match="requires a drawing document"):
+        d.set_units_inch(Adapter(inch_drawing(prefs, doc_type=1)), decimals=3)
+    assert prefs.writes == []
 
 
 @pytest.mark.parametrize(
