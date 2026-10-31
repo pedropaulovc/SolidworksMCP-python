@@ -11,23 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made the dashboard Go-orchestration exception-path test independent of local
   provider credentials and network access by stubbing credential lookup and
   injecting a recoverable provider failure, preserving its clean-completion check.
-- `set_units_mm` now selects MMGS after setting linear units and decimal places,
-  since component-unit writes can switch the unit system to Custom. Its existing
-  decimal coercion and best-effort write behavior are unchanged.
+- `set_units_mm` now selects MMGS after the linear-unit and decimal-place
+  writes, which could otherwise leave the drawing's unit system on Custom.
 
 ### Added
 - `adapters.solidworks.drawing.set_units_inch(adapter, *, decimals)` sets the
-  active drawing to decimal-inch presentation beside `set_units_mm`. It
-  requires an `int` 0–8 and a drawing document, then writes through scoped
-  `IModelDocExtension` preferences: IPS unit system, inch length, decimal
-  display, `decimals` places, round half away from zero, round-to-fraction
-  off, decimal leading zeros suppressed, dimension and tolerance trailing
-  zeros shown, and dual dimensions off for the general, arc-length, chamfer,
-  diameter, hole, linear, ordinate and radius dimension scopes. IPS is selected
-  last because explicit component-unit writes can select Custom. Integer writes
-  must return `True` and every preference must read back with its exact value
-  and type after all writes, or it raises. Dimension-type precision defaults
-  and per-dimension overrides are untouched.
+  active drawing to decimal-inch (IPS) dimensions with `decimals` places,
+  leading zeros hidden, trailing zeros shown and dual dimensions off, and raises
+  if any setting does not read back.
 
 ### Changed
 - Drawing saves and PDF/PNG exports now use bound `IModelDocExtension.SaveAs3`,
