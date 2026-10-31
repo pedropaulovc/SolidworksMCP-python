@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made the dashboard Go-orchestration exception-path test independent of local
   provider credentials and network access by stubbing credential lookup and
   injecting a recoverable provider failure, preserving its clean-completion check.
+- `set_units_mm` now selects MMGS after setting linear units and decimal places,
+  since component-unit writes can switch the unit system to Custom. Its existing
+  decimal coercion and best-effort write behavior are unchanged.
 
 ### Added
 - `adapters.solidworks.drawing.set_units_inch(adapter, *, decimals)` sets the

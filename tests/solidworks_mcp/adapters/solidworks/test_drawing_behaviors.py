@@ -208,10 +208,30 @@ def test_units_request_exact_metric_preset_length_and_precision():
     doc = model(SetUserPreferenceIntegerValue=Mock())
     d.set_units_mm(Adapter(doc), decimals=3)
     assert doc.SetUserPreferenceIntegerValue.call_args_list == [
-        call(263, 5),
         call(47, 0),
         call(49, 3),
+        call(263, 5),
     ]
+
+
+@pytest.mark.parametrize("decimals", [0, 3, 8, "4", 2.9])
+def test_metric_units_select_mmgs_after_component_writes_switch_system_to_custom(
+    decimals,
+):
+    state = {}
+    systems_after_write = []
+
+    def set_preference(preference, value):
+        state[preference] = value
+        if preference != 263:
+            state[263] = 4  # swUnitSystem_Custom
+        systems_after_write.append(state[263])
+        return True
+
+    doc = model(SetUserPreferenceIntegerValue=Mock(side_effect=set_preference))
+    assert d.set_units_mm(Adapter(doc), decimals=decimals) is None
+    assert systems_after_write == [4, 4, 5]
+    assert state == {47: 0, 49: int(decimals), 263: 5}
 
 
 # Literal swconst values (2026 typelib), independent of drawing.py's constants.

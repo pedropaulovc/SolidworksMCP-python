@@ -367,17 +367,18 @@ def set_units_mm(adapter: Any, *, decimals: int = 2) -> None:
 
     The parts are inch documents, so a fresh drawing inherits inch display — set
     mm here so every dimension reads in mm (matching the general note). Call
-    before inserting dimensions.
+    before inserting dimensions. Select MMGS last because explicit component
+    unit writes can switch the unit system to Custom.
     """
     draw = _draw(adapter)
-    adapter._attempt(
-        lambda: draw.SetUserPreferenceIntegerValue(_SW_PREF_UNIT_SYSTEM, _SW_UNIT_SYSTEM_MMGS)
-    )
     adapter._attempt(
         lambda: draw.SetUserPreferenceIntegerValue(_SW_PREF_UNITS_LINEAR, _SW_LENGTH_MM)
     )
     adapter._attempt(
         lambda: draw.SetUserPreferenceIntegerValue(_SW_PREF_UNITS_LINEAR_DP, int(decimals))
+    )
+    adapter._attempt(
+        lambda: draw.SetUserPreferenceIntegerValue(_SW_PREF_UNIT_SYSTEM, _SW_UNIT_SYSTEM_MMGS)
     )
 
 
