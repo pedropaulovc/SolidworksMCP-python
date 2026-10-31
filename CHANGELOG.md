@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `set_units_inch` now selects IPS after every explicit unit/display preference,
   since component unit writes can switch the unit system to Custom. Full strict
   readback and toggle/scoping rules are unchanged. A stateful regression models
-  that transition; this ordering is a candidate fix pending native drawing proof.
+  that transition; the R2026x farm canary proved IPS persistence and decimal-inch
+  drawing output with model-authored four-place reamed-bore tolerances intact.
 
 ### Added
 - `adapters.solidworks.drawing.set_units_inch(adapter, *, decimals)` sets the
