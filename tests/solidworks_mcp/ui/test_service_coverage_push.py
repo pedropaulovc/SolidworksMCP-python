@@ -1081,8 +1081,16 @@ def test_fetch_docs_context_success(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_go_orchestration_exception_path(tmp_path: Path) -> None:
-    """Run_go_orchestration remains resilient when provider calls fail."""
+async def test_run_go_orchestration_exception_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provider credential failures become dashboard errors without external lookup."""
+    from solidworks_mcp.ui.services import llm_service
+
+    def _unavailable(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("provider credentials unavailable")
+
+    monkeypatch.setattr(llm_service, "_ensure_provider_credentials", _unavailable)
     db_path = tmp_path / "test.db"
     ensure_dashboard_session(DEFAULT_SESSION_ID, db_path=db_path)
 
@@ -1093,7 +1101,8 @@ async def test_run_go_orchestration_exception_path(tmp_path: Path) -> None:
     )
 
     assert result["session_id"] == DEFAULT_SESSION_ID
-    assert result.get("latest_error_text", "") == ""
+    assert result["latest_error_text"] == "provider credentials unavailable"
+    assert result["orchestration_status"] == "Go run failed."
 
 
 # ============================================================================
