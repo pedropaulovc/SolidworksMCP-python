@@ -12,6 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider credentials and network access by stubbing credential lookup and
   injecting a recoverable provider failure, preserving its clean-completion check.
 
+### Added
+- `adapters.solidworks.drawing.set_units_inch(adapter, *, decimals)` sets the
+  active drawing to decimal-inch presentation beside `set_units_mm`. It
+  requires an `int` 0–8 and a drawing document, then writes through scoped
+  `IModelDocExtension` preferences: IPS unit system, inch length, decimal
+  display, `decimals` places, round half away from zero, round-to-fraction
+  off, decimal leading zeros suppressed, dimension and tolerance trailing
+  zeros shown, and dual dimensions off for the general, arc-length, chamfer,
+  diameter, hole, linear, ordinate and radius dimension scopes. Integer writes
+  must return `True` and every preference must read back with its exact value
+  and type after all writes, or it raises. Dimension-type precision defaults
+  and per-dimension overrides are untouched.
+
 ### Changed
 - Drawing saves and PDF/PNG exports now use bound `IModelDocExtension.SaveAs3`,
   require native success with zero errors and a fresh output file, and log

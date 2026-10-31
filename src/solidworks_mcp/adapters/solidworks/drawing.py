@@ -107,6 +107,29 @@ _SW_UNIT_SYSTEM_MMGS = 5  # swUnitSystem_e.swUnitSystem_MMGS
 _SW_PREF_UNITS_LINEAR = 47  # swUserPreferenceIntegerValue_e.swUnitsLinear
 _SW_LENGTH_MM = 0  # swLengthUnit_e.swMM
 _SW_PREF_UNITS_LINEAR_DP = 49  # swUserPreferenceIntegerValue_e.swUnitsLinearDecimalPlaces
+# Inch drawing presentation (swUserPreferenceIntegerValue_e / swUserPreferenceToggle_e
+# + value enums), from the same SOLIDWORKS 2026 swconst typelib.
+_SW_DOC_DRAWING = 3  # swDocumentTypes_e.swDocDRAWING
+_SW_UNIT_SYSTEM_IPS = 3  # swUnitSystem_e.swUnitSystem_IPS
+_SW_LENGTH_INCHES = 3  # swLengthUnit_e.swINCHES
+_SW_PREF_UNITS_LINEAR_DISPLAY = 48  # swUnitsLinearDecimalDisplay
+_SW_FRACTION_DISPLAY_DECIMAL = 1  # swFractionDisplay_e.swDECIMAL
+_SW_PREF_UNITS_DECIMAL_ROUNDING = 522  # swUnitsDecimalRounding
+_SW_DECIMAL_ROUNDING_HALF_AWAY = 0  # swUnitsDecimalRounding_e.swUnitsDecimalRounding_HalfAway
+_SW_TOGGLE_LINEAR_ROUND_TO_FRACTION = 62  # swUnitsLinearRoundToNearestFraction
+_SW_PREF_LEADING_ZERO = 265  # swDetailingLeadingZero (decimal display, not fractions)
+_SW_LEADING_ZERO_DO_NOT_SHOW = 3  # swDetailingLeadingZero_e.swLeadingZero_DoNotShow
+_SW_PREF_DIM_TRAILING_ZERO = 15  # swDetailingDimTrailingZero
+_SW_PREF_TOL_TRAILING_ZERO = 582  # swDetailingTrailingZeroTolerance
+_SW_TRAILING_ZERO_SHOW = 1  # swDetailingDimTrailingZero_e.swDimShowTrailingZeroes
+_SW_TOGGLE_DUAL_DIMENSIONS = 43  # swDetailingDualDimensions
+# swUserPreferenceOption_e scopes. Units and zero options are document-global
+# (swDetailingNoOptionSpecified); the dual-display toggle is documented per
+# dimension type: general Dimension (200), then ArcLength, Chamfer, Diameter,
+# Hole, Linear, Ordinate and Radius (202-208). The angle types (201, 209) carry
+# no dual-display toggle in the Document Properties tables.
+_SW_PREF_OPTION_NONE = 0
+_SW_DUAL_DIMENSION_SCOPES = (200, 202, 203, 204, 205, 206, 207, 208)
 
 # Dimension text parts (swDimensionTextParts_e) + dimension type (swDimensionType_e).
 _SW_DIM_TEXT_ALL = 0  # swDimensionTextAll (whole string incl. value — SetText only)
@@ -356,6 +379,109 @@ def set_units_mm(adapter: Any, *, decimals: int = 2) -> None:
     adapter._attempt(
         lambda: draw.SetUserPreferenceIntegerValue(_SW_PREF_UNITS_LINEAR_DP, int(decimals))
     )
+
+
+def set_units_inch(adapter: Any, *, decimals: int) -> None:
+    """Set the active drawing to decimal-inch (IPS) presentation, fail-closed.
+
+    Call before inserting dimensions. ``decimals`` (an ``int`` in 0..8) is the
+    document's linear decimal places. Writes, in order, through the documented
+    ``IModelDocExtension`` scoped preferences: unit system IPS, length inches,
+    decimal (not fractional) display, ``decimals`` places, round half away from
+    zero, round-to-nearest-fraction off, decimal leading zeros suppressed
+    (``.250``), dimension and tolerance trailing zeros shown, and dual
+    dimensions off for every dimension scope that has the toggle.
+
+    Raises ``ValueError`` for a bad ``decimals`` and ``RuntimeError`` without an
+    active drawing, when an integer preference write returns anything but
+    ``True``, or when any preference reads back different after all writes (so
+    a unit system that drifted to Custom fails). Toggle writes are judged only
+    by readback: their documented return is the toggle's resulting state, which
+    is ``False`` for a successful disable. Dimension-type precision defaults and
+    per-dimension overrides are left untouched. Nothing is rolled back on
+    failure.
+    """
+    if type(decimals) is not int or not 0 <= decimals <= 8:
+        raise ValueError(f"decimals must be an int in 0..8, got {decimals!r}")
+    draw = _draw(adapter)
+    doc_type = draw.GetType()
+    if doc_type != _SW_DOC_DRAWING:
+        raise RuntimeError(
+            f"set_units_inch requires a drawing document, got type {doc_type!r}"
+        )
+    ext = _sw_type_info.early_bound(draw.Extension, "IModelDocExtension")
+    none = _SW_PREF_OPTION_NONE
+    # (name, preference, option, value) in write order, unit system first so the
+    # overrides that follow land inside IPS. Boolean values are toggles.
+    preferences: tuple[tuple[str, int, int, int | bool], ...] = (
+        ("swUnitSystem", _SW_PREF_UNIT_SYSTEM, none, _SW_UNIT_SYSTEM_IPS),
+        ("swUnitsLinear", _SW_PREF_UNITS_LINEAR, none, _SW_LENGTH_INCHES),
+        (
+            "swUnitsLinearDecimalDisplay",
+            _SW_PREF_UNITS_LINEAR_DISPLAY,
+            none,
+            _SW_FRACTION_DISPLAY_DECIMAL,
+        ),
+        ("swUnitsLinearDecimalPlaces", _SW_PREF_UNITS_LINEAR_DP, none, decimals),
+        (
+            "swUnitsDecimalRounding",
+            _SW_PREF_UNITS_DECIMAL_ROUNDING,
+            none,
+            _SW_DECIMAL_ROUNDING_HALF_AWAY,
+        ),
+        (
+            "swUnitsLinearRoundToNearestFraction",
+            _SW_TOGGLE_LINEAR_ROUND_TO_FRACTION,
+            none,
+            False,
+        ),
+        (
+            "swDetailingLeadingZero",
+            _SW_PREF_LEADING_ZERO,
+            none,
+            _SW_LEADING_ZERO_DO_NOT_SHOW,
+        ),
+        (
+            "swDetailingDimTrailingZero",
+            _SW_PREF_DIM_TRAILING_ZERO,
+            none,
+            _SW_TRAILING_ZERO_SHOW,
+        ),
+        (
+            "swDetailingTrailingZeroTolerance",
+            _SW_PREF_TOL_TRAILING_ZERO,
+            none,
+            _SW_TRAILING_ZERO_SHOW,
+        ),
+        *(
+            ("swDetailingDualDimensions", _SW_TOGGLE_DUAL_DIMENSIONS, scope, False)
+            for scope in _SW_DUAL_DIMENSION_SCOPES
+        ),
+    )
+    for name, preference, option, value in preferences:
+        if type(value) is bool:
+            ext.SetUserPreferenceToggle(preference, option, value)
+            continue
+        ok = ext.SetUserPreferenceInteger(preference, option, value)
+        if ok is not True:
+            raise RuntimeError(
+                f"SetUserPreferenceInteger({name}, option={option}, "
+                f"value={value}) returned {ok!r}"
+            )
+    mismatches: list[str] = []
+    for name, preference, option, value in preferences:
+        if type(value) is bool:
+            actual = ext.GetUserPreferenceToggle(preference, option)
+        else:
+            actual = ext.GetUserPreferenceInteger(preference, option)
+        if type(actual) is not type(value) or actual != value:
+            mismatches.append(
+                f"{name}(option={option}) expected {value!r}, read {actual!r}"
+            )
+    if mismatches:
+        raise RuntimeError(
+            "Inch drawing units did not read back: " + "; ".join(mismatches)
+        )
 
 
 def orientation_name(adapter: Any, view: Any) -> str:

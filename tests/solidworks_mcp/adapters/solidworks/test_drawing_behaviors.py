@@ -214,6 +214,136 @@ def test_units_request_exact_metric_preset_length_and_precision():
     ]
 
 
+# Literal swconst values (2026 typelib), independent of drawing.py's constants.
+_DUAL_SCOPES = (200, 202, 203, 204, 205, 206, 207, 208)
+
+
+def inch_writes(decimals):
+    """Every inch preference write, in the required order."""
+    return [
+        ("int", 263, 0, 3),  # swUnitSystem = IPS
+        ("int", 47, 0, 3),  # swUnitsLinear = inches
+        ("int", 48, 0, 1),  # swUnitsLinearDecimalDisplay = decimal
+        ("int", 49, 0, decimals),  # swUnitsLinearDecimalPlaces
+        ("int", 522, 0, 0),  # swUnitsDecimalRounding = half away from zero
+        ("toggle", 62, 0, False),  # swUnitsLinearRoundToNearestFraction
+        ("int", 265, 0, 3),  # swDetailingLeadingZero = do not show
+        ("int", 15, 0, 1),  # swDetailingDimTrailingZero = show
+        ("int", 582, 0, 1),  # swDetailingTrailingZeroTolerance = show
+        *(("toggle", 43, scope, False) for scope in _DUAL_SCOPES),
+    ]
+
+
+class Preferences:
+    """IModelDocExtension preference double: records writes, serves readbacks."""
+
+    def __init__(self, *, rejected=None, drift=None):
+        self.writes = []
+        self.state = {}
+        self.rejected = rejected or {}  # integer preference -> native return
+        self.drift = drift or {}  # (kind, preference, option) -> read value
+
+    def SetUserPreferenceInteger(self, preference, option, value):
+        self.writes.append(("int", preference, option, value))
+        if preference in self.rejected:
+            return self.rejected[preference]
+        self.state["int", preference, option] = value
+        return True
+
+    def SetUserPreferenceToggle(self, preference, option, value):
+        self.writes.append(("toggle", preference, option, value))
+        self.state["toggle", preference, option] = value
+        return value  # documented: the toggle's resulting state, not success
+
+    def GetUserPreferenceInteger(self, preference, option):
+        key = ("int", preference, option)
+        return self.drift.get(key, self.state.get(key))
+
+    def GetUserPreferenceToggle(self, preference, option):
+        key = ("toggle", preference, option)
+        return self.drift.get(key, self.state.get(key))
+
+
+def drawing_with(preferences, doc_type=3):
+    return model(GetType=Mock(return_value=doc_type), Extension=preferences)
+
+
+@pytest.mark.parametrize("decimals", [0, 3, 8])
+def test_inch_units_write_every_preference_in_order_and_read_back(
+    monkeypatch, decimals
+):
+    bound = []
+    monkeypatch.setattr(
+        d._sw_type_info,
+        "early_bound",
+        lambda obj, interface: bound.append(interface) or obj,
+    )
+    prefs = Preferences()
+    assert d.set_units_inch(Adapter(drawing_with(prefs)), decimals=decimals) is None
+    assert bound == ["IModelDocExtension"]
+    assert prefs.writes == inch_writes(decimals)
+    assert prefs.state == {
+        (kind, preference, option): value
+        for kind, preference, option, value in inch_writes(decimals)
+    }
+
+
+@pytest.mark.parametrize("decimals", [-1, 9, 2.0, True, "2", None])
+def test_inch_units_reject_decimals_outside_int_0_to_8_before_any_access(decimals):
+    prefs = Preferences()
+    doc = drawing_with(prefs)
+    with pytest.raises(ValueError, match="decimals"):
+        d.set_units_inch(Adapter(doc), decimals=decimals)
+    doc.GetType.assert_not_called()
+    assert prefs.writes == []
+
+
+def test_inch_units_require_decimals_keyword():
+    with pytest.raises(TypeError):
+        d.set_units_inch(Adapter(drawing_with(Preferences())))
+    with pytest.raises(TypeError):
+        d.set_units_inch(Adapter(drawing_with(Preferences())), 3)
+
+
+def test_inch_units_need_an_active_drawing():
+    with pytest.raises(RuntimeError, match="No active drawing"):
+        d.set_units_inch(Adapter(), decimals=3)
+
+
+@pytest.mark.parametrize("doc_type", [1, 2, None])
+def test_inch_units_refuse_non_drawing_documents_before_writing(doc_type):
+    prefs = Preferences()
+    with pytest.raises(RuntimeError, match="requires a drawing document"):
+        d.set_units_inch(Adapter(drawing_with(prefs, doc_type)), decimals=3)
+    assert prefs.writes == []
+
+
+@pytest.mark.parametrize("native", [False, None, 1])
+def test_inch_units_stop_at_first_integer_write_not_returning_true(native):
+    prefs = Preferences(rejected={49: native})
+    with pytest.raises(RuntimeError, match=r"swUnitsLinearDecimalPlaces.*returned"):
+        d.set_units_inch(Adapter(drawing_with(prefs)), decimals=3)
+    assert prefs.writes == inch_writes(3)[:4]
+
+
+def test_inch_units_report_every_preference_that_reads_back_differently():
+    prefs = Preferences(
+        drift={
+            ("int", 263, 0): 4,  # unit system drifted to Custom
+            ("int", 49, 0): 3.0,  # equal value, wrong native type
+            ("toggle", 43, 204): True,  # diameter dual display still on
+        }
+    )
+    with pytest.raises(RuntimeError, match="did not read back") as raised:
+        d.set_units_inch(Adapter(drawing_with(prefs)), decimals=3)
+    message = str(raised.value)
+    assert "swUnitSystem(option=0) expected 3, read 4" in message
+    assert "swUnitsLinearDecimalPlaces(option=0) expected 3, read 3.0" in message
+    assert "swDetailingDualDimensions(option=204) expected False, read True" in message
+    assert "option=206" not in message
+    assert prefs.writes == inch_writes(3)
+
+
 @pytest.mark.parametrize(
     "raw,expected",
     [(None, None), ([1, 2], None), ([1, 2, 3, 4, 5], (1.0, 2.0, 3.0, 4.0))],
