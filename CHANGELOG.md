@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made the dashboard Go-orchestration exception-path test independent of local
   provider credentials and network access by stubbing credential lookup and
   injecting a recoverable provider failure, preserving its clean-completion check.
+- `set_units_inch` now selects IPS after every explicit unit/display preference,
+  since component unit writes can switch the unit system to Custom. Full strict
+  readback and toggle/scoping rules are unchanged. A stateful regression models
+  that transition; this ordering is a candidate fix pending native drawing proof.
 
 ### Added
 - `adapters.solidworks.drawing.set_units_inch(adapter, *, decimals)` sets the

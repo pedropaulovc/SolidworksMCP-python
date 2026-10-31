@@ -221,7 +221,6 @@ _DUAL_SCOPES = (200, 202, 203, 204, 205, 206, 207, 208)
 def inch_writes(decimals):
     """Every inch preference write, in the required order."""
     return [
-        ("int", 263, 0, 3),  # swUnitSystem = IPS
         ("int", 47, 0, 3),  # swUnitsLinear = inches
         ("int", 48, 0, 1),  # swUnitsLinearDecimalDisplay = decimal
         ("int", 49, 0, decimals),  # swUnitsLinearDecimalPlaces
@@ -231,6 +230,7 @@ def inch_writes(decimals):
         ("int", 15, 0, 1),  # swDetailingDimTrailingZero = show
         ("int", 582, 0, 1),  # swDetailingTrailingZeroTolerance = show
         *(("toggle", 43, scope, False) for scope in _DUAL_SCOPES),
+        ("int", 263, 0, 3),  # swUnitSystem = IPS, after all explicit preferences
     ]
 
 
@@ -288,6 +288,38 @@ def test_inch_units_write_every_preference_in_order_and_read_back(
     }
 
 
+@pytest.mark.parametrize("decimals", [0, 3, 8])
+def test_inch_units_select_ips_after_preferences_that_switch_system_to_custom(decimals):
+    class CustomTransitionPreferences(Preferences):
+        """Model the suspected drawing analogue of native model Custom drift."""
+
+        def __init__(self):
+            super().__init__()
+            self.systems_after_write = []
+
+        def SetUserPreferenceInteger(self, preference, option, value):
+            result = super().SetUserPreferenceInteger(preference, option, value)
+            if preference != 263:
+                self.state["int", 263, 0] = 4  # swUnitSystem_Custom
+            self.systems_after_write.append(self.state["int", 263, 0])
+            return result
+
+        def SetUserPreferenceToggle(self, preference, option, value):
+            result = super().SetUserPreferenceToggle(preference, option, value)
+            self.state["int", 263, 0] = 4
+            self.systems_after_write.append(4)
+            return result
+
+    prefs = CustomTransitionPreferences()
+    d.set_units_inch(Adapter(drawing_with(prefs)), decimals=decimals)
+    assert prefs.writes == inch_writes(decimals)
+    assert prefs.systems_after_write == [4] * (len(prefs.writes) - 1) + [3]
+    assert prefs.state == {
+        (kind, preference, option): value
+        for kind, preference, option, value in inch_writes(decimals)
+    }
+
+
 @pytest.mark.parametrize("decimals", [-1, 9, 2.0, True, "2", None])
 def test_inch_units_reject_decimals_outside_int_0_to_8_before_any_access(decimals):
     prefs = Preferences()
@@ -323,7 +355,7 @@ def test_inch_units_stop_at_first_integer_write_not_returning_true(native):
     prefs = Preferences(rejected={49: native})
     with pytest.raises(RuntimeError, match=r"swUnitsLinearDecimalPlaces.*returned"):
         d.set_units_inch(Adapter(drawing_with(prefs)), decimals=3)
-    assert prefs.writes == inch_writes(3)[:4]
+    assert prefs.writes == inch_writes(3)[:3]
 
 
 def test_inch_units_report_every_preference_that_reads_back_differently():

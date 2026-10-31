@@ -386,11 +386,11 @@ def set_units_inch(adapter: Any, *, decimals: int) -> None:
 
     Call before inserting dimensions. ``decimals`` (an ``int`` in 0..8) is the
     document's linear decimal places. Writes, in order, through the documented
-    ``IModelDocExtension`` scoped preferences: unit system IPS, length inches,
-    decimal (not fractional) display, ``decimals`` places, round half away from
-    zero, round-to-nearest-fraction off, decimal leading zeros suppressed
-    (``.250``), dimension and tolerance trailing zeros shown, and dual
-    dimensions off for every dimension scope that has the toggle.
+    ``IModelDocExtension`` scoped preferences: length inches, decimal (not
+    fractional) display, ``decimals`` places, round half away from zero,
+    round-to-nearest-fraction off, decimal leading zeros suppressed (``.250``),
+    dimension and tolerance trailing zeros shown, dual dimensions off for every
+    dimension scope that has the toggle, and finally unit system IPS.
 
     Raises ``ValueError`` for a bad ``decimals`` and ``RuntimeError`` without an
     active drawing, when an integer preference write returns anything but
@@ -411,10 +411,10 @@ def set_units_inch(adapter: Any, *, decimals: int) -> None:
         )
     ext = _sw_type_info.early_bound(draw.Extension, "IModelDocExtension")
     none = _SW_PREF_OPTION_NONE
-    # (name, preference, option, value) in write order, unit system first so the
-    # overrides that follow land inside IPS. Boolean values are toggles.
+    # (name, preference, option, value) in write order. Explicit preferences can
+    # switch the system to Custom; select IPS last, then read back every field.
+    # Boolean values are toggles.
     preferences: tuple[tuple[str, int, int, int | bool], ...] = (
-        ("swUnitSystem", _SW_PREF_UNIT_SYSTEM, none, _SW_UNIT_SYSTEM_IPS),
         ("swUnitsLinear", _SW_PREF_UNITS_LINEAR, none, _SW_LENGTH_INCHES),
         (
             "swUnitsLinearDecimalDisplay",
@@ -457,6 +457,7 @@ def set_units_inch(adapter: Any, *, decimals: int) -> None:
             ("swDetailingDualDimensions", _SW_TOGGLE_DUAL_DIMENSIONS, scope, False)
             for scope in _SW_DUAL_DIMENSION_SCOPES
         ),
+        ("swUnitSystem", _SW_PREF_UNIT_SYSTEM, none, _SW_UNIT_SYSTEM_IPS),
     )
     for name, preference, option, value in preferences:
         if type(value) is bool:
