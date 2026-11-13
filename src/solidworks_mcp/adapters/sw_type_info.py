@@ -403,7 +403,7 @@ def flag_methods(obj: Any, *interfaces: str) -> int:
         names.update(_interface_methods.get(iface, ()))
 
     flagged = 0
-    for name in names:
+    for name in sorted(names):
         try:
             obj._FlagAsMethod(name)
             flagged += 1
